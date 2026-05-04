@@ -1,6 +1,9 @@
 name: MCP Evals
 
 on:
+  # TEMPORARY: remove before merging — lets the workflow run on PR pushes for testing.
+  pull_request:
+    branches: [main]
   schedule:
     # Daily at 06:00 UTC
     - cron: '0 6 * * *'
