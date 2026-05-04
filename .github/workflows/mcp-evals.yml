@@ -126,15 +126,20 @@ jobs:
             file_put_contents($file, "<?php\n\nreturn ".var_export($bundles, true).";\n");
           '
 
-          # Symfony skips .env.local in APP_ENV=test (by design). Use .env.test.local
-          # so FeatureFlagCompilerPass sees MCP_SERVER=1 during cache:warmup.
-          touch .env.test.local
-          grep -q '^MCP_SERVER=' .env.test.local || echo "MCP_SERVER=1" >> .env.test.local
+          # Export MCP_SERVER=1 directly into the shell so PHP CLI inherits it via
+          # $_SERVER — bypasses dotenv entirely (dotenv skips .env.local in test env
+          # and the file-based workarounds proved unreliable across CI runner states).
+          export MCP_SERVER=1
 
           bin/console plugin:refresh --no-interaction
           bin/console plugin:install --activate SwagMcpMerchantAssistant --no-interaction
           bin/console cache:clear --no-interaction
           bin/console cache:warmup --no-interaction
+
+          # Verify McpServerController is public in the compiled container.
+          bin/console debug:container "Shopware\Core\Framework\Mcp\Controller\McpServerController" 2>&1 \
+            | grep -E 'Public|private|not found|class' | head -5 \
+            || echo "McpServerController not found in container — feature flag inactive during warmup"
 
           # Restart the daemonized symfony web server so PHP-FPM workers reload
           # the freshly compiled container (otherwise opcache serves stale bytecode).
