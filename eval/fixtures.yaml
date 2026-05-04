@@ -1,0 +1,178 @@
+# LLM Eval Fixtures
+# Each fixture: prompt sent to Claude with all tools available.
+# expected_tool: the single tool that should be selected first.
+# notes: explains why this case is interesting (disambiguation, chaining, etc.)
+
+fixtures:
+
+  # -------------------------------------------------------------------------
+  # Unambiguous — one clear tool
+  # -------------------------------------------------------------------------
+
+  - id: entity_schema_product
+    category: unambiguous
+    prompt: "What fields and associations does the product entity have?"
+    expected_tool: shopware-entity-schema
+    notes: Schema lookup, not a search.
+
+  - id: entity_search_orders
+    category: unambiguous
+    prompt: "List the last 10 orders in the shop."
+    expected_tool: shopware-entity-search
+    notes: Generic entity search, not merchant-order-summary (which is for a single known order).
+
+  - id: entity_read_by_id
+    category: unambiguous
+    prompt: "Fetch the product with ID 001cd6c6df7e42c38530de7b53dfcf25."
+    expected_tool: shopware-entity-read
+    notes: Explicit UUID → entity-read, not entity-search.
+
+  - id: system_config_read
+    category: unambiguous
+    prompt: "What is the current value of core.basicInformation?"
+    expected_tool: shopware-system-config-read
+
+  - id: system_config_write
+    category: unambiguous
+    prompt: "Change the shop name in core.basicInformation.shopName to 'My New Shop'."
+    expected_tool: shopware-system-config-write
+
+  - id: bestseller_report
+    category: unambiguous
+    prompt: "Show me the top 5 best-selling products in January 2025."
+    expected_tool: merchant-bestseller-report
+
+  - id: revenue_report_monthly
+    category: unambiguous
+    prompt: "Give me the monthly revenue breakdown for Q1 2025."
+    expected_tool: merchant-revenue-report
+
+  - id: customer_lookup_email
+    category: unambiguous
+    prompt: "Find the customer with email b.meyer@gmail.com."
+    expected_tool: merchant-customer-lookup
+
+  - id: order_summary
+    category: unambiguous
+    prompt: "Show me all details for order number 10000 — customer, items, payment, delivery."
+    expected_tool: merchant-order-summary
+    notes: Full order detail view → merchant-order-summary, not entity-search.
+
+  - id: checkout_methods
+    category: unambiguous
+    prompt: "What payment and shipping methods are available in the Storefront sales channel?"
+    expected_tool: merchant-checkout-methods
+
+  - id: product_create
+    category: unambiguous
+    prompt: "Create a new product called 'Blue T-Shirt' with product number SHIRT-001, priced at 29.99 EUR with 19% VAT."
+    expected_tool: merchant-product-create
+
+  - id: storefront_search
+    category: unambiguous
+    prompt: "Search for 'running shoes' in the Storefront sales channel and return the results with pricing."
+    expected_tool: merchant-storefront-search
+    notes: Sales channel aware product search → storefront-search, not entity-search.
+
+  - id: log_search
+    category: unambiguous
+    prompt: "Find all log entries that mention 'PaymentException'."
+    expected_tool: swag-dev-tools-log-search
+
+  - id: log_stream
+    category: unambiguous
+    prompt: "Show me the last 20 log lines from the application."
+    expected_tool: swag-dev-tools-log-stream
+
+  - id: theme_config_read
+    category: unambiguous
+    prompt: "What are the current theme settings for the Storefront sales channel?"
+    expected_tool: shopware-theme-config
+
+  - id: media_upload
+    category: unambiguous
+    prompt: "Upload this image as a product cover: https://example.com/shirt.jpg"
+    expected_tool: shopware-media-upload
+
+  - id: order_state
+    category: unambiguous
+    prompt: "Mark order 10000 as shipped."
+    expected_tool: shopware-order-state
+
+  # -------------------------------------------------------------------------
+  # Disambiguation — multiple tools could apply, only one is correct
+  # -------------------------------------------------------------------------
+
+  - id: disambig_count_vs_search
+    category: disambiguation
+    prompt: "How many products are currently in the shop?"
+    expected_tool: shopware-entity-aggregate
+    notes: >
+      Count = aggregate, NOT search. entity-search returns records;
+      entity-aggregate returns counts. A common mistake is to search with limit=1
+      and read _meta.total instead of using aggregate.
+
+  - id: disambig_log_vs_entity_log
+    category: disambiguation
+    prompt: "Find log entries about payment webhook failures."
+    expected_tool: swag-dev-tools-log-search
+    notes: >
+      File-based Monolog logs → swag-dev-tools-log-search.
+      NOT entity-search on the 'log_entry' table (that's a different store).
+      The log-search tool description explicitly calls this out.
+
+  - id: disambig_orders_list_vs_summary
+    category: disambiguation
+    prompt: "List all orders from the last 7 days."
+    expected_tool: shopware-entity-search
+    notes: >
+      Listing/filtering multiple orders → entity-search with a date filter.
+      merchant-order-summary is for a single known order with full detail.
+
+  - id: disambig_storefront_vs_entity_search
+    category: disambiguation
+    prompt: "Search for 'red shoes' with correct pricing for the Storefront sales channel."
+    expected_tool: merchant-storefront-search
+    notes: >
+      When pricing, tax, and sales channel visibility matter → storefront-search.
+      entity-search returns raw DAL data without storefront price calculation.
+
+  - id: disambig_read_vs_search
+    category: disambiguation
+    prompt: "Get the product with ID 001cd6c6df7e42c38530de7b53dfcf25 including its categories."
+    expected_tool: shopware-entity-read
+    notes: Have the UUID → entity-read (not entity-search).
+
+  - id: disambig_schema_before_search
+    category: disambiguation
+    prompt: "I want to filter orders by their billing address country. What field name should I use?"
+    expected_tool: shopware-entity-schema
+    notes: Field name lookup → schema, not search.
+
+  - id: disambig_aggregate_sum
+    category: disambiguation
+    prompt: "What is the total stock value across all products?"
+    expected_tool: shopware-entity-aggregate
+    notes: Sum aggregation, not a search returning all records.
+
+  # -------------------------------------------------------------------------
+  # Multi-step chains — verify the FIRST tool selected
+  # -------------------------------------------------------------------------
+
+  - id: chain_customer_then_order
+    category: chain
+    prompt: "Find the customer b.meyer@gmail.com and show me their most recent order."
+    expected_tool: merchant-customer-lookup
+    notes: Step 1 is customer lookup; step 2 would be order-summary.
+
+  - id: chain_search_then_cart
+    category: chain
+    prompt: "Search for product number SHIRT-001 and add one to a new cart in the Storefront sales channel."
+    expected_tool: shopware-entity-search
+    notes: Step 1 find product ID; step 2 cart-manage create + add.
+
+  - id: chain_schema_then_search
+    category: chain
+    prompt: "First check the product entity schema, then search for active products sorted by name."
+    expected_tool: shopware-entity-schema
+    notes: Explicitly ordered — schema first.

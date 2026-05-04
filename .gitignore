@@ -1,0 +1,8 @@
+.env
+results/*.json
+__pycache__/
+*.pyc
+.venv/
+
+# tool-history is tracked deliberately (audit trail of MCP descriptions)
+!tool-history/
