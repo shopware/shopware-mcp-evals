@@ -41,10 +41,6 @@ jobs:
       EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
       EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
       APP_URL: http://localhost:8000
-      # SwagMcpDevTools tools are gated by the MCP_SERVER feature flag.
-      # Without it the McpServerController stays private and /api/_mcp 500s.
-      MCP_SERVER: '1'
-      FEATURE_MCP_SERVER: '1'
 
     steps:
       - name: Checkout evals repo
@@ -130,10 +126,22 @@ jobs:
             file_put_contents($file, "<?php\n\nreturn ".var_export($bundles, true).";\n");
           '
 
+          # Symfony's dotenv loader can override shell env, so persist the MCP_SERVER
+          # feature flag to .env.local before warming the cache. Without it the
+          # FeatureFlagCompilerPass strips McpServerController and /api/_mcp 500s.
+          touch .env.local
+          grep -q '^MCP_SERVER=' .env.local || echo "MCP_SERVER=1" >> .env.local
+
           bin/console plugin:refresh --no-interaction
           bin/console plugin:install --activate SwagMcpMerchantAssistant --no-interaction
           bin/console cache:clear --no-interaction
           bin/console cache:warmup --no-interaction
+
+          # Restart the daemonized symfony web server so PHP-FPM workers reload
+          # the freshly compiled container (otherwise opcache serves stale bytecode).
+          symfony server:stop 2>/dev/null || true
+          SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
+            symfony server:start
 
       - name: Wait for Shopware after plugin install
         working-directory: shopware
