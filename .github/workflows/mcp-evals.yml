@@ -248,6 +248,30 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
+      - name: Dump symfony server logs on failure
+        if: failure()
+        run: |
+          LOG_DIR="$HOME/.config/symfony-cli/log"
+          if [ ! -d "$LOG_DIR" ]; then
+            echo "No symfony log dir at $LOG_DIR"
+            exit 0
+          fi
+          # tail (not follow) every log file under the symfony-cli log dir
+          for f in "$LOG_DIR"/*.log "$LOG_DIR"/*/*.log; do
+            [ -f "$f" ] || continue
+            echo "=== $f (last 200 lines) ==="
+            tail -n 200 "$f" || true
+          done
+          # Also dump Shopware's own var/log if present
+          SW_LOG="${{ github.workspace }}/shopware/var/log"
+          if [ -d "$SW_LOG" ]; then
+            for f in "$SW_LOG"/*.log; do
+              [ -f "$f" ] || continue
+              echo "=== $f (last 200 lines) ==="
+              tail -n 200 "$f" || true
+            done
+          fi
+
       - name: Stop Shopware
         if: always()
         working-directory: shopware

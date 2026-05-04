@@ -53,7 +53,10 @@ def fetch_tools(base_url: str, access_key: str, secret_key: str) -> list[dict]:
         },
         timeout=30,
     )
-    init.raise_for_status()
+    if not init.ok:
+        print(f"initialize failed: HTTP {init.status_code}", file=sys.stderr)
+        print(f"response body: {init.text[:2000]}", file=sys.stderr)
+        init.raise_for_status()
 
     session_id = init.headers.get("Mcp-Session-Id", "")
     if not session_id:
