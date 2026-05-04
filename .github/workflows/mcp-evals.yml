@@ -132,15 +132,23 @@ jobs:
           bin/console cache:warmup --no-interaction
 
       - name: Wait for Shopware after plugin install
+        working-directory: shopware
         run: |
           for i in $(seq 1 60); do
-            if curl -fsS -o /dev/null http://localhost:8000/api/_info/version 2>/dev/null; then
-              echo "Shopware ready"
+            STATUS=$(curl -o /tmp/sw-health.txt -w "%{http_code}" -sS http://localhost:8000/api/_info/version 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Shopware ready (attempt $i)"
               exit 0
             fi
+            echo "Attempt $i: HTTP $STATUS"
+            cat /tmp/sw-health.txt 2>/dev/null || true
             sleep 2
           done
           echo "::error::Shopware did not become ready after plugin install"
+          echo "--- symfony server:status ---"
+          symfony server:status 2>&1 || true
+          echo "--- symfony server log (last 100 lines) ---"
+          symfony server:log --lines=100 2>&1 || true
           exit 1
 
       - name: Create integration
