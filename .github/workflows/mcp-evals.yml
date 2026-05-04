@@ -41,6 +41,10 @@ jobs:
       EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
       EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
       APP_URL: http://localhost:8000
+      # SwagMcpDevTools tools are gated by the MCP_SERVER feature flag.
+      # Without it the McpServerController stays private and /api/_mcp 500s.
+      MCP_SERVER: '1'
+      FEATURE_MCP_SERVER: '1'
 
     steps:
       - name: Checkout evals repo
