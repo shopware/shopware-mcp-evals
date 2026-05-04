@@ -91,7 +91,7 @@ jobs:
         with:
           repository: shopware/SwagMcpDevTools
           token: ${{ secrets.PLUGINS_PAT }}
-          path: shopware/custom/plugins/SwagMcpDevTools
+          path: shopware/custom/bundles/SwagMcpDevTools
           fetch-depth: 1
 
       - name: Checkout SwagMcpMerchantAssistant (plugin)
@@ -107,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          composer config repositories.swag-mcp-dev-tools          path custom/plugins/SwagMcpDevTools
+          composer config repositories.swag-mcp-dev-tools          path custom/bundles/SwagMcpDevTools
           composer config repositories.swag-mcp-merchant-assistant path custom/plugins/SwagMcpMerchantAssistant
           composer require \
             swag/mcp-dev-tools:@dev \
@@ -129,6 +129,7 @@ jobs:
           bin/console plugin:refresh --no-interaction
           bin/console plugin:install --activate SwagMcpMerchantAssistant --no-interaction
           bin/console cache:clear --no-interaction
+          bin/console cache:warmup --no-interaction
 
       - name: Wait for Shopware after plugin install
         run: |
