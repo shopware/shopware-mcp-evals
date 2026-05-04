@@ -24,7 +24,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 concurrency:
   group: mcp-evals-${{ github.ref }}
@@ -87,25 +86,11 @@ jobs:
           env: test
           php-version: '8.3'
 
-      - name: Get token for SwagMcpDevTools
-        uses: shopware/octo-sts-action@main
-        id: sts-devtools
-        with:
-          scope: shopware/SwagMcpDevTools
-          identity: shopware-mcp-evals
-
-      - name: Get token for SwagMcpMerchantAssistant
-        uses: shopware/octo-sts-action@main
-        id: sts-merchant
-        with:
-          scope: shopware/SwagMcpMerchantAssistant
-          identity: shopware-mcp-evals
-
       - name: Checkout SwagMcpDevTools (bundle)
         uses: actions/checkout@v4
         with:
           repository: shopware/SwagMcpDevTools
-          token: ${{ steps.sts-devtools.outputs.token }}
+          token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/plugins/SwagMcpDevTools
           fetch-depth: 1
 
@@ -113,7 +98,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: shopware/SwagMcpMerchantAssistant
-          token: ${{ steps.sts-merchant.outputs.token }}
+          token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/plugins/SwagMcpMerchantAssistant
           fetch-depth: 1
 
