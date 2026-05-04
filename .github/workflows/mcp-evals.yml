@@ -119,9 +119,10 @@ jobs:
           mkdir -p config
           [ -f config/bundles.php ] || echo '<?php return [];' > config/bundles.php
           php -r '
+            require "vendor/autoload.php";
             $file = "config/bundles.php";
             $bundles = require $file;
-            $bundles[Swag\McpDevTools\SwagMcpDevToolsBundle::class] = ["all" => true];
+            $bundles[\Swag\McpDevTools\SwagMcpDevToolsBundle::class] = ["all" => true];
             file_put_contents($file, "<?php\n\nreturn ".var_export($bundles, true).";\n");
           '
 
