@@ -53,12 +53,26 @@ jobs:
           cache: pip
           cache-dependency-path: eval/requirements.txt
 
+      # actions/checkout can't shallow-fetch branches whose name contains a slash
+      # (e.g. poc/mcp-server) because it builds a wildcard refspec that git rejects.
+      # Resolving to a SHA first sidesteps the issue entirely.
+      - name: Resolve Shopware ref to SHA
+        id: sw-sha
+        run: |
+          SHA=$(git ls-remote "https://github.com/${{ env.SHOPWARE_REPO }}.git" \
+            "refs/heads/${{ env.SHOPWARE_REF }}" | awk '{print $1}')
+          if [ -z "$SHA" ]; then
+            # ref might already be a tag or SHA — use as-is
+            SHA="${{ env.SHOPWARE_REF }}"
+          fi
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
       # Installs PHP, MySQL, composer, clones shopware/shopware @ ref into ./shopware,
       # and runs system:install. Org-standard primitive used across Shopware repos.
       - name: Setup Shopware
         uses: shopware/setup-shopware@main
         with:
-          shopware-version: ${{ env.SHOPWARE_REF }}
+          shopware-version: ${{ steps.sw-sha.outputs.sha }}
           shopware-repository: ${{ env.SHOPWARE_REPO }}
           path: shopware
           install: true
