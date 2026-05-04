@@ -134,21 +134,22 @@ jobs:
       - name: Wait for Shopware after plugin install
         working-directory: shopware
         run: |
+          # 401 means the server is up and the auth middleware is working — that's
+          # what we need before the OAuth/integration step. 200 would require auth.
           for i in $(seq 1 60); do
-            STATUS=$(curl -o /tmp/sw-health.txt -w "%{http_code}" -sS http://localhost:8000/api/_info/version 2>/dev/null || echo "000")
-            if [ "$STATUS" = "200" ]; then
-              echo "Shopware ready (attempt $i)"
-              exit 0
-            fi
+            STATUS=$(curl -o /dev/null -w "%{http_code}" -sS --max-time 5 http://localhost:8000/api/_info/version 2>/dev/null || echo "000")
+            case "$STATUS" in
+              2*|401)
+                echo "Shopware ready (attempt $i, HTTP $STATUS)"
+                exit 0
+                ;;
+            esac
             echo "Attempt $i: HTTP $STATUS"
-            cat /tmp/sw-health.txt 2>/dev/null || true
             sleep 2
           done
           echo "::error::Shopware did not become ready after plugin install"
           echo "--- symfony server:status ---"
           symfony server:status 2>&1 || true
-          echo "--- symfony server log (last 100 lines) ---"
-          symfony server:log --lines=100 2>&1 || true
           exit 1
 
       - name: Create integration
