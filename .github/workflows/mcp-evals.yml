@@ -12,7 +12,7 @@ on:
       shopware_ref:
         description: 'Shopware ref to evaluate against (branch, tag, or sha)'
         required: false
-        default: 'poc/mcp-server'
+        default: 'poc/mcp-bundle'
       eval_provider:
         description: 'LLM provider for the eval (anthropic | openai)'
         required: false
@@ -37,7 +37,7 @@ jobs:
 
     env:
       SHOPWARE_REPO: shopware/shopware
-      SHOPWARE_REF: ${{ github.event.inputs.shopware_ref || 'poc/mcp-server' }}
+      SHOPWARE_REF: ${{ github.event.inputs.shopware_ref || 'poc/mcp-bundle' }}
       EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
       EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
       APP_URL: http://localhost:8000
@@ -54,7 +54,7 @@ jobs:
           cache-dependency-path: eval/requirements.txt
 
       # actions/checkout can't shallow-fetch branches whose name contains a slash
-      # (e.g. poc/mcp-server) because it builds a wildcard refspec that git rejects.
+      # (e.g. poc/mcp-bundle) because it builds a wildcard refspec that git rejects.
       # Resolving to a SHA via the API first sidesteps the issue entirely.
       - name: Resolve Shopware ref to SHA
         id: sw-sha
