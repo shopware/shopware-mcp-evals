@@ -107,29 +107,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Export MCP_SERVER=1 first — config/bundles.php on poc/mcp-bundle uses
+          # Feature::isActive('MCP_SERVER') to conditionally register Symfony\AI\McpBundle
+          # and SwagMcpDevToolsBundle. PHP CLI inherits this via $_SERVER, bypassing
+          # dotenv (which skips .env.local in APP_ENV=test).
+          export MCP_SERVER=1
+
           composer config repositories.swag-mcp-dev-tools          path custom/bundles/SwagMcpDevTools
           composer config repositories.swag-mcp-merchant-assistant path custom/plugins/SwagMcpMerchantAssistant
           composer require \
             swag/mcp-dev-tools:@dev \
             swag/mcp-merchant-assistant:@dev \
             --no-interaction --no-scripts
-
-          # Register the dev-tools bundle in config/bundles.php.
-          # The plugin (SwagMcpMerchantAssistant) is activated via plugin:install below.
-          mkdir -p config
-          [ -f config/bundles.php ] || echo '<?php return [];' > config/bundles.php
-          php -r '
-            require "vendor/autoload.php";
-            $file = "config/bundles.php";
-            $bundles = require $file;
-            $bundles[\Swag\McpDevTools\SwagMcpDevToolsBundle::class] = ["all" => true];
-            file_put_contents($file, "<?php\n\nreturn ".var_export($bundles, true).";\n");
-          '
-
-          # Export MCP_SERVER=1 directly into the shell so PHP CLI inherits it via
-          # $_SERVER — bypasses dotenv entirely (dotenv skips .env.local in test env
-          # and the file-based workarounds proved unreliable across CI runner states).
-          export MCP_SERVER=1
 
           bin/console plugin:refresh --no-interaction
           bin/console plugin:install --activate SwagMcpMerchantAssistant --no-interaction
