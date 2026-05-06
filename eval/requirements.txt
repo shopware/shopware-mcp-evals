@@ -1,0 +1,4 @@
+anthropic>=0.40.0
+openai>=1.50.0
+requests>=2.32.0
+pyyaml>=6.0
