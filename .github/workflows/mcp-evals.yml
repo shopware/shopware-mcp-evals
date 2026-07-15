@@ -22,13 +22,13 @@ on:
         required: false
         default: ''
       dev_tools_ref:
-        description: 'SwagMcpDevTools ref (branch, tag, or sha)'
+        description: 'SwagMcpDevTools ref (branch, tag, or sha). Needs the v2 tool-group/deferral code.'
         required: false
-        default: 'feat/mcp-tool-groups-deferral'
+        default: 'main'
       merchant_tools_ref:
-        description: 'SwagMcpMerchantTools ref (branch, tag, or sha)'
+        description: 'SwagMcpMerchantTools ref (branch, tag, or sha). Needs the v2 tool-group/deferral code.'
         required: false
-        default: 'feat/mcp-tool-groups-deferral'
+        default: 'main'
 
 permissions:
   contents: write
@@ -51,10 +51,10 @@ jobs:
 
     steps:
       - name: Checkout evals repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
@@ -135,19 +135,19 @@ jobs:
           php-version: '8.3'
 
       - name: Checkout SwagMcpDevTools (bundle)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: shopware/SwagMcpDevTools
-          ref: ${{ github.event.inputs.dev_tools_ref || 'feat/mcp-tool-groups-deferral' }}
+          ref: ${{ github.event.inputs.dev_tools_ref || 'main' }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/bundles/SwagMcpDevTools
           fetch-depth: 1
 
       - name: Checkout SwagMcpMerchantTools (plugin)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: shopware/SwagMcpMerchantTools
-          ref: ${{ github.event.inputs.merchant_tools_ref || 'feat/mcp-tool-groups-deferral' }}
+          ref: ${{ github.event.inputs.merchant_tools_ref || 'main' }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/plugins/SwagMcpMerchantTools
           fetch-depth: 1
@@ -301,21 +301,21 @@ jobs:
 
       - name: Upload eval results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: eval-results-${{ github.run_id }}
           path: results/
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 14
 
       - name: Upload tool-history snapshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: tool-history-${{ github.run_id }}
           path: tool-history/
           if-no-files-found: ignore
-          retention-days: 90
+          retention-days: 14
 
       - name: Dump symfony server logs on failure
         if: failure()
