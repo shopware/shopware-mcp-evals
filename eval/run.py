@@ -219,7 +219,6 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
                           system_prompt: str | None, max_steps: int) -> dict:
     prompt = fixture["prompt"]
     expected_tool = fixture["expected_tool"]
-    expected_is_meta = expected_tool in META_TOOLS
     tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
     turn_fn = anthropic_turn if provider == "anthropic" else openai_turn
 
@@ -265,7 +264,12 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
         tool_results = []
         catalog_changed = False
         for call in turn["tool_calls"]:
-            terminal = expected_is_meta or call["name"] not in META_TOOLS
+            # A call is terminal (graded) when it is the expected tool, or any
+            # non-meta tool. Meta navigation tools that are NOT the expected
+            # answer (e.g. shopware-toolsets-list on the way to toolset-enable)
+            # are executed and fed back so the model can proceed — listing
+            # toolsets before enabling one is correct discovery flow.
+            terminal = call["name"] == expected_tool or call["name"] not in META_TOOLS
             if terminal:
                 # Grade the selection; do NOT execute (no-mutation policy).
                 selected_tool = call["name"]

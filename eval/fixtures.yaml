@@ -237,7 +237,10 @@ fixtures:
     category: meta
     prompt: "Enable the analytics toolset so I can run sales reports in this session."
     expected_tool: shopware-toolset-enable
-    notes: Explicit enable request. toolsets-list first is also reasonable but the prompt names the toolset.
+    notes: >
+      Explicit enable request. The model may call shopware-toolsets-list first
+      to resolve the exact toolset name — that is valid discovery flow and the
+      runner treats it as a non-terminal step, grading the eventual enable call.
 
   - id: meta_tool_search
     category: meta
