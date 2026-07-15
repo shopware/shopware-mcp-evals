@@ -153,6 +153,26 @@ print(d.get('result',{}).get('nextCursor') or '')
 }
 
 # ---------------------------------------------------------------------------
+# Append a result record to RESULTS. All values pass through env vars — never
+# interpolated into the Python source — so escape sequences (e.g. "\/" in a
+# JSON-escaped URL) or quotes in a tool response can't corrupt the script or
+# trigger a Python SyntaxWarning.
+# Args: tool label status [extra_key extra_val]
+# ---------------------------------------------------------------------------
+record_result() {
+  RESULTS=$(echo "$RESULTS" | R_TOOL="$1" R_LABEL="$2" R_STATUS="$3" R_KEY="${4:-}" R_VAL="${5:-}" python3 -c "
+import json,sys,os
+r=json.load(sys.stdin)
+rec={'tool':os.environ['R_TOOL'],'label':os.environ['R_LABEL'],'status':os.environ['R_STATUS']}
+k=os.environ.get('R_KEY')
+if k:
+    rec[k]=os.environ.get('R_VAL','')
+r.append(rec)
+print(json.dumps(r))
+")
+}
+
+# ---------------------------------------------------------------------------
 # Assert: call a tool and check the response has no error and has content
 # ---------------------------------------------------------------------------
 assert_tool() {
@@ -167,30 +187,15 @@ assert_tool() {
   if [[ -n "$error" ]]; then
     log_fail "$label" "$error"
     FAIL=$((FAIL+1))
-    RESULTS=$(echo "$RESULTS" | python3 -c "
-import json,sys
-r=json.load(sys.stdin)
-r.append({'tool':'${tool}','label':'${label}','status':'fail','error':'''${error}'''})
-print(json.dumps(r))
-")
+    record_result "$tool" "$label" fail error "$error"
   elif [[ "$content" == "0" ]]; then
     log_fail "$label" "empty content in response"
     FAIL=$((FAIL+1))
-    RESULTS=$(echo "$RESULTS" | python3 -c "
-import json,sys
-r=json.load(sys.stdin)
-r.append({'tool':'${tool}','label':'${label}','status':'fail','error':'empty content'})
-print(json.dumps(r))
-")
+    record_result "$tool" "$label" fail error "empty content"
   else
     log_pass "$label"
     PASS=$((PASS+1))
-    RESULTS=$(echo "$RESULTS" | python3 -c "
-import json,sys
-r=json.load(sys.stdin)
-r.append({'tool':'${tool}','label':'${label}','status':'pass','preview':'''${text}'''})
-print(json.dumps(r))
-")
+    record_result "$tool" "$label" pass preview "$text"
   fi
 }
 
