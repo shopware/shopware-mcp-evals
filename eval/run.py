@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 """
-Shopware MCP LLM Eval Runner
+Shopware MCP LLM Eval Runner (MCP Server v2: dynamic tool discovery)
 
-Always runs each fixture twice per provider:
-  1. Without system prompt (bare tool descriptions only)
-  2. With system prompt (MCP server instructions + all context prompts)
+Runs each fixture in up to two modes per provider:
 
-Then prints a side-by-side comparison showing the effect of the system prompt.
+  baseline   All toolsets enabled, the full catalogue passed flat to the LLM
+             in a single request. Grades the FIRST tool call. This is the v1
+             behaviour and the comparison reference.
+
+  discovery  Only the default advertised surface is passed. The runner
+             executes discovery meta-tool calls (shopware-tool-search,
+             shopware-toolsets-list, shopware-toolset-enable) for real
+             against the server and feeds results back in an agentic loop.
+             The first NON-meta tool call is terminal and graded against
+             expected_tool. Meta steps are free but counted.
+
+The comparison answers: does dynamic discovery make it harder for the model
+to find the right tool, which discovery path does it take, and what does
+discovery cost in tokens and steps?
 
 Usage:
-    python eval/run.py                                  # Anthropic, default model
+    python eval/run.py                                  # both modes, Anthropic
     python eval/run.py --provider openai --model gpt-4o
+    python eval/run.py --modes discovery --max-steps 8
     python eval/run.py --category disambiguation
     python eval/run.py --id disambig_count_vs_search
 """
@@ -23,113 +35,25 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import requests
 import yaml
 
-BASE = Path(__file__).parent.parent
+from mcp_client import (
+    BASE,
+    META_TOOLS,
+    SW_ACCESS_KEY,
+    SW_BASE_URL,
+    SW_SECRET_ACCESS_KEY,
+    enable_all_toolsets,
+    mcp_call,
+    mcp_call_error,
+    mcp_fetch_system_prompt,
+    mcp_init,
+    mcp_result_text,
+    mcp_tools_list_all,
+)
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-def load_env():
-    env_file = BASE / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
-
-load_env()
-
-SW_BASE_URL = os.environ.get("SW_BASE_URL", "http://localhost:8000")
-SW_ACCESS_KEY = os.environ.get("SW_ACCESS_KEY", "")
-SW_SECRET_ACCESS_KEY = os.environ.get("SW_SECRET_ACCESS_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-
-AUTH_HEADERS = {
-    "sw-access-key": SW_ACCESS_KEY,
-    "sw-secret-access-key": SW_SECRET_ACCESS_KEY,
-    "Content-Type": "application/json",
-}
-
-# ---------------------------------------------------------------------------
-# MCP helpers
-# ---------------------------------------------------------------------------
-
-def mcp_init() -> tuple[str, str]:
-    """Initialize MCP session. Returns (session_id, server_instructions)."""
-    resp = requests.post(
-        f"{SW_BASE_URL}/api/_mcp",
-        headers=AUTH_HEADERS,
-        json={
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "mcp-eval", "version": "1.0"},
-            },
-            "id": 1,
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    session_id = resp.headers.get("Mcp-Session-Id", "")
-    if not session_id:
-        raise RuntimeError("No Mcp-Session-Id in response headers")
-    instructions = resp.json().get("result", {}).get("instructions", "")
-    return session_id, instructions
-
-
-def mcp_tools_list(session_id: str) -> list[dict]:
-    headers = {**AUTH_HEADERS, "Mcp-Session-Id": session_id}
-    resp = requests.post(
-        f"{SW_BASE_URL}/api/_mcp",
-        headers=headers,
-        json={"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 2},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json().get("result", {}).get("tools", [])
-
-
-def mcp_fetch_system_prompt(session_id: str, server_instructions: str) -> str:
-    """Fetch all MCP context prompts and combine with server instructions."""
-    headers = {**AUTH_HEADERS, "Mcp-Session-Id": session_id}
-
-    # List available prompts
-    resp = requests.post(
-        f"{SW_BASE_URL}/api/_mcp",
-        headers=headers,
-        json={"jsonrpc": "2.0", "method": "prompts/list", "params": {}, "id": 3},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    prompt_names = [p["name"] for p in resp.json().get("result", {}).get("prompts", [])]
-
-    parts = []
-    if server_instructions:
-        parts.append(server_instructions.strip())
-
-    for name in prompt_names:
-        resp = requests.post(
-            f"{SW_BASE_URL}/api/_mcp",
-            headers=headers,
-            json={"jsonrpc": "2.0", "method": "prompts/get", "params": {"name": name}, "id": 4},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        messages = resp.json().get("result", {}).get("messages", [])
-        for msg in messages:
-            content = msg.get("content", {})
-            text = content.get("text", "") if isinstance(content, dict) else str(content)
-            if text.strip():
-                parts.append(text.strip())
-
-    return "\n\n---\n\n".join(parts)
 
 # ---------------------------------------------------------------------------
 # Provider adapters
@@ -160,70 +84,279 @@ def tools_for_openai(mcp_tools: list[dict]) -> list[dict]:
     ]
 
 
-def run_fixture_anthropic(client, tools: list[dict], fixture: dict, model: str, system_prompt: str | None) -> dict:
-    prompt = fixture["prompt"]
-    kwargs = dict(model=model, max_tokens=1024, tools=tools, messages=[{"role": "user", "content": prompt}])
+def anthropic_turn(client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
+    """One assistant turn. Returns {tool_calls, assistant_message, tool_result_builder,
+    stop_reason, tokens}."""
+    kwargs = dict(model=model, max_tokens=1024, tools=tools, messages=messages)
     if system_prompt:
         kwargs["system"] = system_prompt
-
-    t0 = time.time()
     response = client.messages.create(**kwargs)
-    latency = round(time.time() - t0, 2)
 
-    selected_tool, selected_input = None, {}
-    for block in response.content:
-        if block.type == "tool_use":
-            selected_tool = block.name
-            selected_input = block.input
-            break
-
+    tool_calls = [
+        {"id": block.id, "name": block.name, "input": block.input}
+        for block in response.content
+        if block.type == "tool_use"
+    ]
     return {
-        "id": fixture["id"],
-        "category": fixture.get("category", ""),
-        "prompt": prompt,
-        "expected_tool": fixture["expected_tool"],
-        "selected_tool": selected_tool,
-        "selected_input": selected_input,
-        "passed": selected_tool == fixture["expected_tool"],
-        "latency_s": latency,
+        "tool_calls": tool_calls,
+        "assistant_message": {"role": "assistant", "content": response.content},
+        "tool_result_builder": lambda results: {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": call_id, "content": text}
+                for call_id, text in results
+            ],
+        },
         "stop_reason": response.stop_reason,
-        "notes": fixture.get("notes", ""),
+        "tokens": {
+            "input": response.usage.input_tokens,
+            "output": response.usage.output_tokens,
+        },
     }
 
 
-def run_fixture_openai(client, tools: list[dict], fixture: dict, model: str, system_prompt: str | None) -> dict:
-    prompt = fixture["prompt"]
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-
-    t0 = time.time()
+def openai_turn(client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
+    """One assistant turn (system prompt must already be in messages)."""
     response = client.chat.completions.create(
         model=model, max_tokens=1024, tools=tools, tool_choice="auto", messages=messages,
     )
+    msg = response.choices[0].message
+
+    tool_calls = []
+    for call in msg.tool_calls or []:
+        try:
+            call_input = json.loads(call.function.arguments)
+        except json.JSONDecodeError:
+            call_input = {}
+        tool_calls.append({"id": call.id, "name": call.function.name, "input": call_input})
+
+    assistant_message = {"role": "assistant", "content": msg.content}
+    if msg.tool_calls:
+        assistant_message["tool_calls"] = [
+            {
+                "id": c.id,
+                "type": "function",
+                "function": {"name": c.function.name, "arguments": c.function.arguments},
+            }
+            for c in msg.tool_calls
+        ]
+    return {
+        "tool_calls": tool_calls,
+        "assistant_message": assistant_message,
+        "tool_result_builder": lambda results: [
+            {"role": "tool", "tool_call_id": call_id, "content": text}
+            for call_id, text in results
+        ],
+        "stop_reason": response.choices[0].finish_reason,
+        "tokens": {
+            "input": response.usage.prompt_tokens,
+            "output": response.usage.completion_tokens,
+        },
+    }
+
+# ---------------------------------------------------------------------------
+# Baseline mode — single shot against the full catalogue (v1 behaviour)
+# ---------------------------------------------------------------------------
+
+def run_fixture_baseline(provider: str, client, tools: list[dict], fixture: dict,
+                         model: str, system_prompt: str | None) -> dict:
+    prompt = fixture["prompt"]
+    messages = []
+    if provider == "openai" and system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    turn_fn = anthropic_turn if provider == "anthropic" else openai_turn
+    t0 = time.time()
+    turn = turn_fn(client, model, system_prompt if provider == "anthropic" else None, messages, tools)
     latency = round(time.time() - t0, 2)
 
     selected_tool, selected_input = None, {}
-    msg = response.choices[0].message
-    if msg.tool_calls:
-        call = msg.tool_calls[0]
-        selected_tool = call.function.name
-        try:
-            selected_input = json.loads(call.function.arguments)
-        except json.JSONDecodeError:
-            selected_input = {}
+    if turn["tool_calls"]:
+        selected_tool = turn["tool_calls"][0]["name"]
+        selected_input = turn["tool_calls"][0]["input"]
 
     return {
         "id": fixture["id"],
         "category": fixture.get("category", ""),
+        "mode": "baseline",
         "prompt": prompt,
         "expected_tool": fixture["expected_tool"],
         "selected_tool": selected_tool,
         "selected_input": selected_input,
         "passed": selected_tool == fixture["expected_tool"],
+        "steps": 1,
         "latency_s": latency,
-        "stop_reason": response.choices[0].finish_reason,
+        "stop_reason": turn["stop_reason"],
+        "tokens": turn["tokens"],
+        "notes": fixture.get("notes", ""),
+    }
+
+# ---------------------------------------------------------------------------
+# Discovery mode — agentic loop from the default surface
+# ---------------------------------------------------------------------------
+
+def _search_result_tools(result_text: str) -> list[dict]:
+    """Extract the tool definitions returned inline by shopware-tool-search,
+    in MCP tool shape ({name, description, inputSchema})."""
+    try:
+        payload = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    tools = []
+    for r in payload.get("data", []):
+        tool = r.get("tool") if isinstance(r, dict) else None
+        if isinstance(tool, dict) and tool.get("name"):
+            tools.append(tool)
+    return tools
+
+
+def _search_contains_expected(result_text: str, expected_tool: str) -> bool:
+    return any(t.get("name") == expected_tool for t in _search_result_tools(result_text))
+
+
+def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
+                          system_prompt: str | None, max_steps: int) -> dict:
+    prompt = fixture["prompt"]
+    expected_tool = fixture["expected_tool"]
+    expected_is_meta = expected_tool in META_TOOLS
+    tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
+    turn_fn = anthropic_turn if provider == "anthropic" else openai_turn
+
+    # Fresh session per fixture: toolset enablement persists per Mcp-Session-Id
+    # and would leak across fixtures on a shared session.
+    session_id, _ = mcp_init()
+
+    # Callable-tool catalogue by name. Starts as the advertised default surface.
+    # Grows when a toolset is enabled (re-fetched tools/list) OR when
+    # shopware-tool-search returns a tool inline — a search-surfaced tool is
+    # directly callable because the allowlist, not advertising, is the call
+    # boundary. This mirrors how a real MCP client exposes discovered tools.
+    catalog = {t["name"]: t for t in mcp_tools_list_all(session_id)}
+    tools = tools_fn(list(catalog.values()))
+
+    messages = []
+    if provider == "openai" and system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    selected_tool, selected_input = None, {}
+    fail_reason = None
+    meta_calls = []
+    search_hit = None
+    enabled_toolsets = []
+    tokens = {"input": 0, "output": 0}
+    steps = 0
+    t0 = time.time()
+
+    while steps < max_steps:
+        steps += 1
+        turn = turn_fn(client, model, system_prompt if provider == "anthropic" else None,
+                       messages, tools)
+        tokens["input"] += turn["tokens"]["input"]
+        tokens["output"] += turn["tokens"]["output"]
+
+        if not turn["tool_calls"]:
+            fail_reason = "no_tool_call"
+            break
+
+        messages.append(turn["assistant_message"])
+
+        tool_results = []
+        catalog_changed = False
+        for call in turn["tool_calls"]:
+            terminal = expected_is_meta or call["name"] not in META_TOOLS
+            if terminal:
+                # Grade the selection; do NOT execute (no-mutation policy).
+                selected_tool = call["name"]
+                selected_input = call["input"]
+                break
+
+            # Execute discovery meta-tools for real and feed results back.
+            resp = mcp_call(session_id, call["name"], call["input"])
+            err = mcp_call_error(resp)
+            result_text = mcp_result_text(resp) or (f"Error: {err}" if err else "")
+            tool_results.append((call["id"], result_text))
+            meta_calls.append({
+                "tool": call["name"],
+                "input": call["input"],
+                "result_preview": result_text[:300],
+            })
+            if call["name"] == "shopware-tool-search":
+                found = _search_result_tools(result_text)
+                hit = any(t.get("name") == expected_tool for t in found)
+                search_hit = hit if search_hit is None else (search_hit or hit)
+                # Make search-surfaced tools callable next turn.
+                for t in found:
+                    if t["name"] not in catalog:
+                        catalog[t["name"]] = t
+                        catalog_changed = True
+            if call["name"] == "shopware-toolset-enable" and not err:
+                enabled_toolsets.append(call["input"].get("toolset", ""))
+                # Simulate tools/list_changed: re-fetch the advertised surface.
+                for t in mcp_tools_list_all(session_id):
+                    if t["name"] not in catalog:
+                        catalog[t["name"]] = t
+                        catalog_changed = True
+
+        if selected_tool is not None:
+            break
+
+        if catalog_changed:
+            tools = tools_fn(list(catalog.values()))
+
+        builder_output = turn["tool_result_builder"](tool_results)
+        if isinstance(builder_output, list):
+            messages.extend(builder_output)
+        else:
+            messages.append(builder_output)
+    else:
+        fail_reason = "step_cap"
+
+    latency = round(time.time() - t0, 2)
+
+    meta_names = {m["tool"] for m in meta_calls}
+    used_search = "shopware-tool-search" in meta_names
+    used_toolsets = bool(meta_names & {"shopware-toolsets-list", "shopware-toolset-enable"})
+    if selected_tool is None:
+        discovery_path = "none"
+    elif used_search and used_toolsets:
+        discovery_path = "mixed"
+    elif used_search:
+        discovery_path = "search"
+    elif used_toolsets:
+        discovery_path = "toolsets"
+    else:
+        discovery_path = "direct"
+
+    passed = selected_tool == expected_tool
+    if not passed and fail_reason is None:
+        fail_reason = "wrong_tool"
+
+    expected_toolset = fixture.get("expected_toolset")
+    enabled_correct_toolset = None
+    if expected_toolset and enabled_toolsets:
+        enabled_correct_toolset = expected_toolset in enabled_toolsets
+
+    return {
+        "id": fixture["id"],
+        "category": fixture.get("category", ""),
+        "mode": "discovery",
+        "prompt": prompt,
+        "expected_tool": expected_tool,
+        "expected_toolset": expected_toolset,
+        "selected_tool": selected_tool,
+        "selected_input": selected_input,
+        "passed": passed,
+        "fail_reason": None if passed else fail_reason,
+        "steps": steps,
+        "meta_calls": meta_calls,
+        "discovery_path": discovery_path,
+        "search_hit": search_hit,
+        "enabled_toolsets": enabled_toolsets,
+        "enabled_correct_toolset": enabled_correct_toolset,
+        "latency_s": latency,
+        "tokens": tokens,
         "notes": fixture.get("notes", ""),
     }
 
@@ -244,11 +377,16 @@ def pct_color(pct: int) -> str:
     return GREEN if pct >= 80 else (YELLOW if pct >= 50 else RED)
 
 
+def scored(results: list[dict]) -> list[dict]:
+    """Results that count toward pass/fail — skipped fixtures are excluded."""
+    return [r for r in results if not r.get("skipped")]
+
+
 def score(results: list[dict]) -> dict:
-    """Return per-tool and per-category pass counts."""
+    """Return per-tool and per-category pass counts (skipped fixtures excluded)."""
     tools: dict[str, dict] = {}
     cats: dict[str, dict] = {}
-    for r in results:
+    for r in scored(results):
         t = r["expected_tool"]
         c = r["category"]
         tools.setdefault(t, {"pass": 0, "total": 0})
@@ -261,64 +399,149 @@ def score(results: list[dict]) -> dict:
     return {"tools": tools, "cats": cats}
 
 
-def print_comparison(without: list[dict], with_prompt: list[dict]):
-    s_without = score(without)
-    s_with = score(with_prompt)
+def total_tokens(results: list[dict]) -> dict:
+    agg = {"input": 0, "output": 0}
+    for r in results:
+        t = r.get("tokens") or {}
+        agg["input"] += t.get("input", 0)
+        agg["output"] += t.get("output", 0)
+    return agg
 
-    total = len(without)
-    p_without = sum(1 for r in without if r["passed"])
-    p_with = sum(1 for r in with_prompt if r["passed"])
+
+def print_comparison(baseline: list[dict], discovery: list[dict]):
+    s_base = score(baseline)
+    s_disc = score(discovery)
+
+    total = len(scored(baseline))
+    p_base = sum(1 for r in scored(baseline) if r["passed"])
+    p_disc = sum(1 for r in scored(discovery) if r["passed"])
+    skipped = sum(1 for r in discovery if r.get("skipped"))
 
     print(f"\n{BOLD}{'='*78}{RESET}")
-    print(f"{BOLD}Comparison: without system prompt  vs  with system prompt{RESET}")
+    print(f"{BOLD}Comparison: baseline (full catalogue)  vs  discovery (default surface){RESET}")
     print(f"{'='*78}")
-    print(f"  Overall: {GREEN}{p_without}/{total}{RESET} without  →  {GREEN}{p_with}/{total}{RESET} with  "
-          f"(Δ {_delta(p_without, p_with, total)})")
+    skip_note = f"  ({skipped} skipped — tool not on this instance)" if skipped else ""
+    print(f"  Overall: {GREEN}{p_base}/{total}{RESET} baseline  →  {GREEN}{p_disc}/{total}{RESET} discovery  "
+          f"(Δ {_delta(p_base, p_disc, total)}){DIM}{skip_note}{RESET}")
 
     # By category
-    all_cats = sorted(set(s_without["cats"]) | set(s_with["cats"]))
+    all_cats = sorted(set(s_base["cats"]) | set(s_disc["cats"]))
     print(f"\n{BOLD}By category:{RESET}")
-    print(f"  {'Category':<22} {'Without':>12}  {'With':>12}  {'Effect'}")
+    print(f"  {'Category':<22} {'Baseline':>12}  {'Discovery':>12}  {'Effect'}")
     print(f"  {'-'*22} {'-'*12}  {'-'*12}  {'-'*20}")
     for cat in all_cats:
-        cw = s_without["cats"].get(cat, {"pass": 0, "total": 0})
-        cp = s_with["cats"].get(cat, {"pass": 0, "total": 0})
-        pct_w = round(100 * cw["pass"] / cw["total"]) if cw["total"] else 0
-        pct_p = round(100 * cp["pass"] / cp["total"]) if cp["total"] else 0
-        print(f"  {cat:<22} {pct_color(pct_w)}{cw['pass']}/{cw['total']} ({pct_w}%){RESET:>4}  "
-              f"{pct_color(pct_p)}{cp['pass']}/{cp['total']} ({pct_p}%){RESET:>4}  "
-              f"{_arrow(pct_w, pct_p)}")
+        cb = s_base["cats"].get(cat, {"pass": 0, "total": 0})
+        cd = s_disc["cats"].get(cat, {"pass": 0, "total": 0})
+        pct_b = round(100 * cb["pass"] / cb["total"]) if cb["total"] else 0
+        pct_d = round(100 * cd["pass"] / cd["total"]) if cd["total"] else 0
+        print(f"  {cat:<22} {pct_color(pct_b)}{cb['pass']}/{cb['total']} ({pct_b}%){RESET:>4}  "
+              f"{pct_color(pct_d)}{cd['pass']}/{cd['total']} ({pct_d}%){RESET:>4}  "
+              f"{_arrow(pct_b, pct_d)}")
 
     # Per tool
-    all_tools = sorted(set(s_without["tools"]) | set(s_with["tools"]))
+    all_tools = sorted(set(s_base["tools"]) | set(s_disc["tools"]))
     print(f"\n{BOLD}Per-tool accuracy:{RESET}")
-    print(f"  {'Tool':<42} {'Without':>10}  {'With':>10}  {'Effect'}")
+    print(f"  {'Tool':<42} {'Baseline':>10}  {'Discovery':>10}  {'Effect'}")
     print(f"  {'-'*42} {'-'*10}  {'-'*10}  {'-'*20}")
     for tool in all_tools:
-        tw = s_without["tools"].get(tool, {"pass": 0, "total": 0})
-        tp = s_with["tools"].get(tool, {"pass": 0, "total": 0})
-        pct_w = round(100 * tw["pass"] / tw["total"]) if tw["total"] else 0
-        pct_p = round(100 * tp["pass"] / tp["total"]) if tp["total"] else 0
-        flag = f"  {RED}⚠{RESET}" if pct_p < 80 else ""
-        print(f"  {tool:<42} {pct_color(pct_w)}{tw['pass']}/{tw['total']} ({pct_w}%){RESET:>4}  "
-              f"{pct_color(pct_p)}{tp['pass']}/{tp['total']} ({pct_p}%){RESET:>4}  "
-              f"{_arrow(pct_w, pct_p)}{flag}")
+        tb = s_base["tools"].get(tool, {"pass": 0, "total": 0})
+        td = s_disc["tools"].get(tool, {"pass": 0, "total": 0})
+        pct_b = round(100 * tb["pass"] / tb["total"]) if tb["total"] else 0
+        pct_d = round(100 * td["pass"] / td["total"]) if td["total"] else 0
+        flag = f"  {RED}⚠{RESET}" if pct_d < 80 else ""
+        print(f"  {tool:<42} {pct_color(pct_b)}{tb['pass']}/{tb['total']} ({pct_b}%){RESET:>4}  "
+              f"{pct_color(pct_d)}{td['pass']}/{td['total']} ({pct_d}%){RESET:>4}  "
+              f"{_arrow(pct_b, pct_d)}{flag}")
 
-    # Failed cases (with prompt run — that's the "final" result)
-    failed = [r for r in with_prompt if not r["passed"]]
+
+def discovery_summary(discovery: list[dict]) -> dict:
+    graded = scored(discovery)
+    n = len(graded)
+    passed = sum(1 for r in graded if r["passed"])
+    steps = [r["steps"] for r in graded]
+    paths: dict[str, int] = {}
+    for r in graded:
+        paths[r["discovery_path"]] = paths.get(r["discovery_path"], 0) + 1
+    search_used = [r for r in graded if r["search_hit"] is not None]
+    search_hits = sum(1 for r in search_used if r["search_hit"])
+    toolset_graded = [r for r in graded if r["enabled_correct_toolset"] is not None]
+    toolset_correct = sum(1 for r in toolset_graded if r["enabled_correct_toolset"])
+    return {
+        "fixtures": n,
+        "skipped": sum(1 for r in discovery if r.get("skipped")),
+        "passed": passed,
+        "avg_steps": round(sum(steps) / n, 2) if n else 0,
+        "max_steps_hit": sum(1 for r in graded if r.get("fail_reason") == "step_cap"),
+        "path_distribution": paths,
+        "search_used": len(search_used),
+        "search_hit_rate": round(search_hits / len(search_used), 2) if search_used else None,
+        "toolset_enable_graded": len(toolset_graded),
+        "toolset_enable_correct": toolset_correct,
+        "tokens": total_tokens(graded),
+    }
+
+
+def print_discovery_block(discovery: list[dict], baseline: list[dict] | None):
+    s = discovery_summary(discovery)
+    print(f"\n{BOLD}Discovery behaviour:{RESET}")
+    print(f"  Avg steps to tool selection: {s['avg_steps']}  "
+          f"(step-cap hit: {s['max_steps_hit']}/{s['fixtures']})")
+    dist = "  ".join(f"{k}={v}" for k, v in sorted(s["path_distribution"].items()))
+    print(f"  Discovery path: {dist}")
+    if s["search_hit_rate"] is not None:
+        print(f"  tool-search used in {s['search_used']} fixtures; "
+              f"expected tool in results: {round(s['search_hit_rate']*100)}%")
+    if s["toolset_enable_graded"]:
+        print(f"  toolset-enable graded in {s['toolset_enable_graded']} fixtures; "
+              f"correct toolset: {s['toolset_enable_correct']}/{s['toolset_enable_graded']}")
+    d_tok = s["tokens"]
+    print(f"  Tokens (discovery): {d_tok['input']:,} in / {d_tok['output']:,} out")
+    if baseline:
+        b_tok = total_tokens(baseline)
+        print(f"  Tokens (baseline):  {b_tok['input']:,} in / {b_tok['output']:,} out")
+        if b_tok["input"]:
+            ratio = round(d_tok["input"] / b_tok["input"], 2)
+            print(f"  Input-token ratio discovery/baseline: {ratio}x")
+
+    skipped = [r for r in discovery if r.get("skipped")]
+    if skipped:
+        names = ", ".join(r["id"] for r in skipped)
+        print(f"  {DIM}Skipped (expected tool not registered on this instance): {names}{RESET}")
+
+    failed = [r for r in scored(discovery) if not r["passed"]]
     if failed:
-        print(f"\n{BOLD}{RED}Still failing WITH system prompt:{RESET}")
+        print(f"\n{BOLD}{RED}Failing in discovery mode:{RESET}")
         for r in failed:
-            wo = next((x for x in without if x["id"] == r["id"]), None)
-            wo_status = f"{GREEN}passed{RESET}" if wo and wo["passed"] else f"{RED}failed{RESET}"
-            print(f"\n  [{r['id']}] {r['category']}  (without prompt: {wo_status})")
+            print(f"\n  [{r['id']}] {r['category']}  ({r.get('fail_reason')})")
             print(f"  {DIM}Prompt:{RESET}   {r['prompt'][:80]}")
             print(f"  {DIM}Expected:{RESET} {GREEN}{r['expected_tool']}{RESET}")
             print(f"  {DIM}Got:{RESET}      {RED}{r['selected_tool']}{RESET}")
+            if r["meta_calls"]:
+                trail = " → ".join(
+                    f"{m['tool']}({json.dumps(m['input'], ensure_ascii=False)[:40]})"
+                    for m in r["meta_calls"]
+                )
+                print(f"  {DIM}Trail:{RESET}    {trail}")
             if r.get("notes"):
                 print(f"  {DIM}Notes:{RESET}    {r['notes'][:120]}")
-
     print(f"\n{'='*78}\n")
+
+
+def print_single_mode(results: list[dict], mode: str):
+    s = score(results)
+    total = len(scored(results))
+    passed = sum(1 for r in scored(results) if r["passed"])
+    skipped = sum(1 for r in results if r.get("skipped"))
+    print(f"\n{BOLD}{'='*78}{RESET}")
+    print(f"{BOLD}Results: {mode} mode{RESET}")
+    print(f"{'='*78}")
+    pct = round(100 * passed / total) if total else 0
+    skip_note = f"  ({skipped} skipped — tool not on this instance)" if skipped else ""
+    print(f"  Overall: {pct_color(pct)}{passed}/{total} ({pct}%){RESET}{DIM}{skip_note}{RESET}")
+    print(f"\n{BOLD}By category:{RESET}")
+    for cat, c in sorted(s["cats"].items()):
+        pct = round(100 * c["pass"] / c["total"]) if c["total"] else 0
+        print(f"  {cat:<22} {pct_color(pct)}{c['pass']}/{c['total']} ({pct}%){RESET}")
 
 
 def _delta(before: int, after: int, total: int) -> str:
@@ -348,25 +571,47 @@ PROVIDER_DEFAULTS = {
 }
 
 
-def run_pass(run_fixture_fn, client, tools, fixtures, model, system_prompt, label):
-    """Run all fixtures for one pass (with or without system prompt)."""
+def skipped_result(fixture: dict, mode: str) -> dict:
+    """A fixture whose expected tool is not registered on this instance is
+    skipped, not failed — e.g. a dev-tools fixture on an instance without the
+    SwagMcpDevTools bundle. Skipped fixtures are excluded from scoring."""
+    return {
+        "id": fixture["id"], "category": fixture.get("category", ""),
+        "mode": mode, "prompt": fixture["prompt"],
+        "expected_tool": fixture["expected_tool"], "selected_tool": None,
+        "passed": False, "skipped": True,
+        "skip_reason": "expected tool not registered on this instance",
+    }
+
+
+def run_baseline_pass(provider, client, fixtures, model, system_prompt, available_tools):
+    print(f"\n{BOLD}── Mode: baseline (full catalogue, single shot) ──{RESET}\n")
+    session_id, _ = mcp_init()
+    enable_all_toolsets(session_id)
+    mcp_tools = mcp_tools_list_all(session_id)
+    tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
+    tools = tools_fn(mcp_tools)
+    print(f"  Catalogue: {len(mcp_tools)} tools (all toolsets enabled)\n")
+
     results = []
-    sp_label = "with system prompt" if system_prompt else "without system prompt"
-    print(f"\n{BOLD}── Pass: {sp_label} ──{RESET}\n")
     for i, fixture in enumerate(fixtures, 1):
-        fid = fixture["id"]
-        cat = fixture.get("category", "")
-        print(f"  [{i:02d}/{len(fixtures):02d}] {fid} ({cat})")
+        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category','')})")
         print(f"           {DIM}{fixture['prompt'][:65]}...{RESET}")
+        if fixture["expected_tool"] not in available_tools:
+            results.append(skipped_result(fixture, "baseline"))
+            print(f"           {YELLOW}SKIP{RESET}  {fixture['expected_tool']} not registered")
+            print()
+            continue
         try:
-            result = run_fixture_fn(client, tools, fixture, model=model, system_prompt=system_prompt)
+            result = run_fixture_baseline(provider, client, tools, fixture, model, system_prompt)
             results.append(result)
             status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
             print(f"           {status}  selected={result['selected_tool'] or '(none)'}  {result['latency_s']}s")
         except Exception as e:
             print(f"           {RED}ERROR{RESET}: {e}")
             results.append({
-                "id": fid, "category": cat, "prompt": fixture["prompt"],
+                "id": fixture["id"], "category": fixture.get("category", ""),
+                "mode": "baseline", "prompt": fixture["prompt"],
                 "expected_tool": fixture["expected_tool"], "selected_tool": None,
                 "passed": False, "error": str(e),
             })
@@ -374,10 +619,49 @@ def run_pass(run_fixture_fn, client, tools, fixtures, model, system_prompt, labe
     return results
 
 
+def run_discovery_pass(provider, client, fixtures, model, system_prompt, default_max_steps, available_tools):
+    print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
+    results = []
+    for i, fixture in enumerate(fixtures, 1):
+        max_steps = int(fixture.get("max_steps", default_max_steps))
+        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category','')})")
+        print(f"           {DIM}{fixture['prompt'][:65]}...{RESET}")
+        if fixture["expected_tool"] not in available_tools:
+            results.append(skipped_result(fixture, "discovery"))
+            print(f"           {YELLOW}SKIP{RESET}  {fixture['expected_tool']} not registered")
+            print()
+            continue
+        try:
+            result = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps)
+            results.append(result)
+            status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
+            path = result["discovery_path"]
+            print(f"           {status}  selected={result['selected_tool'] or '(none)'}  "
+                  f"steps={result['steps']}  path={path}  {result['latency_s']}s")
+        except Exception as e:
+            print(f"           {RED}ERROR{RESET}: {e}")
+            results.append({
+                "id": fixture["id"], "category": fixture.get("category", ""),
+                "mode": "discovery", "prompt": fixture["prompt"],
+                "expected_tool": fixture["expected_tool"], "selected_tool": None,
+                "passed": False, "error": str(e), "steps": 0, "meta_calls": [],
+                "discovery_path": "none", "search_hit": None,
+                "enabled_correct_toolset": None,
+            })
+        print()
+    return results
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner")
+    parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner (v2 discovery)")
     parser.add_argument("--provider", choices=["anthropic", "openai"], default=os.environ.get("EVAL_PROVIDER", "anthropic"))
     parser.add_argument("--model", default=None)
+    parser.add_argument("--modes", default="baseline,discovery",
+                        help="Comma-separated: baseline, discovery (default: both)")
+    parser.add_argument("--max-steps", type=int, default=6,
+                        help="Max assistant turns in discovery mode (per-fixture max_steps overrides)")
+    parser.add_argument("--no-system-prompt", action="store_true",
+                        help="Skip the MCP server system prompt (ad-hoc debugging)")
     parser.add_argument("--category", help="Run only fixtures of this category")
     parser.add_argument("--id", help="Run only this fixture ID")
     parser.add_argument("--output", help="Path to save JSON report")
@@ -385,6 +669,11 @@ def main():
 
     provider = args.provider
     model = args.model or os.environ.get("EVAL_MODEL") or PROVIDER_DEFAULTS[provider]
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    for m in modes:
+        if m not in ("baseline", "discovery"):
+            print(f"ERROR: unknown mode '{m}'", file=sys.stderr)
+            sys.exit(1)
 
     required = [("SW_BASE_URL", SW_BASE_URL), ("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
     required.append(("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) if provider == "anthropic" else ("OPENAI_API_KEY", OPENAI_API_KEY))
@@ -396,13 +685,9 @@ def main():
     if provider == "anthropic":
         import anthropic as _anthropic
         client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        run_fixture_fn = run_fixture_anthropic
-        tools_fn = tools_for_anthropic
     else:
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
-        run_fixture_fn = run_fixture_openai
-        tools_fn = tools_for_openai
 
     fixtures_path = Path(__file__).parent / "fixtures.yaml"
     all_fixtures = yaml.safe_load(fixtures_path.read_text())["fixtures"]
@@ -414,31 +699,49 @@ def main():
         print("No fixtures matched the filter.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"{BOLD}Shopware MCP LLM Eval{RESET}")
+    print(f"{BOLD}Shopware MCP LLM Eval (v2 discovery){RESET}")
     print(f"Server:   {SW_BASE_URL}")
     print(f"Provider: {provider}")
     print(f"Model:    {model}")
-    print(f"Fixtures: {len(all_fixtures)}  ×2 passes (without / with system prompt)")
+    print(f"Modes:    {', '.join(modes)}")
+    print(f"Fixtures: {len(all_fixtures)}")
 
-    print("\nInitializing MCP session...")
+    print("\nInitializing MCP session for system prompt...")
     session_id, server_instructions = mcp_init()
-    print(f"Session:  {session_id}")
+    if args.no_system_prompt:
+        system_prompt = None
+        print("System prompt: disabled (--no-system-prompt)")
+    else:
+        system_prompt = mcp_fetch_system_prompt(session_id, server_instructions)
+        prompt_names = [line for line in system_prompt.split("\n") if line.startswith("# ")]
+        print(f"System prompt: {len(prompt_names)} sections, {len(system_prompt)} chars")
 
-    print("Fetching tools...")
-    mcp_tools = mcp_tools_list(session_id)
-    tools = tools_fn(mcp_tools)
-    print(f"Tools:    {len(mcp_tools)}")
+    # The full catalogue on this instance. Fixtures whose expected tool is not
+    # registered (e.g. a plugin bundle that isn't installed) are skipped, not
+    # scored as failures.
+    probe_sid, _ = mcp_init()
+    enable_all_toolsets(probe_sid)
+    available_tools = {t["name"] for t in mcp_tools_list_all(probe_sid)}
+    absent = sorted({f["expected_tool"] for f in all_fixtures} - available_tools)
+    if absent:
+        print(f"Catalogue: {len(available_tools)} tools; will skip fixtures for absent: {', '.join(absent)}")
 
-    print("Fetching system prompt (MCP context prompts)...")
-    system_prompt = mcp_fetch_system_prompt(session_id, server_instructions)
-    prompt_names = [line for line in system_prompt.split("\n") if line.startswith("# ")]
-    print(f"Prompts:  {len(prompt_names)} sections, {len(system_prompt)} chars")
+    results_baseline = None
+    results_discovery = None
+    if "baseline" in modes:
+        results_baseline = run_baseline_pass(provider, client, all_fixtures, model, system_prompt, available_tools)
+    if "discovery" in modes:
+        results_discovery = run_discovery_pass(provider, client, all_fixtures, model,
+                                               system_prompt, args.max_steps, available_tools)
 
-    # Run both passes
-    results_without = run_pass(run_fixture_fn, client, tools, all_fixtures, model, None, "without")
-    results_with = run_pass(run_fixture_fn, client, tools, all_fixtures, model, system_prompt, "with")
-
-    print_comparison(results_without, results_with)
+    if results_baseline and results_discovery:
+        print_comparison(results_baseline, results_discovery)
+        print_discovery_block(results_discovery, results_baseline)
+    elif results_discovery:
+        print_single_mode(results_discovery, "discovery")
+        print_discovery_block(results_discovery, None)
+    elif results_baseline:
+        print_single_mode(results_baseline, "baseline")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     output_path = args.output or str(BASE / "results" / f"eval-{provider}-{ts}.json")
@@ -448,22 +751,35 @@ def main():
         "server": SW_BASE_URL,
         "provider": provider,
         "model": model,
+        "modes": {},
         "fixtures": len(all_fixtures),
-        "without_prompt": {
-            "passed": sum(1 for r in results_without if r["passed"]),
-            "failed": sum(1 for r in results_without if not r["passed"]),
-            "results": results_without,
-        },
-        "with_prompt": {
-            "passed": sum(1 for r in results_with if r["passed"]),
-            "failed": sum(1 for r in results_with if not r["passed"]),
-            "results": results_with,
-        },
+        "system_prompt": not args.no_system_prompt,
+        "max_steps": args.max_steps,
     }
+    if results_baseline is not None:
+        report["modes"]["baseline"] = {
+            "passed": sum(1 for r in scored(results_baseline) if r["passed"]),
+            "failed": sum(1 for r in scored(results_baseline) if not r["passed"]),
+            "skipped": sum(1 for r in results_baseline if r.get("skipped")),
+            "tokens": total_tokens(scored(results_baseline)),
+            "results": results_baseline,
+        }
+    if results_discovery is not None:
+        report["modes"]["discovery"] = {
+            "passed": sum(1 for r in scored(results_discovery) if r["passed"]),
+            "failed": sum(1 for r in scored(results_discovery) if not r["passed"]),
+            "skipped": sum(1 for r in results_discovery if r.get("skipped")),
+            "results": results_discovery,
+        }
+        report["discovery_summary"] = discovery_summary(results_discovery)
     Path(output_path).write_text(json.dumps(report, indent=2))
     print(f"Report saved: {output_path}")
 
-    all_passed = all(r["passed"] for r in results_with)
+    # Gate: discovery mode is the v2 target behaviour; baseline is the
+    # comparison reference and stays advisory when both run. Skipped fixtures
+    # (tool absent on this instance) do not gate.
+    gating = results_discovery if results_discovery is not None else results_baseline
+    all_passed = all(r["passed"] for r in scored(gating))
     sys.exit(0 if all_passed else 1)
 
 

@@ -1,11 +1,24 @@
 # shopware-mcp-evals
 
-Test suite for the Shopware MCP server, run against a live instance.
-Two layers: **functional** (shell, no LLM, all mutating tools dryRun-safe) and
-**LLM eval** (Python, prompts → tool selection accuracy).
+Test suite for the Shopware MCP server (**MCP Server v2**: dynamic tool
+discovery), run against a live instance. Two layers: **functional** (shell,
+no LLM, all mutating tools dryRun-safe) and **LLM eval** (Python, prompts →
+tool selection accuracy).
 
 See `README.md` for the full picture and motivation; this file is the short
 brief for coding agents.
+
+## v2 invariants (read before touching the runners)
+
+- A fresh session advertises only **non-deferred** tools. Deferred tools hide
+  until their toolset is enabled — but stay directly callable if allowlisted.
+  The allowlist is the call boundary; advertising is not.
+- `tools/list` is cursor-paginated — always walk `nextCursor` (see
+  `mcp_tools_list_all`), never assume one page.
+- The three meta-tools (`META_TOOLS` in `eval/mcp_client.py`):
+  `shopware-tool-search`, `shopware-toolsets-list`, `shopware-toolset-enable`.
+- `shopware-toolset-enable` persists per `Mcp-Session-Id`. Discovery-mode eval
+  therefore opens a **fresh session per fixture** so enablement can't leak.
 
 ## Setup
 
@@ -18,62 +31,78 @@ pip install -r eval/requirements.txt
 ## Running tests
 
 ```bash
-# Layer 1 — functional (all tools, dryRun safe)
+# Layer 1 — functional: v2 discovery mechanics + per-tool dryRun-safe calls
 bash functional/run.sh
 bash functional/run.sh --skip-media-upload
+bash functional/run.sh --skip-dev-tools
 
-# Layer 2 — LLM eval. Each fixture is run twice: once without the MCP
-# server's system prompt, once with it. The output is a side-by-side
-# comparison showing the system prompt's effect on tool selection.
-.venv/bin/python3 eval/run.py                          # Anthropic (default)
+# Layer 2 — LLM eval. Each fixture runs in baseline mode (full catalogue,
+# single shot) and discovery mode (default surface + agentic meta-tool loop).
+.venv/bin/python3 eval/run.py                          # both modes, Anthropic
 .venv/bin/python3 eval/run.py --provider openai        # OpenAI
+.venv/bin/python3 eval/run.py --modes discovery --max-steps 8
 .venv/bin/python3 eval/run.py --category disambiguation
 .venv/bin/python3 eval/run.py --id disambig_count_vs_search
+.venv/bin/python3 eval/run.py --no-system-prompt       # ad-hoc, skip system prompt
 .venv/bin/python3 eval/run.py --output results/x.json  # custom report path
+
+# Snapshot the full catalogue for drift detection
+.venv/bin/python3 eval/snapshot_tools.py --output tool-history/latest.json
 ```
 
-Exit code of `eval/run.py` is 0 only when every fixture passes the
-with-system-prompt run.
+Exit code of `eval/run.py` is 0 only when every fixture passes the **discovery**
+run (baseline is advisory when both modes run).
 
 ## Auth
 
 The MCP server at `SW_BASE_URL/api/_mcp` uses integration access keys — NOT OAuth.
 Headers: `sw-access-key` + `sw-secret-access-key`.
-The session must be initialized with `method: initialize` before any other call.
+The session must be initialized with `method: initialize` before any other call;
+the `Mcp-Session-Id` response header scopes toolset enablement.
 
 ## Key files
 
 | File | Purpose |
 |---|---|
-| `functional/run.sh` | Calls every tool with a minimal valid payload, checks response structure |
+| `eval/mcp_client.py` | Shared MCP HTTP helpers: session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_CORE_TOOLS` |
+| `functional/run.sh` | v2 discovery mechanics + per-tool minimal-payload calls |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
-| `eval/run.py` | Runs fixtures through an LLM, scores tool selection accuracy |
+| `eval/run.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |
+| `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
+| `shopware.sha` | Pinned Shopware commit for reproducible CI |
+| `tool-history/latest.json` | Committed drift baseline |
 | `.env` | Local credentials (not committed) |
 | `results/` | JSON reports from each run (not committed) |
 
 ## Scope
 
-Tools under test: all `shopware-entity-*`, `shopware-system-config-*`, `shopware-order-state`, `shopware-media-upload`, `shopware-theme-config`, `merchant-*`, `swag-dev-tools-log-*`.
-Example bundle tools (McpHelloWorld) are excluded.
+Tools under test: the 3 discovery meta-tools, all `shopware-entity-*`,
+`shopware-system-config-*`, `shopware-order-state`, `shopware-media-upload`,
+`shopware-theme-config`, `merchant-*`, and `swag-dev-tools-*`.
+Example bundle tools (McpHelloWorld) and the Store API MCP endpoint are excluded.
 
-## Improving tool descriptions
+## Improving tool descriptions / groups
 
 When an LLM eval fixture fails:
-1. Note the failing prompt and which wrong tool was selected.
-2. Edit the `#[McpTool(description: '...')]` PHP attribute in the Shopware repo.
+1. Note the failing prompt, the mode, and (discovery mode) the meta-call trail.
+2. Edit the `#[McpTool(description: '...')]`, `#[McpToolGroup('...')]`, or
+   `meta: ['deferred' => ...]` PHP attribute in the Shopware repo.
 3. Restart the Shopware server.
 4. Re-run `eval/run.py --id <fixture-id>` to verify improvement.
 
 ## Adding fixtures
 
 Add entries to `eval/fixtures.yaml`. Required fields: `id`, `category`,
-`prompt`, `expected_tool`. Optional: `notes` (why this case is interesting).
-Categories:
+`prompt`, `expected_tool`. Optional: `expected_toolset` (for deferred tools —
+grades whether the right toolset was enabled), `max_steps` (per-fixture
+discovery step cap), `notes`. Categories:
 
 - `unambiguous` — one obvious tool; sanity check
 - `disambiguation` — two or more plausible tools; description must disambiguate
-- `chain` — multi-step intent; first tool call must be the right entry point
+- `chain` — multi-step intent; first (non-meta) tool call must be the right entry point
+- `meta` — the discovery meta-tool itself is the correct answer (first call of any kind graded)
+- `discovery` — deep-deferred tool with no default-surface sibling; probes search/toolset ranking
 
-After editing a tool's PHP `#[McpTool(description: ...)]` in the Shopware repo,
-restart the Shopware server before re-running the eval — the tool list is read
-at MCP `initialize` time.
+After editing a tool's PHP attributes in the Shopware repo, restart the
+Shopware server before re-running — the tool list is read at MCP `initialize`
+time.

@@ -21,6 +21,14 @@ on:
         description: 'Override default model for the chosen provider'
         required: false
         default: ''
+      dev_tools_ref:
+        description: 'SwagMcpDevTools ref (branch, tag, or sha)'
+        required: false
+        default: 'feat/mcp-tool-groups-deferral'
+      merchant_tools_ref:
+        description: 'SwagMcpMerchantTools ref (branch, tag, or sha)'
+        required: false
+        default: 'feat/mcp-tool-groups-deferral'
 
 permissions:
   contents: write
@@ -130,16 +138,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: shopware/SwagMcpDevTools
+          ref: ${{ github.event.inputs.dev_tools_ref || 'feat/mcp-tool-groups-deferral' }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/bundles/SwagMcpDevTools
           fetch-depth: 1
 
-      - name: Checkout SwagMcpMerchantAssistant (plugin)
+      - name: Checkout SwagMcpMerchantTools (plugin)
         uses: actions/checkout@v4
         with:
-          repository: shopware/SwagMcpMerchantAssistant
+          repository: shopware/SwagMcpMerchantTools
+          ref: ${{ github.event.inputs.merchant_tools_ref || 'feat/mcp-tool-groups-deferral' }}
           token: ${{ secrets.PLUGINS_PAT }}
-          path: shopware/custom/plugins/SwagMcpMerchantAssistant
+          path: shopware/custom/plugins/SwagMcpMerchantTools
           fetch-depth: 1
 
       - name: Wire up MCP bundle + plugin
@@ -147,28 +157,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Export MCP_SERVER=1 first. config/bundles.php uses Feature::isActive('MCP_SERVER')
-          # to conditionally register Symfony\AI\McpBundle and SwagMcpDevToolsBundle.
-          # PHP CLI inherits this via $_SERVER, bypassing dotenv (which skips .env.local
-          # in APP_ENV=test).
-          export MCP_SERVER=1
+          # MCP Server v2: the MCP_SERVER feature flag was removed upstream —
+          # the server is always enabled, no env gating needed.
 
-          composer config repositories.swag-mcp-dev-tools          path custom/bundles/SwagMcpDevTools
-          composer config repositories.swag-mcp-merchant-assistant path custom/plugins/SwagMcpMerchantAssistant
+          composer config repositories.swag-mcp-dev-tools       path custom/bundles/SwagMcpDevTools
+          composer config repositories.swag-mcp-merchant-tools  path custom/plugins/SwagMcpMerchantTools
           composer require \
             swag/mcp-dev-tools:@dev \
-            swag/mcp-merchant-assistant:@dev \
+            swag/mcp-merchant-tools:@dev \
             --no-interaction --no-scripts
 
           bin/console plugin:refresh --no-interaction
-          bin/console plugin:install --activate SwagMcpMerchantAssistant --no-interaction
+          bin/console plugin:install --activate SwagMcpMerchantTools --no-interaction
           bin/console cache:clear --no-interaction
           bin/console cache:warmup --no-interaction
 
-          # Verify McpServerController is public in the compiled container.
+          # The MCP controller must exist in the compiled container — hard fail if not.
           bin/console debug:container "Shopware\Core\Framework\Mcp\Controller\McpServerController" 2>&1 \
-            | grep -E 'Public|private|not found|class' | head -5 \
-            || echo "McpServerController not found in container; feature flag inactive during warmup"
+            | grep -E 'Public|private|class' | head -5 \
+            || { echo "::error::McpServerController not found in compiled container"; exit 1; }
 
           # Restart the daemonized symfony web server so PHP-FPM workers reload
           # the freshly compiled container (otherwise opcache serves stale bytecode).
