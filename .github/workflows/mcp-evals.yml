@@ -24,11 +24,11 @@ on:
       dev_tools_ref:
         description: 'SwagMcpDevTools ref (branch, tag, or sha). Needs the v2 tool-group/deferral code.'
         required: false
-        default: 'main'
+        default: 'feat/mcp-tool-groups-deferral'
       merchant_tools_ref:
         description: 'SwagMcpMerchantTools ref (branch, tag, or sha). Needs the v2 tool-group/deferral code.'
         required: false
-        default: 'main'
+        default: 'feat/mcp-tool-groups-deferral'
 
 permissions:
   contents: write
@@ -138,7 +138,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: shopware/SwagMcpDevTools
-          ref: ${{ github.event.inputs.dev_tools_ref || 'main' }}
+          ref: ${{ github.event.inputs.dev_tools_ref || 'feat/mcp-tool-groups-deferral' }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/bundles/SwagMcpDevTools
           fetch-depth: 1
@@ -147,7 +147,7 @@ jobs:
         uses: actions/checkout@v5
         with:
           repository: shopware/SwagMcpMerchantTools
-          ref: ${{ github.event.inputs.merchant_tools_ref || 'main' }}
+          ref: ${{ github.event.inputs.merchant_tools_ref || 'feat/mcp-tool-groups-deferral' }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/plugins/SwagMcpMerchantTools
           fetch-depth: 1
