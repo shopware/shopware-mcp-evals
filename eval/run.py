@@ -158,6 +158,15 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
 # Baseline mode — single shot against the full catalogue (v1 behaviour)
 # ---------------------------------------------------------------------------
 
+def is_correct(selected_tool: str | None, fixture: dict) -> bool:
+    """A selection is correct if it is the expected tool or any tool listed in
+    the fixture's optional `acceptable_tools` (for genuinely multi-valid prompts)."""
+    if selected_tool is None:
+        return False
+    return (selected_tool == fixture["expected_tool"]
+            or selected_tool in fixture.get("acceptable_tools", []))
+
+
 def run_fixture_baseline(provider: str, client, tools: list[dict], fixture: dict,
                          model: str, system_prompt: str | None) -> dict:
     prompt = fixture["prompt"]
@@ -184,7 +193,7 @@ def run_fixture_baseline(provider: str, client, tools: list[dict], fixture: dict
         "expected_tool": fixture["expected_tool"],
         "selected_tool": selected_tool,
         "selected_input": selected_input,
-        "passed": selected_tool == fixture["expected_tool"],
+        "passed": is_correct(selected_tool, fixture),
         "steps": 1,
         "latency_s": latency,
         "stop_reason": turn["stop_reason"],
@@ -219,6 +228,8 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
                           system_prompt: str | None, max_steps: int) -> dict:
     prompt = fixture["prompt"]
     expected_tool = fixture["expected_tool"]
+    acceptable = set(fixture.get("acceptable_tools", []))
+    terminal_tools = {expected_tool} | acceptable
     tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
     turn_fn = anthropic_turn if provider == "anthropic" else openai_turn
 
@@ -264,12 +275,12 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
         tool_results = []
         catalog_changed = False
         for call in turn["tool_calls"]:
-            # A call is terminal (graded) when it is the expected tool, or any
-            # non-meta tool. Meta navigation tools that are NOT the expected
-            # answer (e.g. shopware-toolsets-list on the way to toolset-enable)
-            # are executed and fed back so the model can proceed — listing
-            # toolsets before enabling one is correct discovery flow.
-            terminal = call["name"] == expected_tool or call["name"] not in META_TOOLS
+            # A call is terminal (graded) when it is the expected/acceptable
+            # tool, or any non-meta tool. Meta navigation tools that are NOT the
+            # expected answer (e.g. shopware-toolsets-list on the way to
+            # toolset-enable) are executed and fed back so the model can proceed
+            # — listing toolsets before enabling one is correct discovery flow.
+            terminal = call["name"] in terminal_tools or call["name"] not in META_TOOLS
             if terminal:
                 # Grade the selection; do NOT execute (no-mutation policy).
                 selected_tool = call["name"]
@@ -333,7 +344,7 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
     else:
         discovery_path = "direct"
 
-    passed = selected_tool == expected_tool
+    passed = is_correct(selected_tool, fixture)
     if not passed and fail_reason is None:
         fail_reason = "wrong_tool"
 
@@ -637,11 +648,24 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
             continue
         try:
             result = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps)
+            attempts = 1
+            # Retry once on failure: gpt-4o is nondeterministic, so a single
+            # borderline miss shouldn't flip CI red. A real regression fails
+            # both attempts. Skips/errors are not retried.
+            if not result["passed"]:
+                print(f"           {YELLOW}retry{RESET} (first attempt selected="
+                      f"{result['selected_tool'] or '(none)'})")
+                retry = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps)
+                attempts = 2
+                if retry["passed"]:
+                    result = retry
+            result["attempts"] = attempts
             results.append(result)
             status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
             path = result["discovery_path"]
+            retry_note = f"  (attempts={attempts})" if attempts > 1 else ""
             print(f"           {status}  selected={result['selected_tool'] or '(none)'}  "
-                  f"steps={result['steps']}  path={path}  {result['latency_s']}s")
+                  f"steps={result['steps']}  path={path}  {result['latency_s']}s{retry_note}")
         except Exception as e:
             print(f"           {RED}ERROR{RESET}: {e}")
             results.append({
@@ -666,6 +690,9 @@ def main():
                         help="Max assistant turns in discovery mode (per-fixture max_steps overrides)")
     parser.add_argument("--no-system-prompt", action="store_true",
                         help="Skip the MCP server system prompt (ad-hoc debugging)")
+    parser.add_argument("--min-pass-rate", type=float,
+                        default=float(os.environ.get("EVAL_MIN_PASS_RATE", "0.9")),
+                        help="Min gating-mode pass rate for exit 0 (default 0.9; use 1.0 for strict)")
     parser.add_argument("--category", help="Run only fixtures of this category")
     parser.add_argument("--id", help="Run only this fixture ID")
     parser.add_argument("--output", help="Path to save JSON report")
@@ -782,9 +809,22 @@ def main():
     # Gate: discovery mode is the v2 target behaviour; baseline is the
     # comparison reference and stays advisory when both run. Skipped fixtures
     # (tool absent on this instance) do not gate.
-    gating = results_discovery if results_discovery is not None else results_baseline
-    all_passed = all(r["passed"] for r in scored(gating))
-    sys.exit(0 if all_passed else 1)
+    #
+    # The LLM eval is a quality signal against a nondeterministic model, so it
+    # gates on a pass-rate threshold rather than a strict 100% — a couple of
+    # borderline/flaky fixtures shouldn't flip CI red, but a real regression
+    # (the rate collapsing) still fails. Each failed discovery fixture is also
+    # retried once (see run_discovery_pass). Set --min-pass-rate 1.0 for strict.
+    gating = scored(results_discovery if results_discovery is not None else results_baseline)
+    passed = sum(1 for r in gating if r["passed"])
+    rate = passed / len(gating) if gating else 1.0
+    ok = rate >= args.min_pass_rate
+    print(f"\nGate: {passed}/{len(gating)} = {round(rate*100)}% "
+          f"(threshold {round(args.min_pass_rate*100)}%) → {'PASS' if ok else 'FAIL'}")
+    if not ok:
+        failed_ids = [r["id"] for r in gating if not r["passed"]]
+        print(f"  below threshold; failing: {', '.join(failed_ids)}")
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

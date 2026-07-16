@@ -204,6 +204,21 @@ jobs:
           symfony server:status 2>&1 || true
           exit 1
 
+      # A fresh system:install has no products/customers/orders, so the
+      # data-dependent functional assertions (entity-read/upsert, order-state,
+      # order-summary, customer-lookup, cart flows) would SKIP. Seed demo data
+      # so they actually run. Non-fatal: if seeding fails, those assertions just
+      # skip as before — it must never turn the whole eval red.
+      - name: Seed demo data
+        working-directory: shopware
+        continue-on-error: true
+        run: |
+          bin/console framework:demodata \
+            --products=20 --categories=5 --manufacturers=5 \
+            --customers=10 --orders=10 --media=10 \
+            --no-interaction || echo "::warning::framework:demodata failed; data-dependent assertions will skip"
+          bin/console dal:refresh:index --no-interaction || true
+
       - name: Create integration
         id: integration
         run: |

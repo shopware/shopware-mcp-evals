@@ -1,10 +1,17 @@
 # LLM Eval Fixtures
-# Each fixture: prompt sent to the LLM.
+#
+# Only the three discovery meta-tools (shopware-tool-search, -toolsets-list,
+# -toolset-enable) are advertised by default; every other tool is deferred and
+# must be discovered and enabled. So each non-meta fixture belongs to a toolset.
+#
+# Fields:
 #   expected_tool:    the tool that should be selected (first non-meta tool call
 #                     in discovery mode; first call overall in baseline mode).
-#   expected_toolset: (optional) the toolset containing expected_tool when it is
-#                     deferred — grades whether toolset-enable picked the right
-#                     group in discovery mode. Omit for default-advertised tools.
+#   acceptable_tools: (optional) list of additional tool names that also count
+#                     as correct — for genuinely multi-valid prompts.
+#   expected_toolset: (optional) the toolset containing expected_tool — grades
+#                     whether toolset-enable picked the right group in discovery
+#                     mode. Only the `meta` fixtures omit it (they need no toolset).
 #   max_steps:        (optional) per-fixture override of the discovery step cap.
 #   notes:            why this case is interesting (disambiguation, chaining...)
 #
@@ -129,6 +136,59 @@ fixtures:
     expected_tool: shopware-order-state
     expected_toolset: order
 
+  - id: entity_upsert_stock
+    category: unambiguous
+    prompt: "Set the stock of product 001cd6c6df7e42c38530de7b53dfcf25 to 50."
+    expected_tool: shopware-entity-upsert
+    expected_toolset: entity
+    notes: Writing an entity field → upsert (with dryRun preview), not search/read.
+
+  - id: cart_manage_add
+    category: unambiguous
+    prompt: "Add 2 units of product 001cd6c6df7e42c38530de7b53dfcf25 to cart token abc123 in the Storefront sales channel."
+    expected_tool: merchant-cart-manage
+    expected_toolset: merchant-sales
+    notes: Modifying an existing cart's line items → cart-manage (action=add).
+
+  - id: cart_checkout_place
+    category: unambiguous
+    prompt: "Place the order for cart token abc123 for customer 11111111111111111111111111111111 in the Storefront sales channel."
+    expected_tool: merchant-cart-checkout
+    expected_toolset: merchant-sales
+    notes: Converting a cart into an order → cart-checkout (dryRun preview first).
+
+  - id: list_extensions
+    category: unambiguous
+    prompt: "Which plugins and apps are installed on this shop?"
+    expected_tool: swag-dev-tools-list-extensions
+    expected_toolset: dev-extensions
+
+  - id: list_skills
+    category: unambiguous
+    prompt: "What Shopware agent skills are available in this project?"
+    expected_tool: swag-dev-tools-list-skills
+    expected_toolset: dev-skills
+
+  - id: load_skill
+    category: unambiguous
+    prompt: "Show me the full contents of the agent skill named 'phpunit-unit-test-writing'."
+    expected_tool: swag-dev-tools-load-skill
+    expected_toolset: dev-skills
+    notes: Reading one skill's body by name → load-skill, not list-skills.
+
+  - id: notifications_poll
+    category: unambiguous
+    prompt: "Are there any background operation notifications, e.g. from the product indexer or an import?"
+    expected_tool: swag-dev-tools-notifications
+    expected_toolset: dev-extensions
+
+  - id: scaffold_plugin
+    category: unambiguous
+    prompt: "Scaffold the code for a new Shopware plugin skeleton."
+    expected_tool: swag-dev-tools-scaffold
+    expected_toolset: dev-scaffold
+    notes: Code generation for extensions → scaffold, not list-extensions.
+
   # -------------------------------------------------------------------------
   # Disambiguation — multiple tools could apply, only one is correct
   # -------------------------------------------------------------------------
@@ -194,6 +254,38 @@ fixtures:
     expected_toolset: entity
     notes: Sum aggregation, not a search returning all records.
 
+  - id: disambig_aggregate_avg
+    category: disambiguation
+    prompt: "What is the average price of a product in the catalog?"
+    expected_tool: shopware-entity-aggregate
+    expected_toolset: entity
+    notes: Average aggregation, not entity-search. Paraphrase of the count/sum cases.
+
+  - id: disambig_log_stream_vs_search
+    category: disambiguation
+    prompt: "Show me the most recent PHP errors and stack traces from the application log."
+    expected_tool: swag-dev-tools-log-stream
+    expected_toolset: dev-logs
+    notes: >
+      "Most recent … errors" → log-stream (tail recent entries by level).
+      log-search is for a substring query, not a recency tail.
+
+  - id: disambig_customer_by_number
+    category: disambiguation
+    prompt: "Pull up the account and order history for customer number 10042."
+    expected_tool: merchant-customer-lookup
+    expected_toolset: merchant-analytics
+    notes: >
+      Customer lookup by customerNumber (not email) — paraphrase testing that
+      the description covers all three lookup keys. Not entity-search.
+
+  - id: disambig_media_import_phrasing
+    category: disambiguation
+    prompt: "Import the picture at https://example.com/banner.png into my media library."
+    expected_tool: shopware-media-upload
+    expected_toolset: media
+    notes: '"Import a picture from a URL" paraphrase of upload — still media-upload.'
+
   # -------------------------------------------------------------------------
   # Multi-step chains — verify the FIRST (non-meta) tool selected
   # -------------------------------------------------------------------------
@@ -208,11 +300,15 @@ fixtures:
 
   - id: chain_search_then_cart
     category: chain
-    prompt: "Search for product number SHIRT-001 and add one to a new cart in the Storefront sales channel."
+    prompt: "Look up product number SHIRT-001, then add one to a new cart in the Storefront sales channel."
     expected_tool: shopware-entity-search
+    acceptable_tools: [merchant-storefront-search]
     expected_toolset: entity
     max_steps: 8
-    notes: Step 1 find product ID; step 2 cart-manage create + add.
+    notes: >
+      Step 1 finds the product; step 2 is cart-manage. entity-search is the
+      exact-field lookup, but the "Storefront sales channel" framing makes
+      storefront-search a defensible first step too — accept either.
 
   - id: chain_schema_then_search
     category: chain

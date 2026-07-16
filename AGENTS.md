@@ -64,7 +64,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 
 | File | Purpose |
 |---|---|
-| `eval/mcp_client.py` | Shared MCP HTTP helpers: session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_CORE_TOOLS` |
+| `eval/mcp_client.py` | Shared MCP HTTP helpers: session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
 | `functional/run.sh` | v2 discovery mechanics + per-tool minimal-payload calls |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
 | `eval/run.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |

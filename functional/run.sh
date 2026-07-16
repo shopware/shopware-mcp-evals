@@ -750,6 +750,39 @@ else
   assert_tool "$SESSION" "swag-dev-tools-list-skills" \
     '{}' \
     "swag-dev-tools-list-skills"
+
+  # scaffold with no args lists the available scaffold types — non-destructive
+  # (it never writes files; it returns instructions).
+  assert_tool "$SESSION" "swag-dev-tools-scaffold" \
+    '{}' \
+    "swag-dev-tools-scaffold (list types)"
+
+  # notifications: wait=false so it never opens an SSE stream in tests.
+  assert_tool "$SESSION" "swag-dev-tools-notifications" \
+    '{"wait":false,"limit":5}' \
+    "swag-dev-tools-notifications (poll)"
+
+  # load-skill needs a real skill name — pull the first one from list-skills.
+  SKILL_NAME=$( { mcp_call "$SESSION" "swag-dev-tools-list-skills" '{}' \
+    | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+data=json.loads(d.get('result',{}).get('content',[{}])[0].get('text','{}')).get('data',{})
+skills=data.get('skills',data) if isinstance(data,dict) else data
+name=''
+if isinstance(skills,list) and skills:
+    s=skills[0]
+    name=s.get('name','') if isinstance(s,dict) else str(s)
+print(name)
+" 2>/dev/null; } || echo "")
+  if [[ -n "$SKILL_NAME" ]]; then
+    assert_tool "$SESSION" "swag-dev-tools-load-skill" \
+      "{\"name\":\"${SKILL_NAME}\"}" \
+      "swag-dev-tools-load-skill (${SKILL_NAME})"
+  else
+    log_skip "swag-dev-tools-load-skill (no skills found)"
+    SKIP=$((SKIP+1))
+  fi
 fi
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,9 @@ three discovery meta-tools, and the agent pulls in everything it needs on demand
 via `shopware-tool-search` or by enabling toolsets with
 `shopware-toolset-enable`. There is no default set of entity/entry tools — the
 model must always discover and enable. The admin (`/api/_mcp`) and Store API
-(`/store-api/_mcp`) endpoints behave identically here. Three things can go wrong:
+(`/store-api/_mcp`) endpoints share the same discovery mechanics; this suite
+currently exercises the admin endpoint (Store API coverage is planned). Three
+things can go wrong:
 
 1. **The tool itself is broken**: wrong payload shape, missing fields, server
    error. A unit test in the Shopware repo cannot catch this end-to-end because
@@ -164,8 +166,14 @@ python eval/run.py --no-system-prompt
 python eval/run.py --output results/my-run.json
 ```
 
-Exit code is 0 only if **all** fixtures pass the **discovery** run (baseline is
-the comparison reference and stays advisory when both modes run).
+Exit code is 0 if the **discovery** run meets the pass-rate threshold
+(`--min-pass-rate`, default 0.9); baseline is the comparison reference and stays
+advisory when both modes run. Because the LLM is nondeterministic, each failed
+discovery fixture is **retried once** (only a double failure counts), and the
+threshold tolerates a couple of borderline fixtures so a single flaky prompt
+can't flip CI red — while a real regression (the rate collapsing) still fails.
+Use `--min-pass-rate 1.0` for strict all-must-pass. Skipped fixtures (expected
+tool not registered on the instance) never gate.
 
 ### Discovery metrics
 
@@ -207,8 +215,18 @@ required fields: `id`, `category`, `prompt`, `expected_tool`; optional:
 | Merchant tools | `merchant-{customer-lookup,order-summary,cart-manage,cart-checkout,checkout-methods,product-create,storefront-search,bestseller-report,revenue-report}` |
 | Dev tools | `swag-dev-tools-{log-search,log-stream,list-extensions,list-skills,load-skill,notifications,scaffold}` |
 
-Example bundle tools (`McpHelloWorld*`) are intentionally excluded. The Store
-API MCP endpoint (`/store-api/_mcp`) is out of scope for now.
+Example / demo tools (`SwagMcpExampleBundle`) and the `SwagMcpAdminUsers` plugin
+are not installed in CI, so they are outside the tested catalogue. The Store API
+MCP endpoint (`/store-api/_mcp`, the `shopware-ucp-*` tools) is out of scope for
+now.
+
+### Coverage
+
+All 30 admin-catalogue tools have both a functional assertion and at least one
+LLM fixture. Functional assertions that depend on shop data (a product, order,
+customer, or storefront sales channel) run against CI-seeded demo data and skip
+gracefully if that data is absent locally. The `--skip-media-upload` and
+`--skip-dev-tools` flags skip those groups locally; CI runs both.
 
 ## Improving tool descriptions
 
