@@ -39,11 +39,7 @@ class Reporter:
         self.failed = 0
         self.skipped = 0
         self.records: list[dict] = []
-        enabled = (
-            (sys.stdout.isatty() and "NO_COLOR" not in os.environ)
-            if color is None
-            else color
-        )
+        enabled = (sys.stdout.isatty() and "NO_COLOR" not in os.environ) if color is None else color
         self.c = _Palette(enabled)
 
     # -- output helpers -----------------------------------------------------
@@ -62,7 +58,8 @@ class Reporter:
 
     def check_fail(self, label: str, error: str) -> None:
         self._fail(
-            label, error,
+            label,
+            error,
             {"tool": "check", "label": label, "status": "fail", "error": error},
         )
 
@@ -75,7 +72,8 @@ class Reporter:
 
     def tool_fail(self, tool: str, label: str, error: str) -> None:
         self._fail(
-            label, error,
+            label,
+            error,
             {"tool": tool, "label": label, "status": "fail", "error": error},
         )
 

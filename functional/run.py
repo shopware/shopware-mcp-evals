@@ -80,8 +80,7 @@ def _advertised(rep: Reporter, session: str, endpoint: Endpoint, label: str) -> 
         return None
 
 
-def _first_field(session: str, endpoint: Endpoint, entity: str,
-                 field: str = "id", extra: dict | None = None) -> str:
+def _first_field(session: str, endpoint: Endpoint, entity: str, field: str = "id", extra: dict | None = None) -> str:
     """First entity's field value via entity-search, retried a few times
     (a large payload can occasionally deliver a partial read). '' on failure."""
     for _ in range(3):
@@ -99,8 +98,9 @@ def _first_field(session: str, endpoint: Endpoint, entity: str,
 # ---------------------------------------------------------------------------
 # Tool assertions
 # ---------------------------------------------------------------------------
-def assert_tool(rep: Reporter, session: str, endpoint: Endpoint,
-                tool: str, args: dict, label: str | None = None) -> None:
+def assert_tool(
+    rep: Reporter, session: str, endpoint: Endpoint, tool: str, args: dict, label: str | None = None
+) -> None:
     """Call a tool; pass if there is no protocol error and content is present."""
     label = label or tool
     resp = mcp_call(session, tool, args, endpoint=endpoint)
@@ -114,8 +114,9 @@ def assert_tool(rep: Reporter, session: str, endpoint: Endpoint,
         rep.tool_pass(tool, label, mcp_result_text(resp)[:120])
 
 
-def assert_tool_error(rep: Reporter, session: str, endpoint: Endpoint,
-                      tool: str, args: dict, expected: str, label: str) -> None:
+def assert_tool_error(
+    rep: Reporter, session: str, endpoint: Endpoint, tool: str, args: dict, expected: str, label: str
+) -> None:
     """Call a tool and expect it to FAIL (protocol error, isError, or a
     {"success": false} payload), optionally containing `expected`."""
     resp = mcp_call(session, tool, args, endpoint=endpoint)
@@ -163,9 +164,14 @@ def load_toolsets(session: str, endpoint: Endpoint) -> list[dict]:
     return mcp_toolsets_list(session, endpoint=endpoint)
 
 
-def verify_enable_and_isolation(rep: Reporter, endpoint: Endpoint, target_toolset: str,
-                                probe_tool: str, probe_label: str,
-                                check_default_persists: bool) -> None:
+def verify_enable_and_isolation(
+    rep: Reporter,
+    endpoint: Endpoint,
+    target_toolset: str,
+    probe_tool: str,
+    probe_label: str,
+    check_default_persists: bool,
+) -> None:
     """Enabling a toolset grows the session's advertised list, emits
     _meta.listChanged, and does not leak into other sessions."""
     session_a, _ = mcp_init(endpoint=endpoint)
@@ -202,8 +208,9 @@ def verify_enable_and_isolation(rep: Reporter, endpoint: Endpoint, target_toolse
 
 
 def run_search(session: str, endpoint: Endpoint, query: str, max_results: int) -> dict:
-    return _payload(mcp_call(session, "shopware-tool-search",
-                             {"query": query, "maxResults": max_results}, endpoint=endpoint))
+    return _payload(
+        mcp_call(session, "shopware-tool-search", {"query": query, "maxResults": max_results}, endpoint=endpoint)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -250,16 +257,18 @@ def verify_admin_toolsets(rep: Reporter, session: str, endpoint: Endpoint) -> tu
     return entity_toolset, toolsets
 
 
-def verify_admin_discovery(rep: Reporter, endpoint: Endpoint,
-                           entity_toolset: str, toolsets: list[dict]) -> None:
+def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: str, toolsets: list[dict]) -> None:
     """Admin discovery mechanics: enable/isolation, deferred-callable,
     tool-search behavior, unknown-toolset rejection, activate-all completeness."""
     rep.section("v2: Discovery mechanics")
 
     if entity_toolset:
         verify_enable_and_isolation(
-            rep, endpoint, entity_toolset,
-            probe_tool="shopware-entity-read", probe_label="shopware-entity-read",
+            rep,
+            endpoint,
+            entity_toolset,
+            probe_tool="shopware-entity-read",
+            probe_label="shopware-entity-read",
             check_default_persists=True,
         )
     else:
@@ -271,9 +280,14 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint,
         return
 
     # deferred tools stay directly callable (allowlist is the call boundary)
-    assert_tool(rep, session, endpoint, "shopware-system-config-read",
-                {"key": "core.basicInformation"},
-                "deferred tool callable without enable (system-config-read)")
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "shopware-system-config-read",
+        {"key": "core.basicInformation"},
+        "deferred tool callable without enable (system-config-read)",
+    )
 
     # tool-search: ranked results spanning deferred tools
     search = run_search(session, endpoint, "upload an image file", 5)
@@ -304,9 +318,15 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint,
         rep.check_fail("tool-search maxResults cap", f"expected 1..20 results, got {cap_count}")
 
     # unknown toolset is rejected
-    assert_tool_error(rep, session, endpoint, "shopware-toolset-enable",
-                      {"toolset": "does-not-exist"}, "Unknown",
-                      "toolset-enable rejects unknown toolset")
+    assert_tool_error(
+        rep,
+        session,
+        endpoint,
+        "shopware-toolset-enable",
+        {"toolset": "does-not-exist"},
+        "Unknown",
+        "toolset-enable rejects unknown toolset",
+    )
 
     # activate ALL toolsets: every catalogue tool must become reachable
     session_all, _ = mcp_init(endpoint=endpoint)
@@ -315,14 +335,12 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint,
         return
     names_all = [ts["name"] for ts in toolsets]
     enabled_count = sum(
-        1 for name in names_all
-        if _payload(enable_toolset(session_all, name, endpoint=endpoint)).get("success")
+        1 for name in names_all if _payload(enable_toolset(session_all, name, endpoint=endpoint)).get("success")
     )
     if enabled_count == len(names_all):
         rep.check_pass(f"activated all {len(names_all)} toolsets in one session")
     else:
-        rep.check_fail("activate all toolsets",
-                       f"only {enabled_count}/{len(names_all)} enable calls succeeded")
+        rep.check_fail("activate all toolsets", f"only {enabled_count}/{len(names_all)} enable calls succeeded")
 
     union_tools = {tool for ts in toolsets for tool in ts.get("tools", [])}
     expected_full = META_TOOLS | union_tools
@@ -353,88 +371,181 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     order_id = _first_field(session, endpoint, "order")
     customer_email = _first_field(session, endpoint, "customer", field="email")
     sales_channel_id = _first_field(
-        session, endpoint, "sales_channel",
-        extra={"criteria": json.dumps(
-            {"filter": [{"type": "equals", "field": "typeId", "value": STOREFRONT_TYPE_ID}]})},
+        session,
+        endpoint,
+        "sales_channel",
+        extra={
+            "criteria": json.dumps({"filter": [{"type": "equals", "field": "typeId", "value": STOREFRONT_TYPE_ID}]})
+        },
     )
 
     # --- Core tools ---
     rep.section("Core tools")
-    assert_tool(rep, session, endpoint, "shopware-entity-schema",
-                {"entity": "product"}, "shopware-entity-schema (product)")
-    assert_tool(rep, session, endpoint, "shopware-entity-search",
-                {"entity": "product", "limit": 1}, "shopware-entity-search (product, limit 1)")
+    assert_tool(
+        rep, session, endpoint, "shopware-entity-schema", {"entity": "product"}, "shopware-entity-schema (product)"
+    )
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "shopware-entity-search",
+        {"entity": "product", "limit": 1},
+        "shopware-entity-search (product, limit 1)",
+    )
     if product_id:
-        assert_tool(rep, session, endpoint, "shopware-entity-read",
-                    {"entity": "product", "id": product_id}, "shopware-entity-read (product by ID)")
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "shopware-entity-read",
+            {"entity": "product", "id": product_id},
+            "shopware-entity-read (product by ID)",
+        )
     else:
         rep.skip("shopware-entity-read (no product found)")
-    assert_tool(rep, session, endpoint, "shopware-entity-aggregate",
-                {"entity": "product",
-                 "aggregations": json.dumps([{"name": "total", "type": "count", "field": "id"}])},
-                "shopware-entity-aggregate (count products)")
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "shopware-entity-aggregate",
+        {"entity": "product", "aggregations": json.dumps([{"name": "total", "type": "count", "field": "id"}])},
+        "shopware-entity-aggregate (count products)",
+    )
     if product_id:
-        assert_tool(rep, session, endpoint, "shopware-entity-upsert",
-                    {"entity": "product", "payload": json.dumps({"id": product_id, "stock": 1}),
-                     "dryRun": True}, "shopware-entity-upsert (dryRun)")
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "shopware-entity-upsert",
+            {"entity": "product", "payload": json.dumps({"id": product_id, "stock": 1}), "dryRun": True},
+            "shopware-entity-upsert (dryRun)",
+        )
     else:
         rep.skip("shopware-entity-upsert (no product found)")
-    assert_tool(rep, session, endpoint, "shopware-entity-delete",
-                {"entity": "product", "ids": json.dumps([ZERO_UUID]), "dryRun": True},
-                "shopware-entity-delete (dryRun)")
-    assert_tool(rep, session, endpoint, "shopware-system-config-read",
-                {"key": "core.basicInformation"}, "shopware-system-config-read")
-    assert_tool(rep, session, endpoint, "shopware-system-config-write",
-                {"key": "core.basicInformation.shopName", "value": json.dumps("Test"), "dryRun": True},
-                "shopware-system-config-write (dryRun)")
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "shopware-entity-delete",
+        {"entity": "product", "ids": json.dumps([ZERO_UUID]), "dryRun": True},
+        "shopware-entity-delete (dryRun)",
+    )
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "shopware-system-config-read",
+        {"key": "core.basicInformation"},
+        "shopware-system-config-read",
+    )
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "shopware-system-config-write",
+        {"key": "core.basicInformation.shopName", "value": json.dumps("Test"), "dryRun": True},
+        "shopware-system-config-write (dryRun)",
+    )
     if order_id:
-        assert_tool(rep, session, endpoint, "shopware-order-state",
-                    {"orderId": order_id, "dryRun": True}, "shopware-order-state (dryRun)")
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "shopware-order-state",
+            {"orderId": order_id, "dryRun": True},
+            "shopware-order-state (dryRun)",
+        )
     else:
         rep.skip("shopware-order-state (no order found)")
     if args.skip_media_upload:
         rep.skip("shopware-media-upload (--skip-media-upload)")
     else:
-        assert_tool(rep, session, endpoint, "shopware-media-upload",
-                    {"url": "https://assets.shopware.com/media/shopware_signet_blue.svg",
-                     "fileName": "mcp-test-logo"}, "shopware-media-upload")
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "shopware-media-upload",
+            {"url": "https://assets.shopware.com/media/shopware_signet_blue.svg", "fileName": "mcp-test-logo"},
+            "shopware-media-upload",
+        )
     if sales_channel_id:
-        assert_tool(rep, session, endpoint, "shopware-theme-config",
-                    {"salesChannelId": sales_channel_id, "action": "get"},
-                    "shopware-theme-config (get)")
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "shopware-theme-config",
+            {"salesChannelId": sales_channel_id, "action": "get"},
+            "shopware-theme-config (get)",
+        )
     else:
         rep.skip("shopware-theme-config (no storefront sales channel found)")
 
     # --- Merchant tools ---
     rep.section("Merchant tools")
     if customer_email:
-        assert_tool(rep, session, endpoint, "merchant-customer-lookup",
-                    {"email": customer_email}, "merchant-customer-lookup (by email)")
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "merchant-customer-lookup",
+            {"email": customer_email},
+            "merchant-customer-lookup (by email)",
+        )
     else:
         rep.skip("merchant-customer-lookup (no customer found)")
     if order_id:
-        assert_tool(rep, session, endpoint, "merchant-order-summary",
-                    {"orderId": order_id}, "merchant-order-summary (by ID)")
+        assert_tool(
+            rep, session, endpoint, "merchant-order-summary", {"orderId": order_id}, "merchant-order-summary (by ID)"
+        )
     else:
         rep.skip("merchant-order-summary (no order found)")
     if sales_channel_id:
-        assert_tool(rep, session, endpoint, "merchant-checkout-methods",
-                    {"salesChannelId": sales_channel_id}, "merchant-checkout-methods")
-        assert_tool(rep, session, endpoint, "merchant-storefront-search",
-                    {"salesChannelId": sales_channel_id, "term": "shirt"},
-                    "merchant-storefront-search (term: shirt)")
-        cart_token = _payload(mcp_call(session, "merchant-cart-manage",
-                                       {"salesChannelId": sales_channel_id, "action": "create"},
-                                       endpoint=endpoint)).get("data", {}).get("token", "")
-        assert_tool(rep, session, endpoint, "merchant-cart-manage",
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "merchant-checkout-methods",
+            {"salesChannelId": sales_channel_id},
+            "merchant-checkout-methods",
+        )
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "merchant-storefront-search",
+            {"salesChannelId": sales_channel_id, "term": "shirt"},
+            "merchant-storefront-search (term: shirt)",
+        )
+        cart_token = (
+            _payload(
+                mcp_call(
+                    session,
+                    "merchant-cart-manage",
                     {"salesChannelId": sales_channel_id, "action": "create"},
-                    "merchant-cart-manage (create)")
+                    endpoint=endpoint,
+                )
+            )
+            .get("data", {})
+            .get("token", "")
+        )
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "merchant-cart-manage",
+            {"salesChannelId": sales_channel_id, "action": "create"},
+            "merchant-cart-manage (create)",
+        )
         customer_id = _first_field(session, endpoint, "customer")
         if cart_token and customer_id:
-            assert_tool(rep, session, endpoint, "merchant-cart-checkout",
-                        {"salesChannelId": sales_channel_id, "token": cart_token,
-                         "customerId": customer_id, "dryRun": True},
-                        "merchant-cart-checkout (dryRun)")
+            assert_tool(
+                rep,
+                session,
+                endpoint,
+                "merchant-cart-checkout",
+                {"salesChannelId": sales_channel_id, "token": cart_token, "customerId": customer_id, "dryRun": True},
+                "merchant-cart-checkout (dryRun)",
+            )
         else:
             rep.skip("merchant-cart-checkout (could not get cart token or customer ID)")
     else:
@@ -442,34 +553,60 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
         rep.skip("merchant-storefront-search (no storefront sales channel)")
         rep.skip("merchant-cart-manage (no storefront sales channel)")
         rep.skip("merchant-cart-checkout (no storefront sales channel)")
-    assert_tool(rep, session, endpoint, "merchant-product-create",
-                {"name": "MCP Test Product", "productNumber": "MCP-TEST-001",
-                 "grossPrice": 9.99, "dryRun": True}, "merchant-product-create (dryRun)")
-    assert_tool(rep, session, endpoint, "merchant-bestseller-report",
-                {"from": "2025-01-01", "to": "2025-12-31", "limit": 5}, "merchant-bestseller-report")
-    assert_tool(rep, session, endpoint, "merchant-revenue-report",
-                {"from": "2025-01-01", "to": "2025-12-31", "groupBy": "month"},
-                "merchant-revenue-report (groupBy month)")
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "merchant-product-create",
+        {"name": "MCP Test Product", "productNumber": "MCP-TEST-001", "grossPrice": 9.99, "dryRun": True},
+        "merchant-product-create (dryRun)",
+    )
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "merchant-bestseller-report",
+        {"from": "2025-01-01", "to": "2025-12-31", "limit": 5},
+        "merchant-bestseller-report",
+    )
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "merchant-revenue-report",
+        {"from": "2025-01-01", "to": "2025-12-31", "groupBy": "month"},
+        "merchant-revenue-report (groupBy month)",
+    )
 
     # --- Dev tools ---
     rep.section("Dev tools")
     if args.skip_dev_tools:
         rep.skip("dev tools (--skip-dev-tools)")
         return
-    assert_tool(rep, session, endpoint, "swag-dev-tools-log-search",
-                {"query": "error", "limit": 5}, "swag-dev-tools-log-search (query: error)")
-    assert_tool(rep, session, endpoint, "swag-dev-tools-log-stream",
-                {"limit": 10}, "swag-dev-tools-log-stream (last 10)")
-    assert_tool(rep, session, endpoint, "swag-dev-tools-list-extensions",
-                {}, "swag-dev-tools-list-extensions")
-    assert_tool(rep, session, endpoint, "swag-dev-tools-list-skills",
-                {}, "swag-dev-tools-list-skills")
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "swag-dev-tools-log-search",
+        {"query": "error", "limit": 5},
+        "swag-dev-tools-log-search (query: error)",
+    )
+    assert_tool(
+        rep, session, endpoint, "swag-dev-tools-log-stream", {"limit": 10}, "swag-dev-tools-log-stream (last 10)"
+    )
+    assert_tool(rep, session, endpoint, "swag-dev-tools-list-extensions", {}, "swag-dev-tools-list-extensions")
+    assert_tool(rep, session, endpoint, "swag-dev-tools-list-skills", {}, "swag-dev-tools-list-skills")
     # scaffold with no args lists the available types — non-destructive.
-    assert_tool(rep, session, endpoint, "swag-dev-tools-scaffold",
-                {}, "swag-dev-tools-scaffold (list types)")
+    assert_tool(rep, session, endpoint, "swag-dev-tools-scaffold", {}, "swag-dev-tools-scaffold (list types)")
     # notifications: wait=false so it never opens an SSE stream in tests.
-    assert_tool(rep, session, endpoint, "swag-dev-tools-notifications",
-                {"wait": False, "limit": 5}, "swag-dev-tools-notifications (poll)")
+    assert_tool(
+        rep,
+        session,
+        endpoint,
+        "swag-dev-tools-notifications",
+        {"wait": False, "limit": 5},
+        "swag-dev-tools-notifications (poll)",
+    )
     # load-skill needs a real skill name — pull the first one from list-skills.
     data = _payload(mcp_call(session, "swag-dev-tools-list-skills", {}, endpoint=endpoint)).get("data", {})
     skills = data.get("skills", data) if isinstance(data, dict) else data
@@ -478,8 +615,14 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
         first = skills[0]
         skill_name = first.get("name", "") if isinstance(first, dict) else str(first)
     if skill_name:
-        assert_tool(rep, session, endpoint, "swag-dev-tools-load-skill",
-                    {"name": skill_name}, f"swag-dev-tools-load-skill ({skill_name})")
+        assert_tool(
+            rep,
+            session,
+            endpoint,
+            "swag-dev-tools-load-skill",
+            {"name": skill_name},
+            f"swag-dev-tools-load-skill ({skill_name})",
+        )
     else:
         rep.skip("swag-dev-tools-load-skill (no skills found)")
 
@@ -526,8 +669,11 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str) -> None:
     rep.section("v2: Discovery mechanics")
     if ucp_toolset:
         verify_enable_and_isolation(
-            rep, endpoint, ucp_toolset,
-            probe_tool="shopware-ucp-cart-create", probe_label="UCP tools",
+            rep,
+            endpoint,
+            ucp_toolset,
+            probe_tool="shopware-ucp-cart-create",
+            probe_label="UCP tools",
             check_default_persists=False,
         )
     else:

@@ -65,6 +65,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 # Provider adapters
 # ---------------------------------------------------------------------------
 
+
 def tools_for_anthropic(mcp_tools: list[dict]) -> list[dict]:
     return [
         {
@@ -108,10 +109,7 @@ def anthropic_turn(client, model: str, system_prompt: str | None, messages: list
         "assistant_message": {"role": "assistant", "content": response.content},
         "tool_result_builder": lambda results: {
             "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": call_id, "content": text}
-                for call_id, text in results
-            ],
+            "content": [{"type": "tool_result", "tool_use_id": call_id, "content": text} for call_id, text in results],
         },
         "stop_reason": response.stop_reason,
         "tokens": {
@@ -124,7 +122,11 @@ def anthropic_turn(client, model: str, system_prompt: str | None, messages: list
 def openai_turn(client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
     """One assistant turn (system prompt must already be in messages)."""
     response = client.chat.completions.create(
-        model=model, max_tokens=1024, tools=tools, tool_choice="auto", messages=messages,
+        model=model,
+        max_tokens=1024,
+        tools=tools,
+        tool_choice="auto",
+        messages=messages,
     )
     msg = response.choices[0].message
 
@@ -150,8 +152,7 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
         "tool_calls": tool_calls,
         "assistant_message": assistant_message,
         "tool_result_builder": lambda results: [
-            {"role": "tool", "tool_call_id": call_id, "content": text}
-            for call_id, text in results
+            {"role": "tool", "tool_call_id": call_id, "content": text} for call_id, text in results
         ],
         "stop_reason": response.choices[0].finish_reason,
         "tokens": {
@@ -160,21 +161,23 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
         },
     }
 
+
 # ---------------------------------------------------------------------------
 # Baseline mode — single shot against the full catalogue (v1 behaviour)
 # ---------------------------------------------------------------------------
+
 
 def is_correct(selected_tool: str | None, fixture: dict) -> bool:
     """A selection is correct if it is the expected tool or any tool listed in
     the fixture's optional `acceptable_tools` (for genuinely multi-valid prompts)."""
     if selected_tool is None:
         return False
-    return (selected_tool == fixture["expected_tool"]
-            or selected_tool in fixture.get("acceptable_tools", []))
+    return selected_tool == fixture["expected_tool"] or selected_tool in fixture.get("acceptable_tools", [])
 
 
-def run_fixture_baseline(provider: str, client, tools: list[dict], fixture: dict,
-                         model: str, system_prompt: str | None) -> dict:
+def run_fixture_baseline(
+    provider: str, client, tools: list[dict], fixture: dict, model: str, system_prompt: str | None
+) -> dict:
     prompt = fixture["prompt"]
     messages = []
     if provider == "openai" and system_prompt:
@@ -207,9 +210,11 @@ def run_fixture_baseline(provider: str, client, tools: list[dict], fixture: dict
         "notes": fixture.get("notes", ""),
     }
 
+
 # ---------------------------------------------------------------------------
 # Discovery mode — agentic loop from the default surface
 # ---------------------------------------------------------------------------
+
 
 def _search_result_tools(result_text: str) -> list[dict]:
     """Extract the tool definitions returned inline by shopware-tool-search,
@@ -230,8 +235,9 @@ def _search_contains_expected(result_text: str, expected_tool: str) -> bool:
     return any(t.get("name") == expected_tool for t in _search_result_tools(result_text))
 
 
-def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
-                          system_prompt: str | None, max_steps: int, endpoint=ADMIN) -> dict:
+def run_fixture_discovery(
+    provider: str, client, fixture: dict, model: str, system_prompt: str | None, max_steps: int, endpoint=ADMIN
+) -> dict:
     prompt = fixture["prompt"]
     expected_tool = fixture["expected_tool"]
     acceptable = set(fixture.get("acceptable_tools", []))
@@ -267,8 +273,7 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
 
     while steps < max_steps:
         steps += 1
-        turn = turn_fn(client, model, system_prompt if provider == "anthropic" else None,
-                       messages, tools)
+        turn = turn_fn(client, model, system_prompt if provider == "anthropic" else None, messages, tools)
         tokens["input"] += turn["tokens"]["input"]
         tokens["output"] += turn["tokens"]["output"]
 
@@ -298,11 +303,13 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
             err = mcp_call_error(resp)
             result_text = mcp_result_text(resp) or (f"Error: {err}" if err else "")
             tool_results.append((call["id"], result_text))
-            meta_calls.append({
-                "tool": call["name"],
-                "input": call["input"],
-                "result_preview": result_text[:300],
-            })
+            meta_calls.append(
+                {
+                    "tool": call["name"],
+                    "input": call["input"],
+                    "result_preview": result_text[:300],
+                }
+            )
             if call["name"] == "shopware-tool-search":
                 found = _search_result_tools(result_text)
                 hit = any(t.get("name") == expected_tool for t in found)
@@ -381,6 +388,7 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
         "notes": fixture.get("notes", ""),
     }
 
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -438,41 +446,47 @@ def print_comparison(baseline: list[dict], discovery: list[dict]):
     p_disc = sum(1 for r in scored(discovery) if r["passed"])
     skipped = sum(1 for r in discovery if r.get("skipped"))
 
-    print(f"\n{BOLD}{'='*78}{RESET}")
+    print(f"\n{BOLD}{'=' * 78}{RESET}")
     print(f"{BOLD}Comparison: baseline (full catalogue)  vs  discovery (default surface){RESET}")
-    print(f"{'='*78}")
+    print(f"{'=' * 78}")
     skip_note = f"  ({skipped} skipped — tool not on this instance)" if skipped else ""
-    print(f"  Overall: {GREEN}{p_base}/{total}{RESET} baseline  →  {GREEN}{p_disc}/{total}{RESET} discovery  "
-          f"(Δ {_delta(p_base, p_disc, total)}){DIM}{skip_note}{RESET}")
+    print(
+        f"  Overall: {GREEN}{p_base}/{total}{RESET} baseline  →  {GREEN}{p_disc}/{total}{RESET} discovery  "
+        f"(Δ {_delta(p_base, p_disc, total)}){DIM}{skip_note}{RESET}"
+    )
 
     # By category
     all_cats = sorted(set(s_base["cats"]) | set(s_disc["cats"]))
     print(f"\n{BOLD}By category:{RESET}")
     print(f"  {'Category':<22} {'Baseline':>12}  {'Discovery':>12}  {'Effect'}")
-    print(f"  {'-'*22} {'-'*12}  {'-'*12}  {'-'*20}")
+    print(f"  {'-' * 22} {'-' * 12}  {'-' * 12}  {'-' * 20}")
     for cat in all_cats:
         cb = s_base["cats"].get(cat, {"pass": 0, "total": 0})
         cd = s_disc["cats"].get(cat, {"pass": 0, "total": 0})
         pct_b = round(100 * cb["pass"] / cb["total"]) if cb["total"] else 0
         pct_d = round(100 * cd["pass"] / cd["total"]) if cd["total"] else 0
-        print(f"  {cat:<22} {pct_color(pct_b)}{cb['pass']}/{cb['total']} ({pct_b}%){RESET:>4}  "
-              f"{pct_color(pct_d)}{cd['pass']}/{cd['total']} ({pct_d}%){RESET:>4}  "
-              f"{_arrow(pct_b, pct_d)}")
+        print(
+            f"  {cat:<22} {pct_color(pct_b)}{cb['pass']}/{cb['total']} ({pct_b}%){RESET:>4}  "
+            f"{pct_color(pct_d)}{cd['pass']}/{cd['total']} ({pct_d}%){RESET:>4}  "
+            f"{_arrow(pct_b, pct_d)}"
+        )
 
     # Per tool
     all_tools = sorted(set(s_base["tools"]) | set(s_disc["tools"]))
     print(f"\n{BOLD}Per-tool accuracy:{RESET}")
     print(f"  {'Tool':<42} {'Baseline':>10}  {'Discovery':>10}  {'Effect'}")
-    print(f"  {'-'*42} {'-'*10}  {'-'*10}  {'-'*20}")
+    print(f"  {'-' * 42} {'-' * 10}  {'-' * 10}  {'-' * 20}")
     for tool in all_tools:
         tb = s_base["tools"].get(tool, {"pass": 0, "total": 0})
         td = s_disc["tools"].get(tool, {"pass": 0, "total": 0})
         pct_b = round(100 * tb["pass"] / tb["total"]) if tb["total"] else 0
         pct_d = round(100 * td["pass"] / td["total"]) if td["total"] else 0
         flag = f"  {RED}⚠{RESET}" if pct_d < 80 else ""
-        print(f"  {tool:<42} {pct_color(pct_b)}{tb['pass']}/{tb['total']} ({pct_b}%){RESET:>4}  "
-              f"{pct_color(pct_d)}{td['pass']}/{td['total']} ({pct_d}%){RESET:>4}  "
-              f"{_arrow(pct_b, pct_d)}{flag}")
+        print(
+            f"  {tool:<42} {pct_color(pct_b)}{tb['pass']}/{tb['total']} ({pct_b}%){RESET:>4}  "
+            f"{pct_color(pct_d)}{td['pass']}/{td['total']} ({pct_d}%){RESET:>4}  "
+            f"{_arrow(pct_b, pct_d)}{flag}"
+        )
 
 
 def discovery_summary(discovery: list[dict]) -> dict:
@@ -505,16 +519,19 @@ def discovery_summary(discovery: list[dict]) -> dict:
 def print_discovery_block(discovery: list[dict], baseline: list[dict] | None):
     s = discovery_summary(discovery)
     print(f"\n{BOLD}Discovery behaviour:{RESET}")
-    print(f"  Avg steps to tool selection: {s['avg_steps']}  "
-          f"(step-cap hit: {s['max_steps_hit']}/{s['fixtures']})")
+    print(f"  Avg steps to tool selection: {s['avg_steps']}  (step-cap hit: {s['max_steps_hit']}/{s['fixtures']})")
     dist = "  ".join(f"{k}={v}" for k, v in sorted(s["path_distribution"].items()))
     print(f"  Discovery path: {dist}")
     if s["search_hit_rate"] is not None:
-        print(f"  tool-search used in {s['search_used']} fixtures; "
-              f"expected tool in results: {round(s['search_hit_rate']*100)}%")
+        print(
+            f"  tool-search used in {s['search_used']} fixtures; "
+            f"expected tool in results: {round(s['search_hit_rate'] * 100)}%"
+        )
     if s["toolset_enable_graded"]:
-        print(f"  toolset-enable graded in {s['toolset_enable_graded']} fixtures; "
-              f"correct toolset: {s['toolset_enable_correct']}/{s['toolset_enable_graded']}")
+        print(
+            f"  toolset-enable graded in {s['toolset_enable_graded']} fixtures; "
+            f"correct toolset: {s['toolset_enable_correct']}/{s['toolset_enable_graded']}"
+        )
     d_tok = s["tokens"]
     print(f"  Tokens (discovery): {d_tok['input']:,} in / {d_tok['output']:,} out")
     if baseline:
@@ -539,13 +556,12 @@ def print_discovery_block(discovery: list[dict], baseline: list[dict] | None):
             print(f"  {DIM}Got:{RESET}      {RED}{r['selected_tool']}{RESET}")
             if r["meta_calls"]:
                 trail = " → ".join(
-                    f"{m['tool']}({json.dumps(m['input'], ensure_ascii=False)[:40]})"
-                    for m in r["meta_calls"]
+                    f"{m['tool']}({json.dumps(m['input'], ensure_ascii=False)[:40]})" for m in r["meta_calls"]
                 )
                 print(f"  {DIM}Trail:{RESET}    {trail}")
             if r.get("notes"):
                 print(f"  {DIM}Notes:{RESET}    {r['notes'][:120]}")
-    print(f"\n{'='*78}\n")
+    print(f"\n{'=' * 78}\n")
 
 
 def print_single_mode(results: list[dict], mode: str):
@@ -553,9 +569,9 @@ def print_single_mode(results: list[dict], mode: str):
     total = len(scored(results))
     passed = sum(1 for r in scored(results) if r["passed"])
     skipped = sum(1 for r in results if r.get("skipped"))
-    print(f"\n{BOLD}{'='*78}{RESET}")
+    print(f"\n{BOLD}{'=' * 78}{RESET}")
     print(f"{BOLD}Results: {mode} mode{RESET}")
-    print(f"{'='*78}")
+    print(f"{'=' * 78}")
     pct = round(100 * passed / total) if total else 0
     skip_note = f"  ({skipped} skipped — tool not on this instance)" if skipped else ""
     print(f"  Overall: {pct_color(pct)}{passed}/{total} ({pct}%){RESET}{DIM}{skip_note}{RESET}")
@@ -582,6 +598,7 @@ def _arrow(pct_before: int, pct_after: int) -> str:
         return f"{RED}↓ {diff}pp{RESET}"
     return f"{DIM}={RESET}"
 
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -597,10 +614,14 @@ def skipped_result(fixture: dict, mode: str) -> dict:
     skipped, not failed — e.g. a dev-tools fixture on an instance without the
     SwagMcpDevTools bundle. Skipped fixtures are excluded from scoring."""
     return {
-        "id": fixture["id"], "category": fixture.get("category", ""),
-        "mode": mode, "prompt": fixture["prompt"],
-        "expected_tool": fixture["expected_tool"], "selected_tool": None,
-        "passed": False, "skipped": True,
+        "id": fixture["id"],
+        "category": fixture.get("category", ""),
+        "mode": mode,
+        "prompt": fixture["prompt"],
+        "expected_tool": fixture["expected_tool"],
+        "selected_tool": None,
+        "passed": False,
+        "skipped": True,
         "skip_reason": "expected tool not registered on this instance",
     }
 
@@ -616,7 +637,7 @@ def run_baseline_pass(provider, client, fixtures, model, system_prompt, availabl
 
     results = []
     for i, fixture in enumerate(fixtures, 1):
-        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category','')})")
+        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category', '')})")
         print(f"           {DIM}{fixture['prompt'][:65]}...{RESET}")
         if fixture["expected_tool"] not in available_tools:
             results.append(skipped_result(fixture, "baseline"))
@@ -630,23 +651,30 @@ def run_baseline_pass(provider, client, fixtures, model, system_prompt, availabl
             print(f"           {status}  selected={result['selected_tool'] or '(none)'}  {result['latency_s']}s")
         except Exception as e:
             print(f"           {RED}ERROR{RESET}: {e}")
-            results.append({
-                "id": fixture["id"], "category": fixture.get("category", ""),
-                "mode": "baseline", "prompt": fixture["prompt"],
-                "expected_tool": fixture["expected_tool"], "selected_tool": None,
-                "passed": False, "error": str(e),
-            })
+            results.append(
+                {
+                    "id": fixture["id"],
+                    "category": fixture.get("category", ""),
+                    "mode": "baseline",
+                    "prompt": fixture["prompt"],
+                    "expected_tool": fixture["expected_tool"],
+                    "selected_tool": None,
+                    "passed": False,
+                    "error": str(e),
+                }
+            )
         print()
     return results
 
 
-def run_discovery_pass(provider, client, fixtures, model, system_prompt, default_max_steps,
-                       available_tools, endpoint=ADMIN):
+def run_discovery_pass(
+    provider, client, fixtures, model, system_prompt, default_max_steps, available_tools, endpoint=ADMIN
+):
     print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
     results = []
     for i, fixture in enumerate(fixtures, 1):
         max_steps = int(fixture.get("max_steps", default_max_steps))
-        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category','')})")
+        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category', '')})")
         print(f"           {DIM}{fixture['prompt'][:65]}...{RESET}")
         if fixture["expected_tool"] not in available_tools:
             results.append(skipped_result(fixture, "discovery"))
@@ -654,17 +682,18 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
             print()
             continue
         try:
-            result = run_fixture_discovery(provider, client, fixture, model, system_prompt,
-                                           max_steps, endpoint=endpoint)
+            result = run_fixture_discovery(
+                provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint
+            )
             attempts = 1
             # Retry once on failure: gpt-4o is nondeterministic, so a single
             # borderline miss shouldn't flip CI red. A real regression fails
             # both attempts. Skips/errors are not retried.
             if not result["passed"]:
-                print(f"           {YELLOW}retry{RESET} (first attempt selected="
-                      f"{result['selected_tool'] or '(none)'})")
-                retry = run_fixture_discovery(provider, client, fixture, model, system_prompt,
-                                              max_steps, endpoint=endpoint)
+                print(f"           {YELLOW}retry{RESET} (first attempt selected={result['selected_tool'] or '(none)'})")
+                retry = run_fixture_discovery(
+                    provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint
+                )
                 attempts = 2
                 if retry["passed"]:
                     result = retry
@@ -673,40 +702,66 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
             status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
             path = result["discovery_path"]
             retry_note = f"  (attempts={attempts})" if attempts > 1 else ""
-            print(f"           {status}  selected={result['selected_tool'] or '(none)'}  "
-                  f"steps={result['steps']}  path={path}  {result['latency_s']}s{retry_note}")
+            print(
+                f"           {status}  selected={result['selected_tool'] or '(none)'}  "
+                f"steps={result['steps']}  path={path}  {result['latency_s']}s{retry_note}"
+            )
         except Exception as e:
             print(f"           {RED}ERROR{RESET}: {e}")
-            results.append({
-                "id": fixture["id"], "category": fixture.get("category", ""),
-                "mode": "discovery", "prompt": fixture["prompt"],
-                "expected_tool": fixture["expected_tool"], "selected_tool": None,
-                "passed": False, "error": str(e), "steps": 0, "meta_calls": [],
-                "discovery_path": "none", "search_hit": None,
-                "enabled_correct_toolset": None,
-            })
+            results.append(
+                {
+                    "id": fixture["id"],
+                    "category": fixture.get("category", ""),
+                    "mode": "discovery",
+                    "prompt": fixture["prompt"],
+                    "expected_tool": fixture["expected_tool"],
+                    "selected_tool": None,
+                    "passed": False,
+                    "error": str(e),
+                    "steps": 0,
+                    "meta_calls": [],
+                    "discovery_path": "none",
+                    "search_hit": None,
+                    "enabled_correct_toolset": None,
+                }
+            )
         print()
     return results
 
 
 def main():
     parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner (v2 discovery)")
-    parser.add_argument("--provider", choices=["anthropic", "openai"],
-                        default=os.environ.get("EVAL_PROVIDER", "anthropic"))
+    parser.add_argument(
+        "--provider", choices=["anthropic", "openai"], default=os.environ.get("EVAL_PROVIDER", "anthropic")
+    )
     parser.add_argument("--model", default=None)
-    parser.add_argument("--modes", default="baseline,discovery",
-                        help="Comma-separated: baseline, discovery (default: both)")
-    parser.add_argument("--max-steps", type=int, default=6,
-                        help="Max assistant turns in discovery mode (per-fixture max_steps overrides)")
-    parser.add_argument("--no-system-prompt", action="store_true",
-                        help="Skip the MCP server system prompt (ad-hoc debugging)")
-    parser.add_argument("--min-pass-rate", type=float,
-                        default=float(os.environ.get("EVAL_MIN_PASS_RATE", "0.9")),
-                        help="Min gating-mode pass rate for exit 0 (default 0.9; use 1.0 for strict)")
-    parser.add_argument("--endpoint", choices=["admin", "store"], default="admin",
-                        help="Which MCP endpoint to test (default admin). 'store' uses the Store API + UCP tools.")
-    parser.add_argument("--fixtures",
-                        help="Fixtures file (default: fixtures.yaml, or fixtures_store.yaml for --endpoint store)")
+    parser.add_argument(
+        "--modes", default="baseline,discovery", help="Comma-separated: baseline, discovery (default: both)"
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help="Max assistant turns in discovery mode (per-fixture max_steps overrides)",
+    )
+    parser.add_argument(
+        "--no-system-prompt", action="store_true", help="Skip the MCP server system prompt (ad-hoc debugging)"
+    )
+    parser.add_argument(
+        "--min-pass-rate",
+        type=float,
+        default=float(os.environ.get("EVAL_MIN_PASS_RATE", "0.9")),
+        help="Min gating-mode pass rate for exit 0 (default 0.9; use 1.0 for strict)",
+    )
+    parser.add_argument(
+        "--endpoint",
+        choices=["admin", "store"],
+        default="admin",
+        help="Which MCP endpoint to test (default admin). 'store' uses the Store API + UCP tools.",
+    )
+    parser.add_argument(
+        "--fixtures", help="Fixtures file (default: fixtures.yaml, or fixtures_store.yaml for --endpoint store)"
+    )
     parser.add_argument("--category", help="Run only fixtures of this category")
     parser.add_argument("--id", help="Run only this fixture ID")
     parser.add_argument("--output", help="Path to save JSON report")
@@ -727,8 +782,9 @@ def main():
         required.append(("SW_SC_ACCESS_KEY", SW_SC_ACCESS_KEY))
     else:
         required += [("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
-    required.append(("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) if provider == "anthropic"
-                    else ("OPENAI_API_KEY", OPENAI_API_KEY))
+    required.append(
+        ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) if provider == "anthropic" else ("OPENAI_API_KEY", OPENAI_API_KEY)
+    )
     for var, val in required:
         if not val:
             print(f"ERROR: {var} is not set.", file=sys.stderr)
@@ -736,9 +792,11 @@ def main():
 
     if provider == "anthropic":
         import anthropic as _anthropic
+
         client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     else:
         from openai import OpenAI
+
         client = OpenAI(api_key=OPENAI_API_KEY)
 
     default_fixtures = "fixtures_store.yaml" if args.endpoint == "store" else "fixtures.yaml"
@@ -782,11 +840,13 @@ def main():
     results_baseline = None
     results_discovery = None
     if "baseline" in modes:
-        results_baseline = run_baseline_pass(provider, client, all_fixtures, model, system_prompt,
-                                             available_tools, endpoint=endpoint)
+        results_baseline = run_baseline_pass(
+            provider, client, all_fixtures, model, system_prompt, available_tools, endpoint=endpoint
+        )
     if "discovery" in modes:
-        results_discovery = run_discovery_pass(provider, client, all_fixtures, model,
-                                               system_prompt, args.max_steps, available_tools, endpoint=endpoint)
+        results_discovery = run_discovery_pass(
+            provider, client, all_fixtures, model, system_prompt, args.max_steps, available_tools, endpoint=endpoint
+        )
 
     if results_baseline and results_discovery:
         print_comparison(results_baseline, results_discovery)
@@ -842,8 +902,10 @@ def main():
     passed = sum(1 for r in gating if r["passed"])
     rate = passed / len(gating) if gating else 1.0
     ok = rate >= args.min_pass_rate
-    print(f"\nGate: {passed}/{len(gating)} = {round(rate*100)}% "
-          f"(threshold {round(args.min_pass_rate*100)}%) → {'PASS' if ok else 'FAIL'}")
+    print(
+        f"\nGate: {passed}/{len(gating)} = {round(rate * 100)}% "
+        f"(threshold {round(args.min_pass_rate * 100)}%) → {'PASS' if ok else 'FAIL'}"
+    )
     if not ok:
         failed_ids = [r["id"] for r in gating if not r["passed"]]
         print(f"  below threshold; failing: {', '.join(failed_ids)}")

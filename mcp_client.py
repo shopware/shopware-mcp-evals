@@ -78,18 +78,26 @@ class Endpoint:
         self.auth_headers = {"Content-Type": "application/json", **auth_headers}
 
 
-ADMIN = Endpoint("admin", "/api/_mcp", {
-    "sw-access-key": SW_ACCESS_KEY,
-    "sw-secret-access-key": SW_SECRET_ACCESS_KEY,
-})
+ADMIN = Endpoint(
+    "admin",
+    "/api/_mcp",
+    {
+        "sw-access-key": SW_ACCESS_KEY,
+        "sw-secret-access-key": SW_SECRET_ACCESS_KEY,
+    },
+)
 
 # The store endpoint carries a fixed context token for the whole run so
 # cart/checkout state persists across calls (the server would otherwise issue a
 # fresh one each request).
-STORE = Endpoint("store", "/store-api/_mcp", {
-    "sw-access-key": SW_SC_ACCESS_KEY,
-    "sw-context-token": secrets.token_hex(16),
-})
+STORE = Endpoint(
+    "store",
+    "/store-api/_mcp",
+    {
+        "sw-access-key": SW_SC_ACCESS_KEY,
+        "sw-context-token": secrets.token_hex(16),
+    },
+)
 
 # Backwards-compatible admin aliases (referenced by older call sites).
 MCP_URL = ADMIN.url
@@ -111,8 +119,9 @@ def _throttle_wait(resp: requests.Response) -> float:
     return 5.0
 
 
-def _rpc(method: str, params: dict, session_id: str | None = None,
-         rpc_id: int = 1, endpoint: Endpoint = ADMIN) -> requests.Response:
+def _rpc(
+    method: str, params: dict, session_id: str | None = None, rpc_id: int = 1, endpoint: Endpoint = ADMIN
+) -> requests.Response:
     headers = dict(endpoint.auth_headers)
     if session_id is not None:
         headers["Mcp-Session-Id"] = session_id
@@ -147,8 +156,7 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
 
 def mcp_call(session_id: str, tool: str, arguments: dict, endpoint: Endpoint = ADMIN) -> dict:
     """Call a tool. Returns the full JSON-RPC response dict."""
-    return _rpc("tools/call", {"name": tool, "arguments": arguments},
-                session_id, rpc_id=99, endpoint=endpoint).json()
+    return _rpc("tools/call", {"name": tool, "arguments": arguments}, session_id, rpc_id=99, endpoint=endpoint).json()
 
 
 def mcp_result_text(resp: dict) -> str:

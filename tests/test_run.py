@@ -102,33 +102,95 @@ def test_first_field_empty_when_no_items(monkeypatch):
 # Stateful fake server for the full flows
 # ---------------------------------------------------------------------------
 ADMIN_TOOLSETS = [
-    {"name": "entity", "title": "Entity", "description": "DAL", "enabled": False,
-     "tools": ["shopware-entity-read", "shopware-entity-search", "shopware-entity-schema",
-               "shopware-entity-aggregate", "shopware-entity-upsert", "shopware-entity-delete"]},
-    {"name": "system", "title": "System", "description": "config", "enabled": False,
-     "tools": ["shopware-system-config-read", "shopware-system-config-write"]},
-    {"name": "media", "title": "Media", "description": "media", "enabled": False,
-     "tools": ["shopware-media-upload", "shopware-theme-config"]},
-    {"name": "order", "title": "Order", "description": "orders", "enabled": False,
-     "tools": ["shopware-order-state", "merchant-order-summary"]},
-    {"name": "customer", "title": "Customer", "description": "customers", "enabled": False,
-     "tools": ["merchant-customer-lookup", "merchant-checkout-methods"]},
-    {"name": "catalog", "title": "Catalog", "description": "catalog", "enabled": False,
-     "tools": ["merchant-storefront-search", "merchant-product-create"]},
-    {"name": "cart", "title": "Cart", "description": "cart", "enabled": False,
-     "tools": ["merchant-cart-manage", "merchant-cart-checkout"]},
-    {"name": "reports", "title": "Reports", "description": "reports", "enabled": False,
-     "tools": ["merchant-bestseller-report", "merchant-revenue-report"]},
+    {
+        "name": "entity",
+        "title": "Entity",
+        "description": "DAL",
+        "enabled": False,
+        "tools": [
+            "shopware-entity-read",
+            "shopware-entity-search",
+            "shopware-entity-schema",
+            "shopware-entity-aggregate",
+            "shopware-entity-upsert",
+            "shopware-entity-delete",
+        ],
+    },
+    {
+        "name": "system",
+        "title": "System",
+        "description": "config",
+        "enabled": False,
+        "tools": ["shopware-system-config-read", "shopware-system-config-write"],
+    },
+    {
+        "name": "media",
+        "title": "Media",
+        "description": "media",
+        "enabled": False,
+        "tools": ["shopware-media-upload", "shopware-theme-config"],
+    },
+    {
+        "name": "order",
+        "title": "Order",
+        "description": "orders",
+        "enabled": False,
+        "tools": ["shopware-order-state", "merchant-order-summary"],
+    },
+    {
+        "name": "customer",
+        "title": "Customer",
+        "description": "customers",
+        "enabled": False,
+        "tools": ["merchant-customer-lookup", "merchant-checkout-methods"],
+    },
+    {
+        "name": "catalog",
+        "title": "Catalog",
+        "description": "catalog",
+        "enabled": False,
+        "tools": ["merchant-storefront-search", "merchant-product-create"],
+    },
+    {
+        "name": "cart",
+        "title": "Cart",
+        "description": "cart",
+        "enabled": False,
+        "tools": ["merchant-cart-manage", "merchant-cart-checkout"],
+    },
+    {
+        "name": "reports",
+        "title": "Reports",
+        "description": "reports",
+        "enabled": False,
+        "tools": ["merchant-bestseller-report", "merchant-revenue-report"],
+    },
 ]
 
 STORE_TOOLSETS = [
-    {"name": "buyer-journey", "title": "Buyer Journey", "description": "cart/checkout", "enabled": False,
-     "tools": [f"shopware-ucp-cart-{x}" for x in ("create", "add", "remove", "get", "update")]
-              + [f"shopware-ucp-checkout-{x}" for x in ("start", "confirm")]
-              + [f"shopware-ucp-catalog-{x}" for x in ("search", "read")]},
-    {"name": "context", "title": "Context", "description": "context", "enabled": False,
-     "tools": ["shopware-store-api-context", "shopware-store-config-read", "shopware-store-nav-read",
-               "shopware-store-page-read", "shopware-store-seo-read", "shopware-store-currency-list"]},
+    {
+        "name": "buyer-journey",
+        "title": "Buyer Journey",
+        "description": "cart/checkout",
+        "enabled": False,
+        "tools": [f"shopware-ucp-cart-{x}" for x in ("create", "add", "remove", "get", "update")]
+        + [f"shopware-ucp-checkout-{x}" for x in ("start", "confirm")]
+        + [f"shopware-ucp-catalog-{x}" for x in ("search", "read")],
+    },
+    {
+        "name": "context",
+        "title": "Context",
+        "description": "context",
+        "enabled": False,
+        "tools": [
+            "shopware-store-api-context",
+            "shopware-store-config-read",
+            "shopware-store-nav-read",
+            "shopware-store-page-read",
+            "shopware-store-seo-read",
+            "shopware-store-currency-list",
+        ],
+    },
 ]
 
 
@@ -174,8 +236,7 @@ class FakeServer:
             elif "image" in query or "upload" in query:
                 data = [{"tool": {"name": "shopware-media-upload"}, "score": 0.9, "matchedIn": "desc"}]
             else:
-                data = [{"tool": {"name": f"tool-{i}"}, "score": 0.5, "matchedIn": "name"}
-                        for i in range(count)]
+                data = [{"tool": {"name": f"tool-{i}"}, "score": 0.5, "matchedIn": "name"} for i in range(count)]
             return call_resp({"success": True, "data": data, "_meta": {"query": query, "totalCandidates": 20}})
         if tool == "shopware-store-api-context":
             return call_resp({"success": True, "data": {"salesChannelId": "sc1", "token": "tok"}})

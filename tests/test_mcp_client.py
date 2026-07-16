@@ -62,8 +62,9 @@ def test_rpc_retries_then_succeeds(monkeypatch):
 
 
 def test_rpc_raises_after_exhausting_retries(monkeypatch):
-    monkeypatch.setattr(C.requests, "post",
-                        lambda *_a, **_k: FakeResp(429, body={"error": {"message": "throttled for 1 seconds"}}))
+    monkeypatch.setattr(
+        C.requests, "post", lambda *_a, **_k: FakeResp(429, body={"error": {"message": "throttled for 1 seconds"}})
+    )
     monkeypatch.setattr(C.time, "sleep", lambda _s: None)
 
     with pytest.raises(requests.exceptions.HTTPError):
