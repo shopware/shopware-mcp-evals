@@ -52,6 +52,9 @@ python functional/run.py --skip-dev-tools
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
 python functional/run.py --endpoint store
 .venv/bin/python3 eval/run.py --endpoint store --modes discovery
+
+# Unit tests (offline, no server) — reporting, runner logic, throttle retry
+.venv/bin/python3 -m pytest tests -q
 ```
 
 Exit code of `eval/run.py` is 0 when the **discovery** run meets `--min-pass-rate`

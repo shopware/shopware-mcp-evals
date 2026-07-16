@@ -14,4 +14,4 @@ select = [
 ]
 
 [lint.isort]
-known-first-party = ["mcp_client", "reporting"]
+known-first-party = ["mcp_client", "reporting", "run"]

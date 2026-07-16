@@ -47,7 +47,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint (Python + shell)
+    name: Lint & unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -59,11 +59,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install dev dependencies
+        run: pip install ruff -r requirements-dev.txt
 
       - name: Ruff (Python lint)
-        run: ruff check eval functional mcp_client.py
+        run: ruff check eval functional mcp_client.py tests
+
+      - name: Pytest (unit tests)
+        run: pytest tests -q
 
       - name: ShellCheck (shell lint)
         run: |

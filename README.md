@@ -66,9 +66,20 @@ The output drives improvements to the `#[McpTool(description: '…')]` and
 │   ├── fixtures.yaml      # admin natural-language prompts + expected tool
 │   ├── fixtures_store.yaml # Store API / UCP prompts + expected tool
 │   └── requirements.txt   # anthropic, openai, requests, pyyaml
-├── ruff.toml              # Python lint config (eval + functional + mcp_client)
+├── tests/                 # pytest unit tests (reporting, runner logic, throttle retry)
+├── ruff.toml              # Python lint config (eval + functional + mcp_client + tests)
+├── requirements-dev.txt   # eval deps + pytest
 ├── tool-history/          # committed snapshot baseline (latest.json)
 └── results/               # JSON reports, gitignored
+```
+
+Unit tests (offline, no server needed) cover the reporting harness, the runner's
+verdict logic and full admin/store flows (driven through a fake MCP server), and
+the client's HTTP 429 retry:
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests -q
 ```
 
 ## Setup
