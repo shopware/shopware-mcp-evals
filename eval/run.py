@@ -32,7 +32,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -93,7 +93,7 @@ def tools_for_openai(mcp_tools: list[dict]) -> list[dict]:
 def anthropic_turn(client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
     """One assistant turn. Returns {tool_calls, assistant_message, tool_result_builder,
     stop_reason, tokens}."""
-    kwargs = dict(model=model, max_tokens=1024, tools=tools, messages=messages)
+    kwargs = {"model": model, "max_tokens": 1024, "tools": tools, "messages": messages}
     if system_prompt:
         kwargs["system"] = system_prompt
     response = client.messages.create(**kwargs)
@@ -640,7 +640,8 @@ def run_baseline_pass(provider, client, fixtures, model, system_prompt, availabl
     return results
 
 
-def run_discovery_pass(provider, client, fixtures, model, system_prompt, default_max_steps, available_tools, endpoint=ADMIN):
+def run_discovery_pass(provider, client, fixtures, model, system_prompt, default_max_steps,
+                       available_tools, endpoint=ADMIN):
     print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
     results = []
     for i, fixture in enumerate(fixtures, 1):
@@ -653,7 +654,8 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
             print()
             continue
         try:
-            result = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint)
+            result = run_fixture_discovery(provider, client, fixture, model, system_prompt,
+                                           max_steps, endpoint=endpoint)
             attempts = 1
             # Retry once on failure: gpt-4o is nondeterministic, so a single
             # borderline miss shouldn't flip CI red. A real regression fails
@@ -661,7 +663,8 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
             if not result["passed"]:
                 print(f"           {YELLOW}retry{RESET} (first attempt selected="
                       f"{result['selected_tool'] or '(none)'})")
-                retry = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint)
+                retry = run_fixture_discovery(provider, client, fixture, model, system_prompt,
+                                              max_steps, endpoint=endpoint)
                 attempts = 2
                 if retry["passed"]:
                     result = retry
@@ -688,7 +691,8 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
 
 def main():
     parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner (v2 discovery)")
-    parser.add_argument("--provider", choices=["anthropic", "openai"], default=os.environ.get("EVAL_PROVIDER", "anthropic"))
+    parser.add_argument("--provider", choices=["anthropic", "openai"],
+                        default=os.environ.get("EVAL_PROVIDER", "anthropic"))
     parser.add_argument("--model", default=None)
     parser.add_argument("--modes", default="baseline,discovery",
                         help="Comma-separated: baseline, discovery (default: both)")
@@ -701,7 +705,8 @@ def main():
                         help="Min gating-mode pass rate for exit 0 (default 0.9; use 1.0 for strict)")
     parser.add_argument("--endpoint", choices=["admin", "store"], default="admin",
                         help="Which MCP endpoint to test (default admin). 'store' uses the Store API + UCP tools.")
-    parser.add_argument("--fixtures", help="Fixtures file (default: fixtures.yaml, or fixtures_store.yaml for --endpoint store)")
+    parser.add_argument("--fixtures",
+                        help="Fixtures file (default: fixtures.yaml, or fixtures_store.yaml for --endpoint store)")
     parser.add_argument("--category", help="Run only fixtures of this category")
     parser.add_argument("--id", help="Run only this fixture ID")
     parser.add_argument("--output", help="Path to save JSON report")
@@ -722,7 +727,8 @@ def main():
         required.append(("SW_SC_ACCESS_KEY", SW_SC_ACCESS_KEY))
     else:
         required += [("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
-    required.append(("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) if provider == "anthropic" else ("OPENAI_API_KEY", OPENAI_API_KEY))
+    required.append(("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) if provider == "anthropic"
+                    else ("OPENAI_API_KEY", OPENAI_API_KEY))
     for var, val in required:
         if not val:
             print(f"ERROR: {var} is not set.", file=sys.stderr)
@@ -776,7 +782,8 @@ def main():
     results_baseline = None
     results_discovery = None
     if "baseline" in modes:
-        results_baseline = run_baseline_pass(provider, client, all_fixtures, model, system_prompt, available_tools, endpoint=endpoint)
+        results_baseline = run_baseline_pass(provider, client, all_fixtures, model, system_prompt,
+                                             available_tools, endpoint=endpoint)
     if "discovery" in modes:
         results_discovery = run_discovery_pass(provider, client, all_fixtures, model,
                                                system_prompt, args.max_steps, available_tools, endpoint=endpoint)
@@ -790,11 +797,11 @@ def main():
     elif results_baseline:
         print_single_mode(results_baseline, "baseline")
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     output_path = args.output or str(BASE / "results" / f"eval-{provider}-{ts}.json")
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     report = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "server": SW_BASE_URL,
         "provider": provider,
         "model": model,

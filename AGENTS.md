@@ -15,7 +15,7 @@ brief for coding agents.
   The allowlist is the call boundary; advertising is not.
 - `tools/list` is cursor-paginated — always walk `nextCursor` (see
   `mcp_tools_list_all`), never assume one page.
-- The three meta-tools (`META_TOOLS` in `eval/mcp_client.py`):
+- The three meta-tools (`META_TOOLS` in `mcp_client.py`):
   `shopware-tool-search`, `shopware-toolsets-list`, `shopware-toolset-enable`.
 - `shopware-toolset-enable` persists per `Mcp-Session-Id`. Discovery-mode eval
   therefore opens a **fresh session per fixture** so enablement can't leak.
@@ -32,9 +32,9 @@ pip install -r eval/requirements.txt
 
 ```bash
 # Layer 1 — functional: v2 discovery mechanics + per-tool dryRun-safe calls
-bash functional/run.sh
-bash functional/run.sh --skip-media-upload
-bash functional/run.sh --skip-dev-tools
+python functional/run.py
+python functional/run.py --skip-media-upload
+python functional/run.py --skip-dev-tools
 
 # Layer 2 — LLM eval. Each fixture runs in baseline mode (full catalogue,
 # single shot) and discovery mode (default surface + agentic meta-tool loop).
@@ -50,7 +50,7 @@ bash functional/run.sh --skip-dev-tools
 .venv/bin/python3 eval/snapshot_tools.py --output tool-history/latest.json
 
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
-bash functional/run_store.sh
+python functional/run.py --endpoint store
 .venv/bin/python3 eval/run.py --endpoint store --modes discovery
 ```
 
@@ -69,9 +69,9 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 
 | File | Purpose |
 |---|---|
-| `eval/mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
-| `functional/run.sh` | Admin v2 discovery mechanics + per-tool minimal-payload calls |
-| `functional/run_store.sh` | Store API / UCP discovery mechanics + context |
+| `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
+| `functional/run.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
+| `functional/reporting.py` | Reusable pass/fail/skip harness + JSON report writer |
 | `eval/fixtures_store.yaml` | Store API / UCP buyer-journey fixtures |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
 | `eval/run.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |

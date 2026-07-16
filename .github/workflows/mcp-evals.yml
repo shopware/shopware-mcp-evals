@@ -46,6 +46,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  lint:
+    name: Lint (Python + shell)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout evals repo
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff (Python lint)
+        run: ruff check eval functional mcp_client.py
+
+      - name: ShellCheck (shell lint)
+        run: |
+          shopt -s nullglob globstar
+          scripts=(functional/**/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts to lint."
+          else
+            printf 'Linting: %s\n' "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+          fi
+
   evals:
     name: Run MCP evals
     runs-on: ubuntu-latest
@@ -212,25 +242,15 @@ jobs:
             symfony server:start
 
       - name: Wait for Shopware after plugin install
-        working-directory: shopware
         run: |
-          # 401 means the server is up and the auth middleware is working; that's
-          # what we need before the OAuth/integration step. 200 would require auth.
-          for i in $(seq 1 60); do
-            STATUS=$(curl -o /dev/null -w "%{http_code}" -sS --max-time 5 http://localhost:8000/api/_info/version 2>/dev/null || echo "000")
-            case "$STATUS" in
-              2*|401)
-                echo "Shopware ready (attempt $i, HTTP $STATUS)"
-                exit 0
-                ;;
-            esac
-            echo "Attempt $i: HTTP $STATUS"
-            sleep 2
-          done
-          echo "::error::Shopware did not become ready after plugin install"
-          echo "--- symfony server:status ---"
-          symfony server:status 2>&1 || true
-          exit 1
+          # A 2xx or 401 both prove the server is up (401 = auth middleware
+          # answering, which is what the OAuth/integration step needs next).
+          bash "$GITHUB_WORKSPACE/functional/ci/wait_for_http.sh" \
+            http://localhost:8000/api/_info/version 60 2 || {
+              echo "--- symfony server:status ---"
+              (cd shopware && symfony server:status 2>&1) || true
+              exit 1
+            }
 
       # A fresh system:install has no products/customers/orders, so the
       # data-dependent functional assertions (entity-read/upsert, order-state,
@@ -326,7 +346,7 @@ jobs:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
           SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
-        run: bash functional/run.sh
+        run: python functional/run.py --endpoint admin
 
       - name: Run LLM eval
         id: eval
@@ -368,7 +388,7 @@ jobs:
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
-        run: bash functional/run_store.sh
+        run: python functional/run.py --endpoint store
 
       - name: Run Store API LLM eval (advisory)
         if: github.event.inputs.run_store == 'true'

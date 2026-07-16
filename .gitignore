@@ -4,6 +4,7 @@ results/*.json
 __pycache__/
 *.pyc
 .venv/
+.ruff_cache/
 
 # tool-history is tracked deliberately (audit trail of MCP descriptions)
 !tool-history/

@@ -55,16 +55,18 @@ The output drives improvements to the `#[McpTool(description: '…')]` and
 ├── AGENTS.md              # short brief for coding agents
 ├── .env.example           # required credentials and optional overrides
 ├── shopware.sha           # pinned Shopware commit for reproducible CI runs
+├── mcp_client.py          # shared MCP HTTP helpers (admin + store endpoints)
 ├── functional/
-│   ├── run.sh             # Layer 1 (admin): v2 discovery mechanics + per-tool dryRun calls
-│   └── run_store.sh       # Layer 1 (store): Store API / UCP discovery mechanics
+│   ├── run.py             # Layer 1: v2 discovery mechanics + per-tool dryRun calls (--endpoint admin|store)
+│   ├── reporting.py       # pass/fail/skip harness + JSON report writer
+│   └── ci/                # reusable shell helpers used by the workflow (shellcheck-linted)
 ├── eval/
-│   ├── mcp_client.py      # shared MCP HTTP helpers (admin + store endpoints)
 │   ├── run.py             # Layer 2: baseline vs discovery LLM eval (--endpoint admin|store)
 │   ├── snapshot_tools.py  # full-catalogue snapshot for drift detection
 │   ├── fixtures.yaml      # admin natural-language prompts + expected tool
 │   ├── fixtures_store.yaml # Store API / UCP prompts + expected tool
 │   └── requirements.txt   # anthropic, openai, requests, pyyaml
+├── ruff.toml              # Python lint config (eval + functional + mcp_client)
 ├── tool-history/          # committed snapshot baseline (latest.json)
 └── results/               # JSON reports, gitignored
 ```
@@ -118,13 +120,16 @@ to a deferred tool doubles as a direct-callability assertion. Mutating tools
 all run with `dryRun=true`.
 
 ```bash
-bash functional/run.sh
+python functional/run.py
 
 # skip the media-upload test (the only tool without a dryRun mode)
-bash functional/run.sh --skip-media-upload
+python functional/run.py --skip-media-upload
 
 # skip the SwagMcpDevTools assertions (instance without the dev-tools bundle)
-bash functional/run.sh --skip-dev-tools
+python functional/run.py --skip-dev-tools
+
+# Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
+python functional/run.py --endpoint store
 ```
 
 Pass / fail / skip per check is printed to stdout. A JSON report is saved to
@@ -227,7 +232,7 @@ admin but authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`) plu
 a context token. Run it with:
 
 ```bash
-bash functional/run_store.sh                       # Layer 1 (discovery mechanics + context)
+python functional/run.py --endpoint store               # Layer 1 (discovery mechanics + context)
 python eval/run.py --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
 ```
 

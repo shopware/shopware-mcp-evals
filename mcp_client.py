@@ -6,7 +6,8 @@ Two endpoints, same discovery machinery:
   - ADMIN (/api/_mcp)      auth: integration access key + secret
   - STORE (/store-api/_mcp) auth: sales-channel access key + context token
 
-Used by eval/run.py and eval/snapshot_tools.py. Speaks JSON-RPC 2.0 over HTTP
+Used by eval/run.py, eval/snapshot_tools.py, and functional/run.py. Speaks
+JSON-RPC 2.0 over HTTP
 POST, tracking the Mcp-Session-Id header. Every function takes an optional
 `endpoint` (default ADMIN) so existing admin call sites are unchanged.
 
@@ -19,12 +20,20 @@ MCP Server v2 notes:
 
 import json
 import os
+import re
 import secrets
+import time
 from pathlib import Path
 
 import requests
 
-BASE = Path(__file__).parent.parent
+# The MCP endpoint throttles bursts (HTTP 429). Retry a bounded number of times,
+# honoring the server's advertised wait, so a functional run pacing ~100 calls
+# does not fail on transient throttling.
+THROTTLE_MAX_RETRIES = 5
+THROTTLE_MAX_WAIT_S = 20.0
+
+BASE = Path(__file__).resolve().parent
 
 # Meta-tools of the v2 discovery layer. Always advertised on both endpoints.
 META_TOOLS = {
@@ -87,17 +96,33 @@ MCP_URL = ADMIN.url
 AUTH_HEADERS = ADMIN.auth_headers
 
 
+def _throttle_wait(resp: requests.Response) -> float:
+    """Seconds to wait before retrying a 429, from Retry-After or the server's
+    'throttled for N seconds' hint, capped so a run can never stall for long."""
+    retry_after = resp.headers.get("Retry-After", "")
+    if retry_after.isdigit():
+        return min(float(retry_after), THROTTLE_MAX_WAIT_S)
+    try:
+        match = re.search(r"(\d+)\s*second", resp.json().get("error", {}).get("message", ""))
+        if match:
+            return min(float(match.group(1)), THROTTLE_MAX_WAIT_S)
+    except (ValueError, TypeError):
+        pass
+    return 5.0
+
+
 def _rpc(method: str, params: dict, session_id: str | None = None,
          rpc_id: int = 1, endpoint: Endpoint = ADMIN) -> requests.Response:
     headers = dict(endpoint.auth_headers)
     if session_id is not None:
         headers["Mcp-Session-Id"] = session_id
-    resp = requests.post(
-        endpoint.url,
-        headers=headers,
-        json={"jsonrpc": "2.0", "method": method, "params": params, "id": rpc_id},
-        timeout=30,
-    )
+    body = {"jsonrpc": "2.0", "method": method, "params": params, "id": rpc_id}
+    for attempt in range(THROTTLE_MAX_RETRIES + 1):
+        resp = requests.post(endpoint.url, headers=headers, json=body, timeout=30)
+        if resp.status_code == 429 and attempt < THROTTLE_MAX_RETRIES:
+            time.sleep(_throttle_wait(resp))
+            continue
+        break
     resp.raise_for_status()
     return resp
 
