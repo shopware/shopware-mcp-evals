@@ -37,7 +37,10 @@ from pathlib import Path
 
 import yaml
 
-from mcp_client import (
+# mcp_client lives at the repo root (shared by the eval and functional layers).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mcp_client import (  # noqa: E402
     ADMIN,
     BASE,
     META_TOOLS,
