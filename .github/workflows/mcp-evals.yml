@@ -241,11 +241,14 @@ jobs:
         working-directory: shopware
         continue-on-error: true
         run: |
-          bin/console framework:demodata \
+          # framework:demodata refuses to run under APP_ENV=test, so seed in
+          # prod. The database (DATABASE_URL) is shared across envs, so the
+          # test-env MCP server reads the seeded products/customers/orders.
+          APP_ENV=prod bin/console framework:demodata \
             --products=20 --categories=5 --manufacturers=5 \
             --customers=10 --orders=10 --media=10 \
             --no-interaction || echo "::warning::framework:demodata failed; data-dependent assertions will skip"
-          bin/console dal:refresh:index --no-interaction || true
+          APP_ENV=prod bin/console dal:refresh:index --no-interaction || true
 
       - name: Create integration
         id: integration
