@@ -1,0 +1,50 @@
+name: Lint & unit tests
+
+# Fast, self-contained quality gate (no Shopware install). Intentionally in its
+# own workflow with a permanent pull_request trigger so it keeps running on every
+# PR regardless of what happens to the heavy eval workflow's triggers.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+
+      - name: Install dev dependencies
+        run: pip install ruff -r requirements-dev.txt
+
+      - name: Ruff (lint)
+        run: ruff check eval functional mcp_client.py tests
+
+      - name: Ruff (format check)
+        run: ruff format --check eval functional mcp_client.py tests
+
+      - name: Pytest (unit tests)
+        run: pytest tests -q
+
+      - name: ShellCheck (shell lint)
+        run: |
+          shopt -s nullglob globstar
+          scripts=(functional/**/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts to lint."
+          else
+            printf 'Linting: %s\n' "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+          fi

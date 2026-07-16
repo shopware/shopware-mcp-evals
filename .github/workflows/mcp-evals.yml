@@ -46,39 +46,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  lint:
-    name: Lint & unit tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout evals repo
-        uses: actions/checkout@v7
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-
-      - name: Install dev dependencies
-        run: pip install ruff -r requirements-dev.txt
-
-      - name: Ruff (Python lint)
-        run: ruff check eval functional mcp_client.py tests
-
-      - name: Pytest (unit tests)
-        run: pytest tests -q
-
-      - name: ShellCheck (shell lint)
-        run: |
-          shopt -s nullglob globstar
-          scripts=(functional/**/*.sh)
-          if [ ${#scripts[@]} -eq 0 ]; then
-            echo "No shell scripts to lint."
-          else
-            printf 'Linting: %s\n' "${scripts[@]}"
-            shellcheck "${scripts[@]}"
-          fi
-
+  # Fast lint + unit-test gate lives in its own workflow (.github/workflows/lint.yml)
+  # so it keeps running on every PR independently of this heavy eval workflow.
   evals:
     name: Run MCP evals
     runs-on: ubuntu-latest
@@ -97,7 +66,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version-file: .python-version
           cache: pip
           cache-dependency-path: eval/requirements.txt
 
