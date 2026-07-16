@@ -38,12 +38,15 @@ from pathlib import Path
 import yaml
 
 from mcp_client import (
+    ADMIN,
     BASE,
     META_TOOLS,
     SW_ACCESS_KEY,
     SW_BASE_URL,
+    SW_SC_ACCESS_KEY,
     SW_SECRET_ACCESS_KEY,
     enable_all_toolsets,
+    endpoint_by_name,
     mcp_call,
     mcp_call_error,
     mcp_fetch_system_prompt,
@@ -225,7 +228,7 @@ def _search_contains_expected(result_text: str, expected_tool: str) -> bool:
 
 
 def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
-                          system_prompt: str | None, max_steps: int) -> dict:
+                          system_prompt: str | None, max_steps: int, endpoint=ADMIN) -> dict:
     prompt = fixture["prompt"]
     expected_tool = fixture["expected_tool"]
     acceptable = set(fixture.get("acceptable_tools", []))
@@ -235,14 +238,14 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
 
     # Fresh session per fixture: toolset enablement persists per Mcp-Session-Id
     # and would leak across fixtures on a shared session.
-    session_id, _ = mcp_init()
+    session_id, _ = mcp_init(endpoint=endpoint)
 
     # Callable-tool catalogue by name. Starts as the advertised default surface.
     # Grows when a toolset is enabled (re-fetched tools/list) OR when
     # shopware-tool-search returns a tool inline — a search-surfaced tool is
     # directly callable because the allowlist, not advertising, is the call
     # boundary. This mirrors how a real MCP client exposes discovered tools.
-    catalog = {t["name"]: t for t in mcp_tools_list_all(session_id)}
+    catalog = {t["name"]: t for t in mcp_tools_list_all(session_id, endpoint=endpoint)}
     tools = tools_fn(list(catalog.values()))
 
     messages = []
@@ -288,7 +291,7 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
                 break
 
             # Execute discovery meta-tools for real and feed results back.
-            resp = mcp_call(session_id, call["name"], call["input"])
+            resp = mcp_call(session_id, call["name"], call["input"], endpoint=endpoint)
             err = mcp_call_error(resp)
             result_text = mcp_result_text(resp) or (f"Error: {err}" if err else "")
             tool_results.append((call["id"], result_text))
@@ -309,7 +312,7 @@ def run_fixture_discovery(provider: str, client, fixture: dict, model: str,
             if call["name"] == "shopware-toolset-enable" and not err:
                 enabled_toolsets.append(call["input"].get("toolset", ""))
                 # Simulate tools/list_changed: re-fetch the advertised surface.
-                for t in mcp_tools_list_all(session_id):
+                for t in mcp_tools_list_all(session_id, endpoint=endpoint):
                     if t["name"] not in catalog:
                         catalog[t["name"]] = t
                         catalog_changed = True
@@ -599,11 +602,11 @@ def skipped_result(fixture: dict, mode: str) -> dict:
     }
 
 
-def run_baseline_pass(provider, client, fixtures, model, system_prompt, available_tools):
+def run_baseline_pass(provider, client, fixtures, model, system_prompt, available_tools, endpoint=ADMIN):
     print(f"\n{BOLD}── Mode: baseline (full catalogue, single shot) ──{RESET}\n")
-    session_id, _ = mcp_init()
-    enable_all_toolsets(session_id)
-    mcp_tools = mcp_tools_list_all(session_id)
+    session_id, _ = mcp_init(endpoint=endpoint)
+    enable_all_toolsets(session_id, endpoint=endpoint)
+    mcp_tools = mcp_tools_list_all(session_id, endpoint=endpoint)
     tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
     tools = tools_fn(mcp_tools)
     print(f"  Catalogue: {len(mcp_tools)} tools (all toolsets enabled)\n")
@@ -634,7 +637,7 @@ def run_baseline_pass(provider, client, fixtures, model, system_prompt, availabl
     return results
 
 
-def run_discovery_pass(provider, client, fixtures, model, system_prompt, default_max_steps, available_tools):
+def run_discovery_pass(provider, client, fixtures, model, system_prompt, default_max_steps, available_tools, endpoint=ADMIN):
     print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
     results = []
     for i, fixture in enumerate(fixtures, 1):
@@ -647,7 +650,7 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
             print()
             continue
         try:
-            result = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps)
+            result = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint)
             attempts = 1
             # Retry once on failure: gpt-4o is nondeterministic, so a single
             # borderline miss shouldn't flip CI red. A real regression fails
@@ -655,7 +658,7 @@ def run_discovery_pass(provider, client, fixtures, model, system_prompt, default
             if not result["passed"]:
                 print(f"           {YELLOW}retry{RESET} (first attempt selected="
                       f"{result['selected_tool'] or '(none)'})")
-                retry = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps)
+                retry = run_fixture_discovery(provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint)
                 attempts = 2
                 if retry["passed"]:
                     result = retry
@@ -693,6 +696,9 @@ def main():
     parser.add_argument("--min-pass-rate", type=float,
                         default=float(os.environ.get("EVAL_MIN_PASS_RATE", "0.9")),
                         help="Min gating-mode pass rate for exit 0 (default 0.9; use 1.0 for strict)")
+    parser.add_argument("--endpoint", choices=["admin", "store"], default="admin",
+                        help="Which MCP endpoint to test (default admin). 'store' uses the Store API + UCP tools.")
+    parser.add_argument("--fixtures", help="Fixtures file (default: fixtures.yaml, or fixtures_store.yaml for --endpoint store)")
     parser.add_argument("--category", help="Run only fixtures of this category")
     parser.add_argument("--id", help="Run only this fixture ID")
     parser.add_argument("--output", help="Path to save JSON report")
@@ -706,7 +712,13 @@ def main():
             print(f"ERROR: unknown mode '{m}'", file=sys.stderr)
             sys.exit(1)
 
-    required = [("SW_BASE_URL", SW_BASE_URL), ("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
+    endpoint = endpoint_by_name(args.endpoint)
+
+    required = [("SW_BASE_URL", SW_BASE_URL)]
+    if args.endpoint == "store":
+        required.append(("SW_SC_ACCESS_KEY", SW_SC_ACCESS_KEY))
+    else:
+        required += [("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
     required.append(("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) if provider == "anthropic" else ("OPENAI_API_KEY", OPENAI_API_KEY))
     for var, val in required:
         if not val:
@@ -720,7 +732,8 @@ def main():
         from openai import OpenAI
         client = OpenAI(api_key=OPENAI_API_KEY)
 
-    fixtures_path = Path(__file__).parent / "fixtures.yaml"
+    default_fixtures = "fixtures_store.yaml" if args.endpoint == "store" else "fixtures.yaml"
+    fixtures_path = Path(args.fixtures) if args.fixtures else Path(__file__).parent / default_fixtures
     all_fixtures = yaml.safe_load(fixtures_path.read_text())["fixtures"]
     if args.category:
         all_fixtures = [f for f in all_fixtures if f.get("category") == args.category]
@@ -731,28 +744,28 @@ def main():
         sys.exit(1)
 
     print(f"{BOLD}Shopware MCP LLM Eval (v2 discovery){RESET}")
-    print(f"Server:   {SW_BASE_URL}")
+    print(f"Server:   {SW_BASE_URL}  ({endpoint.name} endpoint)")
     print(f"Provider: {provider}")
     print(f"Model:    {model}")
     print(f"Modes:    {', '.join(modes)}")
     print(f"Fixtures: {len(all_fixtures)}")
 
     print("\nInitializing MCP session for system prompt...")
-    session_id, server_instructions = mcp_init()
+    session_id, server_instructions = mcp_init(endpoint=endpoint)
     if args.no_system_prompt:
         system_prompt = None
         print("System prompt: disabled (--no-system-prompt)")
     else:
-        system_prompt = mcp_fetch_system_prompt(session_id, server_instructions)
+        system_prompt = mcp_fetch_system_prompt(session_id, server_instructions, endpoint=endpoint)
         prompt_names = [line for line in system_prompt.split("\n") if line.startswith("# ")]
         print(f"System prompt: {len(prompt_names)} sections, {len(system_prompt)} chars")
 
     # The full catalogue on this instance. Fixtures whose expected tool is not
     # registered (e.g. a plugin bundle that isn't installed) are skipped, not
     # scored as failures.
-    probe_sid, _ = mcp_init()
-    enable_all_toolsets(probe_sid)
-    available_tools = {t["name"] for t in mcp_tools_list_all(probe_sid)}
+    probe_sid, _ = mcp_init(endpoint=endpoint)
+    enable_all_toolsets(probe_sid, endpoint=endpoint)
+    available_tools = {t["name"] for t in mcp_tools_list_all(probe_sid, endpoint=endpoint)}
     absent = sorted({f["expected_tool"] for f in all_fixtures} - available_tools)
     if absent:
         print(f"Catalogue: {len(available_tools)} tools; will skip fixtures for absent: {', '.join(absent)}")
@@ -760,10 +773,10 @@ def main():
     results_baseline = None
     results_discovery = None
     if "baseline" in modes:
-        results_baseline = run_baseline_pass(provider, client, all_fixtures, model, system_prompt, available_tools)
+        results_baseline = run_baseline_pass(provider, client, all_fixtures, model, system_prompt, available_tools, endpoint=endpoint)
     if "discovery" in modes:
         results_discovery = run_discovery_pass(provider, client, all_fixtures, model,
-                                               system_prompt, args.max_steps, available_tools)
+                                               system_prompt, args.max_steps, available_tools, endpoint=endpoint)
 
     if results_baseline and results_discovery:
         print_comparison(results_baseline, results_discovery)

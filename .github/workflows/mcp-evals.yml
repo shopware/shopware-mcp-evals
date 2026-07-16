@@ -29,6 +29,14 @@ on:
         description: 'SwagMcpMerchantTools ref (branch, tag, or sha). Needs the v2 tool-group/deferral code.'
         required: false
         default: 'feat/mcp-tool-groups-deferral'
+      run_store:
+        description: 'Also run the Store API / UCP suite (installs SwagAgenticCommerce). Experimental.'
+        required: false
+        default: 'false'
+      agentic_commerce_ref:
+        description: 'SwagAgenticCommerce ref for the Store API UCP tools (used when run_store=true).'
+        required: false
+        default: 'feature/agentic-commerce-core-coexistence'
 
 permissions:
   contents: write
@@ -51,7 +59,7 @@ jobs:
 
     steps:
       - name: Checkout evals repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -135,7 +143,7 @@ jobs:
           php-version: '8.3'
 
       - name: Checkout SwagMcpDevTools (bundle)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: shopware/SwagMcpDevTools
           ref: ${{ github.event.inputs.dev_tools_ref || 'feat/mcp-tool-groups-deferral' }}
@@ -144,12 +152,23 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout SwagMcpMerchantTools (plugin)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: shopware/SwagMcpMerchantTools
           ref: ${{ github.event.inputs.merchant_tools_ref || 'feat/mcp-tool-groups-deferral' }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/plugins/SwagMcpMerchantTools
+          fetch-depth: 1
+
+      # Experimental: Store API / UCP suite (opt-in via run_store dispatch input).
+      - name: Checkout SwagAgenticCommerce (Store API / UCP)
+        if: github.event.inputs.run_store == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: shopware/SwagAgenticCommerce
+          ref: ${{ github.event.inputs.agentic_commerce_ref || 'feature/agentic-commerce-core-coexistence' }}
+          token: ${{ secrets.PLUGINS_PAT }}
+          path: shopware/custom/plugins/SwagAgenticCommerce
           fetch-depth: 1
 
       - name: Wire up MCP bundle + plugin
@@ -167,8 +186,17 @@ jobs:
             swag/mcp-merchant-tools:@dev \
             --no-interaction --no-scripts
 
+          # Experimental Store API / UCP tools (opt-in).
+          if [ "${{ github.event.inputs.run_store }}" = "true" ]; then
+            composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
+            composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts
+          fi
+
           bin/console plugin:refresh --no-interaction
           bin/console plugin:install --activate SwagMcpMerchantTools --no-interaction
+          if [ "${{ github.event.inputs.run_store }}" = "true" ]; then
+            bin/console plugin:install --activate SwagAgenticCommerce --no-interaction
+          fi
           bin/console cache:clear --no-interaction
           bin/console cache:warmup --no-interaction
 
@@ -314,9 +342,50 @@ jobs:
           [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
           python eval/run.py "${args[@]}"
 
+      # -------------------------------------------------------------------
+      # Experimental Store API / UCP suite (opt-in via run_store=true).
+      # -------------------------------------------------------------------
+      - name: Fetch sales-channel access key
+        if: github.event.inputs.run_store == 'true'
+        id: sc
+        run: |
+          set -euo pipefail
+          TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \
+            -H 'Content-Type: application/json' \
+            -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+          SC_KEY=$(curl -fsS "${APP_URL}/api/sales-channel?limit=50" \
+            -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((sc.get('attributes',sc).get('accessKey') for sc in d.get('data',[]) if sc.get('attributes',sc).get('accessKey')),''))")
+          echo "::add-mask::${SC_KEY}"
+          echo "sc_access_key=${SC_KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Store API functional tests
+        if: github.event.inputs.run_store == 'true'
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
+        run: bash functional/run_store.sh
+
+      - name: Run Store API LLM eval (advisory)
+        if: github.event.inputs.run_store == 'true'
+        continue-on-error: true
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVAL_PROVIDER: ${{ env.EVAL_PROVIDER }}
+          EVAL_MODEL: ${{ env.EVAL_MODEL }}
+        run: |
+          args=()
+          [ -n "${EVAL_PROVIDER}" ] && args+=(--provider "${EVAL_PROVIDER}")
+          [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
+          python eval/run.py --endpoint store --modes discovery "${args[@]}"
+
       - name: Upload eval results
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: eval-results-${{ github.run_id }}
           path: results/
@@ -325,7 +394,7 @@ jobs:
 
       - name: Upload tool-history snapshot
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: tool-history-${{ github.run_id }}
           path: tool-history/

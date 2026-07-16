@@ -56,12 +56,14 @@ The output drives improvements to the `#[McpTool(description: '…')]` and
 ├── .env.example           # required credentials and optional overrides
 ├── shopware.sha           # pinned Shopware commit for reproducible CI runs
 ├── functional/
-│   └── run.sh             # Layer 1: v2 discovery mechanics + per-tool dryRun calls
+│   ├── run.sh             # Layer 1 (admin): v2 discovery mechanics + per-tool dryRun calls
+│   └── run_store.sh       # Layer 1 (store): Store API / UCP discovery mechanics
 ├── eval/
-│   ├── mcp_client.py      # shared MCP HTTP helpers (session, pagination, toolsets)
-│   ├── run.py             # Layer 2: baseline vs discovery LLM eval
+│   ├── mcp_client.py      # shared MCP HTTP helpers (admin + store endpoints)
+│   ├── run.py             # Layer 2: baseline vs discovery LLM eval (--endpoint admin|store)
 │   ├── snapshot_tools.py  # full-catalogue snapshot for drift detection
-│   ├── fixtures.yaml      # natural-language prompts + expected tool
+│   ├── fixtures.yaml      # admin natural-language prompts + expected tool
+│   ├── fixtures_store.yaml # Store API / UCP prompts + expected tool
 │   └── requirements.txt   # anthropic, openai, requests, pyyaml
 ├── tool-history/          # committed snapshot baseline (latest.json)
 └── results/               # JSON reports, gitignored
@@ -216,9 +218,21 @@ required fields: `id`, `category`, `prompt`, `expected_tool`; optional:
 | Dev tools | `swag-dev-tools-{log-search,log-stream,list-extensions,list-skills,load-skill,notifications,scaffold}` |
 
 Example / demo tools (`SwagMcpExampleBundle`) and the `SwagMcpAdminUsers` plugin
-are not installed in CI, so they are outside the tested catalogue. The Store API
-MCP endpoint (`/store-api/_mcp`, the `shopware-ucp-*` tools) is out of scope for
-now.
+are not installed in CI, so they are outside the tested catalogue.
+
+The **Store API MCP endpoint** (`/store-api/_mcp`) is covered experimentally: the
+UCP buyer-journey tools (`shopware-ucp-*`) and `shopware-store-api-context` come
+from the `SwagAgenticCommerce` plugin. It uses the same discovery mechanics as
+admin but authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`) plus
+a context token. Run it with:
+
+```bash
+bash functional/run_store.sh                       # Layer 1 (discovery mechanics + context)
+python eval/run.py --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
+```
+
+In CI it is opt-in (the `run_store` dispatch input installs `SwagAgenticCommerce`)
+and the store LLM eval is advisory.
 
 ### Coverage
 

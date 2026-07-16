@@ -1,0 +1,117 @@
+# LLM Eval Fixtures — Store API endpoint (/store-api/_mcp)
+#
+# Same discovery model as admin: only the three meta-tools are advertised by
+# default; the UCP buyer-journey tools are deferred in the `shopware` toolset
+# and shopware-store-api-context in the `store-api` toolset. Run with:
+#   python eval/run.py --endpoint store
+#
+# Fields are identical to fixtures.yaml (see its header). Grading is on tool
+# selection; the terminal UCP tool is never executed.
+
+fixtures:
+
+  # -------------------------------------------------------------------------
+  # Catalog
+  # -------------------------------------------------------------------------
+
+  - id: catalog_search
+    category: unambiguous
+    prompt: "Search the storefront catalog for running shoes."
+    expected_tool: shopware-ucp-catalog-search
+    expected_toolset: shopware
+    notes: Free-text catalog discovery → catalog-search.
+
+  - id: catalog_lookup
+    category: disambiguation
+    prompt: "Load the full product details for product IDs 0a1b and 0c2d from the catalog."
+    expected_tool: shopware-ucp-catalog-lookup
+    expected_toolset: shopware
+    notes: Known IDs → catalog-lookup, not catalog-search (which is a text query).
+
+  # -------------------------------------------------------------------------
+  # Cart
+  # -------------------------------------------------------------------------
+
+  - id: cart_create
+    category: unambiguous
+    prompt: "Start a brand new shopping cart for me."
+    expected_tool: shopware-ucp-cart-create
+    expected_toolset: shopware
+
+  - id: cart_get
+    category: unambiguous
+    prompt: "Show me the current contents of cart cart_abc123."
+    expected_tool: shopware-ucp-cart-get
+    expected_toolset: shopware
+
+  - id: cart_update
+    category: disambiguation
+    prompt: "Set the quantity of line item li_9 in cart cart_abc123 to 3."
+    expected_tool: shopware-ucp-cart-update
+    expected_toolset: shopware
+    notes: Writing new line-item state to an existing cart → cart-update, not cart-get/create.
+
+  - id: cart_cancel
+    category: unambiguous
+    prompt: "Discard cart cart_abc123, I don't want it anymore."
+    expected_tool: shopware-ucp-cart-cancel
+    expected_toolset: shopware
+
+  - id: discount_apply
+    category: unambiguous
+    prompt: "Apply the discount code SUMMER10 to cart cart_abc123."
+    expected_tool: shopware-ucp-discount-apply
+    expected_toolset: shopware
+
+  # -------------------------------------------------------------------------
+  # Checkout
+  # -------------------------------------------------------------------------
+
+  - id: checkout_create
+    category: unambiguous
+    prompt: "Begin checkout for cart cart_abc123."
+    expected_tool: shopware-ucp-checkout-create
+    expected_toolset: shopware
+
+  - id: checkout_get
+    category: unambiguous
+    prompt: "What is the current status of checkout session co_xyz789?"
+    expected_tool: shopware-ucp-checkout-get
+    expected_toolset: shopware
+
+  - id: checkout_update
+    category: disambiguation
+    prompt: "Set the shipping address on checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-update
+    expected_toolset: shopware
+    notes: Editing an open checkout → checkout-update, not checkout-create/complete.
+
+  - id: checkout_complete
+    category: disambiguation
+    prompt: "Everything looks good — place the order for checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-complete
+    expected_toolset: shopware
+    notes: Finalizing/placing the order → checkout-complete, not checkout-update.
+
+  - id: checkout_cancel
+    category: unambiguous
+    prompt: "Cancel checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-cancel
+    expected_toolset: shopware
+
+  # -------------------------------------------------------------------------
+  # Order & context
+  # -------------------------------------------------------------------------
+
+  - id: order_get
+    category: unambiguous
+    prompt: "Show me the details of order ord_55501."
+    expected_tool: shopware-ucp-order-get
+    expected_toolset: shopware
+
+  - id: store_context
+    category: unambiguous
+    prompt: "Which sales channel, currency and language is this session using, and am I logged in as a customer?"
+    expected_tool: shopware-store-api-context
+    expected_toolset: store-api
+    notes: Reading the session's sales-channel context → store-api-context.

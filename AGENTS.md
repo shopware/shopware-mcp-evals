@@ -48,10 +48,15 @@ bash functional/run.sh --skip-dev-tools
 
 # Snapshot the full catalogue for drift detection
 .venv/bin/python3 eval/snapshot_tools.py --output tool-history/latest.json
+
+# Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
+bash functional/run_store.sh
+.venv/bin/python3 eval/run.py --endpoint store --modes discovery
 ```
 
-Exit code of `eval/run.py` is 0 only when every fixture passes the **discovery**
-run (baseline is advisory when both modes run).
+Exit code of `eval/run.py` is 0 when the **discovery** run meets `--min-pass-rate`
+(default 0.9); failed discovery fixtures are retried once. Baseline is advisory
+when both modes run. Fixtures whose expected tool isn't registered are skipped.
 
 ## Auth
 
@@ -64,8 +69,10 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 
 | File | Purpose |
 |---|---|
-| `eval/mcp_client.py` | Shared MCP HTTP helpers: session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
-| `functional/run.sh` | v2 discovery mechanics + per-tool minimal-payload calls |
+| `eval/mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
+| `functional/run.sh` | Admin v2 discovery mechanics + per-tool minimal-payload calls |
+| `functional/run_store.sh` | Store API / UCP discovery mechanics + context |
+| `eval/fixtures_store.yaml` | Store API / UCP buyer-journey fixtures |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
 | `eval/run.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
