@@ -1,4 +1,4 @@
-"""Unit tests for the mcp_client throttle-retry logic."""
+"""Unit tests for the mcp_client response parsing and throttle-retry logic."""
 
 import pytest
 import requests
@@ -7,10 +7,11 @@ import mcp_client as C
 
 
 class FakeResp:
-    def __init__(self, status_code, *, headers=None, body=None):
+    def __init__(self, status_code, *, headers=None, body=None, text=""):
         self.status_code = status_code
         self.headers = headers or {}
-        self._body = body or {}
+        self._body = body if body is not None else {}
+        self.text = text
 
     def json(self):
         return self._body
@@ -18,6 +19,54 @@ class FakeResp:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.exceptions.HTTPError(f"{self.status_code} error", response=self)
+
+
+# --- response parsing: application/json object, SSE stream, and (defensive) array ---
+SSE_BODY = (
+    "event: message\n"
+    'data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n'
+    "\n"
+    "event: message\n"
+    'data: {"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"x"}]}}\n'
+    "\n"
+)
+
+
+def test_parse_sse_extracts_all_messages():
+    msgs = C._parse_sse(SSE_BODY)
+    assert len(msgs) == 2
+    assert msgs[0]["method"] == "notifications/tools/list_changed"
+    assert msgs[1]["id"] == 4
+
+
+def test_pick_returns_matching_id():
+    msgs = [{"method": "notifications/tools/list_changed"}, {"id": 4, "result": {"ok": True}}]
+    assert C._pick(msgs, 4)["result"] == {"ok": True}
+
+
+def test_pick_empty_when_no_match():
+    assert C._pick([{"method": "notifications/x"}], 4) == {}
+
+
+def test_response_json_object():
+    resp = FakeResp(
+        200, headers={"Content-Type": "application/json"}, body={"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}
+    )
+    assert C._response(resp, 2)["result"] == {"tools": []}
+
+
+def test_response_sse_stream_picks_response_over_notification():
+    resp = FakeResp(200, headers={"Content-Type": "text/event-stream; charset=UTF-8"}, text=SSE_BODY)
+    assert C._response(resp, 4)["result"]["tools"] == [{"name": "x"}]
+
+
+def test_response_tolerates_json_array():
+    resp = FakeResp(
+        200,
+        headers={"Content-Type": "application/json"},
+        body=[{"method": "notifications/x"}, {"id": 4, "result": {"ok": 1}}],
+    )
+    assert C._response(resp, 4)["result"] == {"ok": 1}
 
 
 def test_throttle_wait_from_retry_after_header():

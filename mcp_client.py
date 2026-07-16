@@ -123,6 +123,10 @@ def _rpc(
     method: str, params: dict, session_id: str | None = None, rpc_id: int = 1, endpoint: Endpoint = ADMIN
 ) -> requests.Response:
     headers = dict(endpoint.auth_headers)
+    # Streamable HTTP requires the client to accept both reply shapes; the server
+    # answers application/json for a lone response and text/event-stream when it
+    # also has to push a notification (e.g. tools/list_changed after an enable).
+    headers["Accept"] = "application/json, text/event-stream"
     if session_id is not None:
         headers["Mcp-Session-Id"] = session_id
     body = {"jsonrpc": "2.0", "method": method, "params": params, "id": rpc_id}
@@ -134,6 +138,57 @@ def _rpc(
         break
     resp.raise_for_status()
     return resp
+
+
+def _parse_sse(text: str) -> list[dict]:
+    """Parse an SSE body into its JSON-RPC messages (the `data:` payloads)."""
+    messages: list[dict] = []
+    data: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            data.append(line[len("data:") :].lstrip())
+        elif not line and data:  # a blank line terminates an event
+            try:
+                messages.append(json.loads("\n".join(data)))
+            except ValueError:
+                pass
+            data = []
+    if data:  # trailing event with no terminating blank line
+        try:
+            messages.append(json.loads("\n".join(data)))
+        except ValueError:
+            pass
+    return messages
+
+
+def _pick(messages: list, rpc_id: int) -> dict:
+    """Return the JSON-RPC response whose id matches rpc_id; server-initiated
+    notifications (which carry no id) are ignored. {} if none match."""
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("id") == rpc_id:
+            return msg
+    return {}
+
+
+def _response(resp: requests.Response, rpc_id: int) -> dict:
+    """Extract the JSON-RPC response from an MCP reply, handling both Content-Types
+    the Streamable HTTP transport allows: a single JSON object (application/json)
+    or an SSE stream (text/event-stream) carrying the response plus any server
+    notifications such as tools/list_changed. A top-level JSON array is tolerated
+    defensively (a spec-removed batch shape)."""
+    if "text/event-stream" in resp.headers.get("Content-Type", ""):
+        return _pick(_parse_sse(resp.text), rpc_id)
+    payload = resp.json()
+    if isinstance(payload, list):
+        return _pick(payload, rpc_id)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _rpc_json(
+    method: str, params: dict, session_id: str | None = None, rpc_id: int = 1, endpoint: Endpoint = ADMIN
+) -> dict:
+    """_rpc plus response extraction (single JSON object or SSE stream)."""
+    return _response(_rpc(method, params, session_id, rpc_id, endpoint), rpc_id)
 
 
 def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
@@ -150,13 +205,13 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
     session_id = resp.headers.get("Mcp-Session-Id", "")
     if not session_id:
         raise RuntimeError("No Mcp-Session-Id in response headers")
-    instructions = resp.json().get("result", {}).get("instructions", "")
+    instructions = _response(resp, 1).get("result", {}).get("instructions", "")
     return session_id, instructions
 
 
 def mcp_call(session_id: str, tool: str, arguments: dict, endpoint: Endpoint = ADMIN) -> dict:
     """Call a tool. Returns the full JSON-RPC response dict."""
-    return _rpc("tools/call", {"name": tool, "arguments": arguments}, session_id, rpc_id=99, endpoint=endpoint).json()
+    return _rpc_json("tools/call", {"name": tool, "arguments": arguments}, session_id, rpc_id=99, endpoint=endpoint)
 
 
 def mcp_result_text(resp: dict) -> str:
@@ -194,7 +249,7 @@ def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[dict
     cursor = None
     for _ in range(50):  # runaway guard
         params = {} if cursor is None else {"cursor": cursor}
-        result = _rpc("tools/list", params, session_id, rpc_id=2, endpoint=endpoint).json().get("result", {})
+        result = _rpc_json("tools/list", params, session_id, rpc_id=2, endpoint=endpoint).get("result", {})
         for t in result.get("tools", []):
             name = t.get("name", "")
             if name in seen:
@@ -239,16 +294,16 @@ def enable_all_toolsets(session_id: str, endpoint: Endpoint = ADMIN) -> list[str
 
 def mcp_fetch_system_prompt(session_id: str, server_instructions: str, endpoint: Endpoint = ADMIN) -> str:
     """Fetch all MCP context prompts and combine with server instructions."""
-    resp = _rpc("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint)
-    prompt_names = [p["name"] for p in resp.json().get("result", {}).get("prompts", [])]
+    result = _rpc_json("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint).get("result", {})
+    prompt_names = [p["name"] for p in result.get("prompts", [])]
 
     parts = []
     if server_instructions:
         parts.append(server_instructions.strip())
 
     for name in prompt_names:
-        resp = _rpc("prompts/get", {"name": name}, session_id, rpc_id=4, endpoint=endpoint)
-        messages = resp.json().get("result", {}).get("messages", [])
+        result = _rpc_json("prompts/get", {"name": name}, session_id, rpc_id=4, endpoint=endpoint).get("result", {})
+        messages = result.get("messages", [])
         for msg in messages:
             content = msg.get("content", {})
             text = content.get("text", "") if isinstance(content, dict) else str(content)
