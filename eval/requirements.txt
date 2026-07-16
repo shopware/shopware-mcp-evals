@@ -1,4 +1,6 @@
-anthropic>=0.40.0
-openai>=1.50.0
+# Upper bounds cap the fast-moving LLM SDKs at their current major so a breaking
+# release (openai 1.x -> 2.x already happened) can't silently turn CI red.
+anthropic>=0.40.0,<1
+openai>=1.50.0,<3
 requests>=2.32.0
 pyyaml>=6.0

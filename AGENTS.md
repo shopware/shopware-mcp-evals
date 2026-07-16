@@ -1,12 +1,22 @@
 # shopware-mcp-evals
 
 Test suite for the Shopware MCP server (**MCP Server v2**: dynamic tool
-discovery), run against a live instance. Two layers: **functional** (shell,
+discovery), run against a live instance. Two layers: **functional** (Python,
 no LLM, all mutating tools dryRun-safe) and **LLM eval** (Python, prompts →
 tool selection accuracy).
 
 See `README.md` for the full picture and motivation; this file is the short
 brief for coding agents.
+
+## Conventions
+
+- **No shell scripts for test logic.** Both layers are Python; the functional
+  runner (`functional/run.py`) reuses `mcp_client.py`. Don't add `.sh` runners —
+  extend the Python runner or add a helper module. The only shell that belongs
+  here is small CI glue under `functional/ci/*.sh`, which is shellcheck-linted.
+- **Add unit tests for new logic.** New functional / eval / client behavior gets
+  a pytest test under `tests/` — offline, faking the MCP server (see the existing
+  tests). CI runs `ruff` + `pytest` + `shellcheck` on every push, so keep them green.
 
 ## v2 invariants (read before touching the runners)
 

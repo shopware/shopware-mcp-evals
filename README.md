@@ -32,7 +32,7 @@ things can go wrong:
 
 This repo addresses all three:
 
-- **Layer 1 (functional)**: a bash script verifies the v2 discovery mechanics
+- **Layer 1 (functional)**: a Python runner verifies the v2 discovery mechanics
   (default surface, toolsets, enable/isolation, pagination, tool-search) and
   then calls every tool with a minimal valid payload. Mutating tools use
   `dryRun=true`. Catches transport / schema / handler / discovery regressions.
@@ -81,6 +81,11 @@ the client's HTTP 429 retry:
 pip install -r requirements-dev.txt
 pytest tests -q
 ```
+
+**Conventions:** both test layers are Python — don't add `.sh` runners (extend
+`functional/run.py` or `mcp_client.py`; the only shell here is CI glue under
+`functional/ci/`). New functional/eval/client logic ships with a pytest test
+under `tests/`. `ruff`, `pytest`, and `shellcheck` run on every push.
 
 ## Setup
 
