@@ -282,8 +282,8 @@ The eval workflow runs the suite against a Shopware checkout. To keep `main`
 green when descriptions change upstream, it uses two gates:
 
 **A. Pinned SHA for PRs and `main` pushes.** The file `shopware.sha` at repo
-root holds the Shopware commit that PR/main runs check out (currently the tip
-of the `chore/mcp-ungate` v2 branch). PRs are reproducible, so upstream churn
+root holds the Shopware commit that PR/main runs check out (now a `trunk`
+commit — MCP v2 discovery is merged). PRs are reproducible, so upstream churn
 cannot flip the build red between commits. The plugin checkouts
 (`SwagMcpDevTools`, `SwagMcpMerchantTools`) default to their
 `feat/mcp-tool-groups-deferral` branches and can be overridden via the
@@ -304,9 +304,9 @@ cases.
 | `workflow_dispatch` | input ref, fallback `shopware.sha` | hard fail unless drift |
 | Cron (daily 06:00 UTC) | `trunk` | advisory if drift, hard fail otherwise |
 
-> **Note:** while v2 lives on the `chore/mcp-ungate` feature branch, cron runs
-> against `trunk` will report drift by design. Before merging this evals branch
-> to `main`, either v2 must be in Shopware `trunk` or the cron ref adjusted.
+> **Note:** MCP v2 discovery is now merged into Shopware `trunk`, so cron runs
+> against `trunk` no longer report drift by design — a drift report from cron
+> now means real upstream description churn worth reconciling.
 
 ### Reconciliation flow (when cron goes red or you want a newer SHA)
 
