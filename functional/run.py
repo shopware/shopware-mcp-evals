@@ -42,6 +42,7 @@ from mcp_client import (  # noqa: E402
     SW_SC_ACCESS_KEY,
     SW_SECRET_ACCESS_KEY,
     Endpoint,
+    enable_all_toolsets,
     enable_toolset,
     endpoint_by_name,
     mcp_call,
@@ -162,6 +163,41 @@ def verify_default_surface(rep: Reporter, session: str, endpoint: Endpoint) -> N
 
 def load_toolsets(session: str, endpoint: Endpoint) -> list[dict]:
     return mcp_toolsets_list(session, endpoint=endpoint)
+
+
+def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None:
+    """Every advertised tool must expose a JSON-Schema-valid inputSchema.
+
+    Specifically `properties` must be an object. A parameterless tool is easy to
+    get wrong here: PHP's json_encode renders an empty associative array as `[]`,
+    and OpenAI rejects that with "[] is not of type 'object'" — so a single
+    malformed tool breaks every request from an OpenAI-compatible client, not
+    just calls to that tool.
+    """
+    rep.section("Tool schema conformance")
+    try:
+        # Check the whole catalogue, not just the default surface: a malformed
+        # deferred tool breaks a client just as hard once its toolset is enabled.
+        enable_all_toolsets(session, endpoint=endpoint)
+        tools = mcp_tools_list_all(session, endpoint=endpoint)
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        rep.check_fail("tool schema conformance", str(exc))
+        return
+
+    malformed = []
+    for tool in tools:
+        schema = tool.get("inputSchema")
+        if not isinstance(schema, dict):
+            malformed.append(f"{tool.get('name')}: inputSchema is {type(schema).__name__}")
+        elif not isinstance(schema.get("properties", {}), dict):
+            malformed.append(
+                f"{tool.get('name')}: properties is a {type(schema['properties']).__name__}, not an object"
+            )
+
+    if malformed:
+        rep.check_fail("tool schema conformance", "; ".join(malformed))
+    else:
+        rep.check_pass(f"all {len(tools)} advertised tools expose an object-typed inputSchema.properties")
 
 
 def verify_enable_and_isolation(
@@ -631,6 +667,8 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
     verify_default_surface(rep, session, endpoint)
     entity_toolset, toolsets = verify_admin_toolsets(rep, session, endpoint)
     verify_admin_discovery(rep, endpoint, entity_toolset, toolsets)
+    schema_session, _ = mcp_init(endpoint=endpoint)
+    verify_tool_schemas(rep, schema_session, endpoint)
     run_admin_tools(rep, session, endpoint, args)
 
 

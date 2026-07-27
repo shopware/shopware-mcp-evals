@@ -219,7 +219,7 @@ class FakeServer:
         for ts in self.toolsets:
             if ts["name"] in self.enabled.get(session, set()):
                 names.update(ts["tools"])
-        return [{"name": n} for n in sorted(names)]
+        return [{"name": n, "inputSchema": {"type": "object", "properties": {}}} for n in sorted(names)]
 
     def call(self, session, tool, args, endpoint=None):
         if tool == "shopware-entity-search":
@@ -249,6 +249,7 @@ def _wire(monkeypatch, fake):
     monkeypatch.setattr(R, "mcp_init", fake.init)
     monkeypatch.setattr(R, "mcp_toolsets_list", fake.list_toolsets)
     monkeypatch.setattr(R, "enable_toolset", fake.enable)
+    monkeypatch.setattr(R, "enable_all_toolsets", lambda s, endpoint=None: None)
     monkeypatch.setattr(R, "mcp_tools_list_all", fake.tools_list)
     monkeypatch.setattr(R, "mcp_call", fake.call)
 
