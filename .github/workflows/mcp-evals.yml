@@ -40,9 +40,6 @@ on:
 
 permissions:
   contents: write
-  # GitHub Models (the free cross-provider second validator) authenticates with
-  # the built-in GITHUB_TOKEN rather than a provisioned API key.
-  models: read
 
 concurrency:
   group: mcp-evals-${{ github.ref }}
@@ -350,11 +347,20 @@ jobs:
           [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
           python eval/run.py "${args[@]}"
 
-      # Second opinion from a different vendor's function-calling implementation:
-      # a fixture both models miss points at the tool description, while one both
-      # pass is noise. Free via GitHub Models, so it costs nothing to keep on.
-      # Advisory while we learn whether the free tier throttles at this volume —
-      # promote to gating once a few runs come back clean.
+      # Second opinion on the same fixtures: a fixture both models miss points at
+      # the tool description, while one both pass is noise.
+      #
+      # This deliberately does NOT use GitHub Models. That was tried (free, and
+      # would have given cross-provider signal via Mistral) and its free tier
+      # cannot carry this volume: 45 fixtures x 2 modes throttled every single
+      # fixture, answering HTTP 403 "Too many requests" rather than 429. Lowering
+      # concurrency would not fix a per-day quota. `--provider github` still works
+      # for small local runs; it is just not viable for a full CI sweep.
+      #
+      # gpt-4o-mini runs on the existing project key. Same vendor as the primary
+      # eval, so this checks "is the description clear enough for a weaker model"
+      # rather than cross-provider behaviour — the weaker of the two signals, but
+      # one that actually completes.
       - name: Run LLM eval (second validator, advisory)
         id: eval_second
         continue-on-error: true
@@ -362,8 +368,10 @@ jobs:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
           SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python eval/run.py --provider github --output "results/eval-second-validator.json"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python eval/run.py --provider openai --model gpt-4o-mini \
+            --output "results/eval-second-validator.json"
 
       # -------------------------------------------------------------------
       # Store API / UCP suite — opt-in via run_store=true.

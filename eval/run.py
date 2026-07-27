@@ -628,7 +628,12 @@ def count_rate_limited(results: list[dict] | None) -> int:
     the number that decides whether a free-tier validator is viable at our
     fixture count.
     """
-    needles = ("429", "rate limit", "rate_limit", "too many requests", "quota")
+    # GitHub Models answers a throttled request with HTTP 403 and an
+    # anti-scraping notice rather than a 429, so matching only on 429/"rate
+    # limit" undercounts it — half the fixtures show up as a bare "Error code:
+    # 403". A 403 here is throttling, not authorization: a bad credential fails
+    # every fixture identically at 401 before any work happens.
+    needles = ("429", "403", "rate limit", "rate_limit", "too many requests", "quota", "scraping")
     return sum(1 for r in results or [] if any(n in str(r.get("error", "")).lower() for n in needles))
 
 

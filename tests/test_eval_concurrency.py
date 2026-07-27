@@ -96,6 +96,16 @@ def test_count_rate_limited_recognises_throttle_shapes():
     assert E.count_rate_limited(results) == 3
 
 
+def test_count_rate_limited_catches_github_models_403():
+    """GitHub Models throttles with 403 + an anti-scraping notice, not 429 — and
+    half the fixtures surface only as a bare 'Error code: 403'."""
+    results = [
+        {"error": "Error code: 403"},
+        {"error": "Too many requests. For more on scraping GitHub ... terms-of-service"},
+    ]
+    assert E.count_rate_limited(results) == 2
+
+
 def test_count_rate_limited_handles_none_and_empty():
     assert E.count_rate_limited(None) == 0
     assert E.count_rate_limited([]) == 0

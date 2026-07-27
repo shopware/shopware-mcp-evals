@@ -173,11 +173,20 @@ python eval/run.py
 # OpenAI
 python eval/run.py --provider openai --model gpt-4o
 
-# Second validator: GitHub Models is OpenAI-compatible, free, and authenticates
-# with GITHUB_TOKEN (`models: read`) — no API key to provision. Its catalogue has
-# no Anthropic models, so the cross-provider check uses a non-OpenAI publisher.
-python eval/run.py --provider github                       # mistral-ai/mistral-medium-2505
-python eval/run.py --provider github --model meta/llama-4-scout-17b-16e-instruct
+# Second validator in CI — a weaker model on the same fixtures. A fixture both
+# models miss points at the tool description; one both pass is noise.
+python eval/run.py --provider openai --model gpt-4o-mini
+
+# GitHub Models is also supported (free, OpenAI-compatible, auth via GITHUB_TOKEN
+# with `models: read`, and its catalogue carries non-OpenAI publishers for genuine
+# cross-provider signal — but no Anthropic models).
+#
+# It is NOT used for CI: the free tier cannot carry a full sweep. 45 fixtures x 2
+# modes throttled *every* fixture, answering HTTP 403 "Too many requests" rather
+# than 429. Lowering concurrency does not help against a per-day quota. Fine for
+# small local runs:
+python eval/run.py --provider github --id disambig_count_vs_search
+python eval/run.py --provider github --category meta
 
 # Discovery mode only, higher step cap
 python eval/run.py --modes discovery --max-steps 8
