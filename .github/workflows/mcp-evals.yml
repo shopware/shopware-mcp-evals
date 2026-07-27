@@ -345,7 +345,8 @@ jobs:
           args=()
           [ -n "${EVAL_PROVIDER}" ] && args+=(--provider "${EVAL_PROVIDER}")
           [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
-          python eval/run.py "${args[@]}"
+          # Fixed path so the cross-model comparison step can find it.
+          python eval/run.py "${args[@]}" --output "results/eval-primary.json"
 
       # Second opinion on the same fixtures: a fixture both models miss points at
       # the tool description, while one both pass is noise.
@@ -372,6 +373,34 @@ jobs:
         run: |
           python eval/run.py --provider openai --model gpt-4o-mini \
             --output "results/eval-second-validator.json"
+
+      # Reduce both runs to the split that matters: a fixture BOTH models miss
+      # is a tool-description problem, one only the weaker model misses is its
+      # capability gap. Emits a per-tool work list to the job summary.
+      #
+      # --gate none means this reports without enforcing; the primary eval above
+      # still gates on its own 90% threshold. Target is both models over 90% —
+      # switch to `--gate both` once the second validator clears it, and drop
+      # `continue-on-error` from the step above. Do not flip it before then, or
+      # main goes permanently red on a gap that is not a regression.
+      - name: Compare models
+        id: eval_compare
+        if: always()
+        run: |
+          primary="results/eval-primary.json"
+          second="results/eval-second-validator.json"
+          # Deliberately not `continue-on-error`: that reports a failed step as
+          # successful, which already bit us once. Skip explicitly instead, so
+          # the exit code stays meaningful when --gate is turned on.
+          if [ ! -f "${primary}" ] || [ ! -f "${second}" ]; then
+            echo "Skipping cross-model comparison: a report is missing (one of the eval steps did not finish)." \
+              | tee -a "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          python eval/compare_runs.py "${primary}" "${second}" \
+            --min-pass-rate 0.9 \
+            --gate none \
+            --output "results/eval-comparison.json"
 
       # -------------------------------------------------------------------
       # Store API / UCP suite — opt-in via run_store=true.
