@@ -184,6 +184,89 @@ def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None
         rep.check_fail("tool schema conformance", str(exc))
         return
 
+    malformed = _malformed_schemas(tools)
+    if malformed:
+        rep.check_fail("tool schema conformance", "; ".join(malformed))
+    else:
+        rep.check_pass(f"all {len(tools)} advertised tools expose an object-typed inputSchema.properties")
+
+    # The check above lists tools *after* enabling every toolset, which drains the
+    # tools/list_changed queue along the way, so the response comes back as plain
+    # application/json. Enabling a single toolset and listing immediately is the
+    # other shape: the pending notification rides along and the server answers
+    # text/event-stream. Those are different code paths on the server, and the
+    # SSE one shipped unnormalized while this check was passing — the eval caught
+    # it and this did not. So assert the same invariant on that flow too.
+    try:
+        sse_session, _ = mcp_init(endpoint=endpoint)
+        toolsets = mcp_toolsets_list(sse_session, endpoint=endpoint)
+        if not toolsets:
+            rep.skip("tool schema conformance (post-enable listing)", "no toolsets advertised")
+            return
+        enable_toolset(sse_session, toolsets[0]["name"], endpoint=endpoint)
+        after_enable = mcp_tools_list_all(sse_session, endpoint=endpoint)
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        rep.check_fail("tool schema conformance (post-enable listing)", str(exc))
+        return
+
+    malformed = _malformed_schemas(after_enable)
+    if malformed:
+        rep.check_fail("tool schema conformance (post-enable listing)", "; ".join(malformed))
+    else:
+        rep.check_pass(
+            f"all {len(after_enable)} tools listed right after enabling '{toolsets[0]['name']}' "
+            "expose an object-typed inputSchema.properties"
+        )
+
+    # Third path, and the one that actually shipped broken: shopware-tool-search
+    # embeds whole tool definitions in its *result payload* rather than in
+    # `result.tools`. A client surfaces those tools directly (the allowlist, not
+    # advertising, is the call boundary), so their schemas reach the model the
+    # same way — but they travel inside result.content[].text as a JSON string,
+    # which server-side tools/list normalization does not reach. Both checks
+    # above passed while this path served `"properties": []`.
+    try:
+        search_tools = _search_payload_tools(sse_session, endpoint)
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        rep.check_fail("tool schema conformance (tool-search payload)", str(exc))
+        return
+
+    if not search_tools:
+        rep.skip("tool schema conformance (tool-search payload)", "tool-search returned no tools")
+        return
+
+    malformed = _malformed_schemas(search_tools)
+    if malformed:
+        rep.check_fail("tool schema conformance (tool-search payload)", "; ".join(malformed))
+    else:
+        rep.check_pass(
+            f"all {len(search_tools)} tool-search-surfaced tools expose an object-typed inputSchema.properties"
+        )
+
+
+def _search_payload_tools(session: str, endpoint: Endpoint) -> list[dict]:
+    """Tool definitions embedded in shopware-tool-search results.
+
+    Queried across several terms so parameterless tools — the ones that trip the
+    empty-properties bug — are actually reached; a single query returns only its
+    top matches.
+    """
+    seen: dict[str, dict] = {}
+    for query in ("list", "skills", "search", "config", "order", "product"):
+        payload = mcp_result_text(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint))
+        try:
+            data = json.loads(payload).get("data", [])
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+        for row in data:
+            tool = row.get("tool") if isinstance(row, dict) else None
+            if isinstance(tool, dict) and tool.get("name"):
+                seen[tool["name"]] = tool
+    return list(seen.values())
+
+
+def _malformed_schemas(tools: list[dict]) -> list[str]:
+    """Names the tools whose inputSchema is not a JSON-Schema-valid object."""
     malformed = []
     for tool in tools:
         schema = tool.get("inputSchema")
@@ -193,11 +276,7 @@ def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None
             malformed.append(
                 f"{tool.get('name')}: properties is a {type(schema['properties']).__name__}, not an object"
             )
-
-    if malformed:
-        rep.check_fail("tool schema conformance", "; ".join(malformed))
-    else:
-        rep.check_pass(f"all {len(tools)} advertised tools expose an object-typed inputSchema.properties")
+    return malformed
 
 
 def verify_enable_and_isolation(
