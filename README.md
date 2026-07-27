@@ -252,8 +252,9 @@ python functional/run.py --endpoint store               # Layer 1 (discovery mec
 python eval/run.py --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
 ```
 
-In CI it is opt-in (the `run_store` dispatch input installs `SwagAgenticCommerce`)
-and the store LLM eval is advisory.
+CI installs `SwagAgenticCommerce` and runs this suite on every run; pass the
+`skip_store` dispatch input to skip it. The store functional suite hard-fails
+like the admin one; the store LLM eval stays advisory.
 
 ### Coverage
 
@@ -285,9 +286,13 @@ green when descriptions change upstream, it uses two gates:
 root holds the Shopware commit that PR/main runs check out (now a `trunk`
 commit — MCP v2 discovery is merged). PRs are reproducible, so upstream churn
 cannot flip the build red between commits. The plugin checkouts
-(`SwagMcpDevTools`, `SwagMcpMerchantTools`) default to their
-`feat/mcp-tool-groups-deferral` branches and can be overridden via the
-`dev_tools_ref` / `merchant_tools_ref` dispatch inputs.
+`SwagMcpDevTools` and `SwagMcpMerchantTools` deliberately do **not** pin: each
+tracks its own repository default branch, so runs always exercise the latest
+plugin code. The trade-off is that plugin-side churn can turn a run red without
+a change here — pin a single run via the `dev_tools_ref` / `merchant_tools_ref`
+dispatch inputs. `SwagAgenticCommerce` is still pinned to
+`feature/agentic-commerce-core-coexistence`, because the UCP tools have not
+landed on its default branch (`trunk`) yet; drop that fallback once they do.
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the
