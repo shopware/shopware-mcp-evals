@@ -263,6 +263,61 @@ def test_run_store_flow_all_pass(monkeypatch):
     assert rep.passed >= 10
 
 
+def test_run_store_flow_with_granular_ucp_toolsets(monkeypatch):
+    """Trunk splits UCP across several granular toolsets (cart, checkout, catalog).
+    The enable-probe must come from the selected toolset — a hardcoded probe tool
+    fails whenever the picked toolset does not happen to contain it."""
+    granular = [
+        {
+            "name": "shopware-ucp-cart",
+            "title": "Cart",
+            "description": "cart",
+            "enabled": False,
+            "tools": [
+                "shopware-ucp-cart-create",
+                "shopware-ucp-cart-add",
+                "shopware-ucp-cart-get",
+                "shopware-ucp-cart-remove",
+                "shopware-ucp-cart-update",
+            ],
+        },
+        {
+            "name": "shopware-ucp-checkout",
+            "title": "Checkout",
+            "description": "checkout",
+            "enabled": False,
+            "tools": ["shopware-ucp-checkout-start", "shopware-ucp-checkout-confirm"],
+        },
+        {
+            "name": "shopware-ucp-catalog",
+            "title": "Catalog",
+            "description": "catalog",
+            "enabled": False,
+            "tools": ["shopware-ucp-catalog-search", "shopware-ucp-catalog-read"],
+        },
+        {
+            "name": "context",
+            "title": "Context",
+            "description": "context",
+            "enabled": False,
+            "tools": ["shopware-store-api-context", "shopware-store-config-read"],
+        },
+        {
+            "name": "misc",
+            "title": "Misc",
+            "description": "misc",
+            "enabled": False,
+            "tools": ["shopware-store-nav-read", "shopware-store-seo-read", "shopware-store-currency-list"],
+        },
+    ]
+    fake = FakeServer(granular)
+    _wire(monkeypatch, fake)
+    rep = Reporter("store", color=False)
+    session, _ = fake.init()
+    R.run_store(rep, STORE, session)
+    assert rep.failed == 0, [r for r in rep.records if r["status"] == "fail"]
+
+
 def test_run_admin_flow_all_pass(monkeypatch):
     fake = FakeServer(ADMIN_TOOLSETS)
     _wire(monkeypatch, fake)

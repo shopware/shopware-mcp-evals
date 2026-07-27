@@ -648,10 +648,16 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str) -> None:
     toolsets = load_toolsets(session, endpoint)
     union: set[str] = set()
     ucp_toolset = ""
+    ucp_probe = ""
     for ts in toolsets:
         union.update(ts.get("tools", []))
-        if any(name.startswith("shopware-ucp-") for name in ts.get("tools", [])):
+        # The UCP tools are spread over several granular toolsets (cart, checkout,
+        # catalog, ...). Take the first one and probe a tool that actually belongs
+        # to it — a hardcoded probe would break whenever the taxonomy is resliced.
+        ucp_tools = sorted(n for n in ts.get("tools", []) if n.startswith("shopware-ucp-"))
+        if ucp_tools and not ucp_toolset:
             ucp_toolset = ts["name"]
+            ucp_probe = ucp_tools[0]
     if len(toolsets) >= 2:
         rep.check_pass(f"toolsets-list returns {len(toolsets)} toolsets (>= 2)")
     else:
@@ -672,8 +678,8 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str) -> None:
             rep,
             endpoint,
             ucp_toolset,
-            probe_tool="shopware-ucp-cart-create",
-            probe_label="UCP tools",
+            probe_tool=ucp_probe,
+            probe_label=ucp_probe,
             check_default_persists=False,
         )
     else:
