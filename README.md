@@ -205,14 +205,31 @@ python eval/run.py --no-system-prompt
 python eval/run.py --output results/my-run.json
 ```
 
-Exit code is 0 if the **discovery** run meets the pass-rate threshold
-(`--min-pass-rate`, default 0.9); baseline is the comparison reference and stays
-advisory when both modes run. Because the LLM is nondeterministic, each failed
-discovery fixture is **retried once** (only a double failure counts), and the
-threshold tolerates a couple of borderline fixtures so a single flaky prompt
-can't flip CI red — while a real regression (the rate collapsing) still fails.
-Use `--min-pass-rate 1.0` for strict all-must-pass. Skipped fixtures (expected
-tool not registered on the instance) never gate.
+### Gate policy
+
+**Both models must reach 90% in discovery mode.** The primary and the second
+validator each gate themselves, and `eval/compare_runs.py --gate both` is the
+consolidated verdict. Baseline mode is the comparison reference and stays
+advisory.
+
+The rate is computed over **fixtures that actually ran**. Two categories are
+held out, for different reasons:
+
+| Excluded | Why | How it can still fail the run |
+|---|---|---|
+| **skipped** — expected tool not registered on this instance (e.g. dev-tools fixtures without the bundle) | not applicable here | never |
+| **errored** — the request never reached the model (server 500, throttling 429) | missing data, not a wrong answer | `--max-error-rate` (default 0.1) fails the run as *invalid* |
+
+Keeping those separate matters: folding errors into the rate reports a broken
+server as a bad model. One run read as 53% when 18 of its 21 "failures" were
+the Shopware container erroring — the rate over fixtures that ran was 89%. A
+run is now failed for a quality regression **or** for being untrustworthy, and
+the output says which.
+
+Because the LLM is nondeterministic, each failed discovery fixture is **retried
+once** (only a double failure counts), and 90% tolerates a couple of borderline
+fixtures so one flaky prompt can't flip CI red — while a real regression still
+fails. Use `--min-pass-rate 1.0` for strict all-must-pass.
 
 ### Discovery metrics
 

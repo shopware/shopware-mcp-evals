@@ -362,13 +362,16 @@ jobs:
       # eval, so this checks "is the description clear enough for a weaker model"
       # rather than cross-provider behaviour — the weaker of the two signals, but
       # one that actually completes.
-      - name: Run LLM eval (second validator, advisory)
+      - name: Run LLM eval (second validator)
         id: eval_second
         # always(): the primary eval gates, so it fails exactly when a second
         # opinion is most useful. Skipping this on its failure threw away the
         # both-models-failed signal in the run that needed it.
         if: always()
-        continue-on-error: true
+        # No continue-on-error: this model gates at the same 90% as the primary.
+        # It measured 91% on the 90-fixture set, so the bar is one it has
+        # actually cleared, not an aspiration. continue-on-error would also
+        # report a failed step as successful, which has misled us once already.
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
@@ -382,11 +385,11 @@ jobs:
       # is a tool-description problem, one only the weaker model misses is its
       # capability gap. Emits a per-tool work list to the job summary.
       #
-      # --gate none means this reports without enforcing; the primary eval above
-      # still gates on its own 90% threshold. Target is both models over 90% —
-      # switch to `--gate both` once the second validator clears it, and drop
-      # `continue-on-error` from the step above. Do not flip it before then, or
-      # main goes permanently red on a gap that is not a regression.
+      # --gate both enforces 90% for BOTH models. Each eval step also gates
+      # itself, so this is the consolidated verdict rather than the only one —
+      # it exists so the policy is declared in one visible place and so the two
+      # rates are compared on identical terms (both computed over fixtures that
+      # actually ran, errors excluded and budgeted separately).
       - name: Compare models
         id: eval_compare
         if: always()
@@ -403,7 +406,7 @@ jobs:
           fi
           python eval/compare_runs.py "${primary}" "${second}" \
             --min-pass-rate 0.9 \
-            --gate none \
+            --gate both \
             --output "results/eval-comparison.json"
 
       # -------------------------------------------------------------------

@@ -82,9 +82,17 @@ python functional/run.py --endpoint store
 .venv/bin/python3 -m pytest tests -q
 ```
 
-Exit code of `eval/run.py` is 0 when the **discovery** run meets `--min-pass-rate`
-(default 0.9); failed discovery fixtures are retried once. Baseline is advisory
-when both modes run. Fixtures whose expected tool isn't registered are skipped.
+**Gate: both models must reach 90%** in discovery mode — the primary and the
+second validator each gate themselves, and `compare_runs.py --gate both` is the
+consolidated verdict. Baseline is advisory when both modes run. Failed discovery
+fixtures are retried once.
+
+The rate is over fixtures that **ran**. Skipped ones (expected tool not
+registered) never gate. Errored ones (server 500, throttling 429) are excluded
+from the rate too — they are missing data, not wrong answers — but
+`--max-error-rate` (default 0.1) fails the run as *invalid*. Do not fold errors
+back into the rate: that reports a broken server as a bad model, and it once
+turned an 89% run into a reported 53%.
 
 ## Auth
 

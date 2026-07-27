@@ -148,3 +148,47 @@ def test_render_marks_pass_fail_skip():
     assert "PASS" in E._render(passed)
     assert "FAIL" in E._render(failed)
     assert "SKIP" in E._render(skipped)
+
+
+# ---------------------------------------------------------------------------
+# executed() — the gate must not read a broken server as a bad model
+# ---------------------------------------------------------------------------
+
+
+def _r(fid, passed, *, skipped=False, error=None):
+    rec = {"id": fid, "passed": passed, "skipped": skipped, "expected_tool": "t", "category": "c"}
+    if error:
+        rec["error"] = error
+    return rec
+
+
+def test_executed_excludes_errored_and_skipped_fixtures():
+    results = [
+        _r("ok", True),
+        _r("wrong", False),
+        _r("boom", False, error="500 Server Error"),
+        _r("throttled", False, error="429 Client Error: Too Many Requests"),
+        _r("absent", False, skipped=True),
+    ]
+
+    assert [r["id"] for r in E.scored(results)] == ["ok", "wrong", "boom", "throttled"]
+    assert [r["id"] for r in E.executed(results)] == ["ok", "wrong"]
+
+
+def test_executed_rate_matches_the_real_regression():
+    """The 45-fixture run that read as 53% was 89% over fixtures that ran.
+
+    24 passed, 3 genuinely wrong, 18 errored. Averaging the errors in gives
+    24/45 = 53%; excluding them gives 24/27 = 89%.
+    """
+    results = (
+        [_r(f"p{i}", True) for i in range(24)]
+        + [_r(f"f{i}", False) for i in range(3)]
+        + [_r(f"e{i}", False, error="500 Server Error") for i in range(18)]
+    )
+
+    scored_rate = sum(1 for r in E.scored(results) if r["passed"]) / len(E.scored(results))
+    executed_rate = sum(1 for r in E.executed(results) if r["passed"]) / len(E.executed(results))
+
+    assert round(scored_rate * 100) == 53
+    assert round(executed_rate * 100) == 89

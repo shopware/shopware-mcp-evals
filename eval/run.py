@@ -418,6 +418,18 @@ def scored(results: list[dict]) -> list[dict]:
     return [r for r in results if not r.get("skipped")]
 
 
+def executed(results: list[dict]) -> list[dict]:
+    """Scored results that actually reached the model.
+
+    A transport error — the server answering 500, or throttling with 429 — is
+    missing data, not a wrong answer, so it must not be averaged in as a
+    failure. One local run read as 53% when 18 of its 21 "failures" were the
+    server erroring; the rate over fixtures that ran was 89%. Errors are held
+    against the run separately, via the error budget in the gate.
+    """
+    return [r for r in scored(results) if not r.get("error")]
+
+
 def score(results: list[dict]) -> dict:
     """Return per-tool and per-category pass counts (skipped fixtures excluded)."""
     tools: dict[str, dict] = {}
@@ -852,7 +864,16 @@ def main():
         "--min-pass-rate",
         type=float,
         default=float(os.environ.get("EVAL_MIN_PASS_RATE", "0.9")),
-        help="Min gating-mode pass rate for exit 0 (default 0.9; use 1.0 for strict)",
+        help="Min gating-mode pass rate for exit 0, over fixtures that ran (default 0.9; 1.0 for strict)",
+    )
+    parser.add_argument(
+        "--max-error-rate",
+        type=float,
+        default=float(os.environ.get("EVAL_MAX_ERROR_RATE", "0.1")),
+        help=(
+            "Max share of fixtures that may error (transport/provider failures) before the run is "
+            "treated as invalid rather than scored (default 0.1)"
+        ),
     )
     parser.add_argument(
         "--endpoint",
@@ -1027,17 +1048,37 @@ def main():
     # borderline/flaky fixtures shouldn't flip CI red, but a real regression
     # (the rate collapsing) still fails. Each failed discovery fixture is also
     # retried once (see run_discovery_pass). Set --min-pass-rate 1.0 for strict.
-    gating = scored(results_discovery if results_discovery is not None else results_baseline)
+    graded = scored(results_discovery if results_discovery is not None else results_baseline)
+    gating = executed(results_discovery if results_discovery is not None else results_baseline)
+    errored = len(graded) - len(gating)
+    error_rate = errored / len(graded) if graded else 0.0
+
     passed = sum(1 for r in gating if r["passed"])
     rate = passed / len(gating) if gating else 1.0
-    ok = rate >= args.min_pass_rate
+
+    # Two independent ways to fail, kept separate so the reason is unambiguous:
+    # a genuine quality regression (rate below threshold) versus a run that did
+    # not really happen (too many fixtures never reached the model). Folding
+    # errors into the rate conflates them and reports a broken server as a bad
+    # model — which is exactly how a 89% run once got read as 53%.
+    quality_ok = rate >= args.min_pass_rate
+    run_valid = error_rate <= args.max_error_rate
+    ok = quality_ok and run_valid
+
     print(
         f"\nGate: {passed}/{len(gating)} = {round(rate * 100)}% "
-        f"(threshold {round(args.min_pass_rate * 100)}%) → {'PASS' if ok else 'FAIL'}"
+        f"(threshold {round(args.min_pass_rate * 100)}%) → {'PASS' if quality_ok else 'FAIL'}"
     )
-    if not ok:
+    if errored:
+        print(
+            f"  {errored}/{len(graded)} fixtures never reached the model ({round(error_rate * 100)}%, "
+            f"budget {round(args.max_error_rate * 100)}%) → {'within budget' if run_valid else 'RUN INVALID'}"
+        )
+    if not quality_ok:
         failed_ids = [r["id"] for r in gating if not r["passed"]]
         print(f"  below threshold; failing: {', '.join(failed_ids)}")
+    if not run_valid:
+        print("  too many fixtures errored to trust this run — fix the server/provider, then re-run.")
 
     write_ci_summary(provider, model, results_baseline, results_discovery, rate, ok)
     sys.exit(0 if ok else 1)
