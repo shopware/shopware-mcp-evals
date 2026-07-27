@@ -61,6 +61,12 @@ from mcp_client import (  # noqa: E402
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+# GitHub Models: an OpenAI-compatible endpoint authenticated with the workflow's
+# built-in GITHUB_TOKEN (needs `models: read`). It costs nothing and carries
+# non-OpenAI publishers, so it gives a cross-provider second opinion without
+# provisioning an API key. Its catalogue has no Anthropic models.
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
 # ---------------------------------------------------------------------------
 # Provider adapters
@@ -607,6 +613,10 @@ def _arrow(pct_before: int, pct_after: int) -> str:
 PROVIDER_DEFAULTS = {
     "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o",
+    # A non-OpenAI publisher on purpose: as the second validator its value is
+    # being an independent implementation, so it catches tool-description
+    # problems that are specific to one vendor's function-calling behaviour.
+    "github": "mistral-ai/mistral-medium-2505",
 }
 
 
@@ -761,7 +771,10 @@ def run_discovery_pass(
 def main():
     parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner (v2 discovery)")
     parser.add_argument(
-        "--provider", choices=["anthropic", "openai"], default=os.environ.get("EVAL_PROVIDER", "anthropic")
+        "--provider",
+        choices=["anthropic", "openai", "github"],
+        default=os.environ.get("EVAL_PROVIDER", "anthropic"),
+        help="anthropic | openai | github (GitHub Models: free, OpenAI-compatible, auth via GITHUB_TOKEN)",
     )
     parser.add_argument("--model", default=None)
     parser.add_argument(
@@ -826,9 +839,12 @@ def main():
         required.append(("SW_SC_ACCESS_KEY", SW_SC_ACCESS_KEY))
     else:
         required += [("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
-    required.append(
-        ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY) if provider == "anthropic" else ("OPENAI_API_KEY", OPENAI_API_KEY)
-    )
+    credential = {
+        "anthropic": ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
+        "openai": ("OPENAI_API_KEY", OPENAI_API_KEY),
+        "github": ("GITHUB_TOKEN", GITHUB_TOKEN),
+    }[provider]
+    required.append(credential)
     for var, val in required:
         if not val:
             print(f"ERROR: {var} is not set.", file=sys.stderr)
@@ -841,7 +857,12 @@ def main():
     else:
         from openai import OpenAI
 
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        # GitHub Models speaks the OpenAI wire format, so the same adapter and
+        # turn function work — only the base URL and credential differ.
+        client = OpenAI(
+            api_key=credential[1],
+            base_url=GITHUB_MODELS_BASE_URL if provider == "github" else None,
+        )
 
     default_fixtures = "fixtures_store.yaml" if args.endpoint == "store" else "fixtures.yaml"
     fixtures_path = Path(args.fixtures) if args.fixtures else Path(__file__).parent / default_fixtures

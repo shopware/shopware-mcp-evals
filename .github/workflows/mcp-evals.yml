@@ -40,6 +40,9 @@ on:
 
 permissions:
   contents: write
+  # GitHub Models (the free cross-provider second validator) authenticates with
+  # the built-in GITHUB_TOKEN rather than a provisioned API key.
+  models: read
 
 concurrency:
   group: mcp-evals-${{ github.ref }}
@@ -346,6 +349,21 @@ jobs:
           [ -n "${EVAL_PROVIDER}" ] && args+=(--provider "${EVAL_PROVIDER}")
           [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
           python eval/run.py "${args[@]}"
+
+      # Second opinion from a different vendor's function-calling implementation:
+      # a fixture both models miss points at the tool description, while one both
+      # pass is noise. Free via GitHub Models, so it costs nothing to keep on.
+      # Advisory while we learn whether the free tier throttles at this volume —
+      # promote to gating once a few runs come back clean.
+      - name: Run LLM eval (second validator, advisory)
+        id: eval_second
+        continue-on-error: true
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
+          SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python eval/run.py --provider github --output "results/eval-second-validator.json"
 
       # -------------------------------------------------------------------
       # Store API / UCP suite — opt-in via run_store=true.

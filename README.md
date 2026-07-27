@@ -173,6 +173,12 @@ python eval/run.py
 # OpenAI
 python eval/run.py --provider openai --model gpt-4o
 
+# Second validator: GitHub Models is OpenAI-compatible, free, and authenticates
+# with GITHUB_TOKEN (`models: read`) — no API key to provision. Its catalogue has
+# no Anthropic models, so the cross-provider check uses a non-OpenAI publisher.
+python eval/run.py --provider github                       # mistral-ai/mistral-medium-2505
+python eval/run.py --provider github --model meta/llama-4-scout-17b-16e-instruct
+
 # Discovery mode only, higher step cap
 python eval/run.py --modes discovery --max-steps 8
 

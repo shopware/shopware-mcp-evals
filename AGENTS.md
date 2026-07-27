@@ -56,6 +56,7 @@ python functional/run.py --skip-dev-tools
 # single shot) and discovery mode (default surface + agentic meta-tool loop).
 .venv/bin/python3 eval/run.py                          # both modes, Anthropic
 .venv/bin/python3 eval/run.py --provider openai        # OpenAI
+.venv/bin/python3 eval/run.py --provider github        # GitHub Models (free, needs GITHUB_TOKEN)
 .venv/bin/python3 eval/run.py --modes discovery --max-steps 8
 .venv/bin/python3 eval/run.py --category disambiguation
 .venv/bin/python3 eval/run.py --id disambig_count_vs_search

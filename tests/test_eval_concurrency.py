@@ -85,6 +85,19 @@ def test_error_result_shape_discovery():
     assert rec["meta_calls"] == []
 
 
+def test_github_provider_defaults_to_a_non_openai_publisher():
+    """The second validator's value is being an independent implementation, so
+    its default must not be another OpenAI model."""
+    model = E.PROVIDER_DEFAULTS["github"]
+    assert not model.startswith("openai/")
+    assert "/" in model  # GitHub Models ids are publisher-qualified
+    assert E.GITHUB_MODELS_BASE_URL.startswith("https://")
+
+
+def test_every_provider_choice_has_a_default_model():
+    assert set(E.PROVIDER_DEFAULTS) == {"anthropic", "openai", "github"}
+
+
 def test_render_marks_pass_fail_skip():
     passed = {"id": "a", "mode": "baseline", "passed": True, "selected_tool": "x", "latency_s": 1}
     failed = {"id": "b", "mode": "baseline", "passed": False, "selected_tool": None, "latency_s": 1}
