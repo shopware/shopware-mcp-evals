@@ -15,16 +15,16 @@ sys.modules["eval_compare_runs"] = C
 _spec.loader.exec_module(C)
 
 
-def report(model, results):
-    """results: list of (id, passed, expected_tool, skipped)"""
-    return {
-        "model": model,
-        "modes": {
-            "discovery": {
-                "results": [{"id": i, "passed": p, "expected_tool": t, "skipped": s} for i, p, t, s in results]
-            }
-        },
-    }
+def report(model, results, errors=()):
+    """results: list of (id, passed, expected_tool, skipped); errors: list of ids that errored"""
+    errors = set(errors)
+    records = []
+    for i, p, t, s in results:
+        rec = {"id": i, "passed": p, "expected_tool": t, "skipped": s}
+        if i in errors:
+            rec["error"] = "500 Server Error: Internal Server Error"
+        records.append(rec)
+    return {"model": model, "modes": {"discovery": {"results": records}}}
 
 
 def test_splits_fixtures_four_ways():
@@ -55,6 +55,49 @@ def test_skipped_fixtures_are_excluded_from_rates():
     assert c["primary"]["total"] == 1
     assert c["primary"]["rate"] == 1.0
     assert c["shared"] == 1
+
+
+def test_errored_fixtures_are_not_counted_as_failures():
+    """The regression this guards: 18 server 500s once read as a 53% model score.
+
+    Every fixture but one errors; the model got one right out of one that ran,
+    so the rate is 100% with 3 errored — not 25%.
+    """
+    a = report(
+        "strong",
+        [("f1", True, "t1", False), ("f2", False, "t1", False), ("f3", False, "t1", False), ("f4", False, "t1", False)],
+        errors=["f2", "f3", "f4"],
+    )
+
+    c = C.compare(a, a)
+
+    assert c["primary"]["passed"] == 1
+    assert c["primary"]["total"] == 1
+    assert c["primary"]["rate"] == 1.0
+    assert c["primary"]["errored"] == 3
+    assert c["both_fail"] == []
+
+
+def test_errored_fixtures_are_excluded_from_the_shared_comparison():
+    """A fixture that errored for one model cannot be attributed to either."""
+    a = report("strong", [("f1", True, "t1", False), ("f2", False, "t1", False)], errors=["f2"])
+    b = report("weak", [("f1", True, "t1", False), ("f2", False, "t1", False)])
+
+    c = C.compare(a, b)
+
+    assert c["shared"] == 1
+    assert c["both_fail"] == []
+    assert c["only_primary"] == []
+    # f2 errored, not mismatched — the fixture files still agree.
+    assert c["unmatched"] == []
+
+
+def test_render_warns_when_fixtures_errored():
+    a = report("strong", [("f1", True, "t1", False), ("f2", False, "t1", False)], errors=["f2"])
+    out = C.render(C.compare(a, a), 0.9)
+
+    assert "never reached the model" in out
+    assert "Errored" in out
 
 
 def test_both_fail_is_grouped_by_tool():

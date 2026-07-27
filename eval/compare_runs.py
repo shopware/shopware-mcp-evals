@@ -42,15 +42,30 @@ def discovery_index(report: dict) -> dict[str, dict]:
     return {r["id"]: r for r in mode.get("results", []) if not r.get("skipped")}
 
 
+def executed(index: dict[str, dict]) -> dict[str, dict]:
+    """Drop fixtures that errored out before the model chose anything.
+
+    A transport error (the server answering 500, or throttling with 429) is
+    missing data, not a wrong answer. Counting it as a failure understates the
+    model badly: one local run reported gpt-4o-mini at 53% when 18 of its 21
+    "failures" were the Shopware container erroring — the real rate was 89%.
+    """
+    return {k: v for k, v in index.items() if not v.get("error")}
+
+
 def pass_rate(index: dict[str, dict]) -> tuple[int, int, float]:
-    total = len(index)
-    passed = sum(1 for r in index.values() if r.get("passed"))
+    """Pass rate over fixtures that actually ran."""
+    ran = executed(index)
+    total = len(ran)
+    passed = sum(1 for r in ran.values() if r.get("passed"))
     return passed, total, (passed / total if total else 0.0)
 
 
 def compare(primary: dict, second: dict) -> dict:
     """Split the shared fixture set four ways by which models passed."""
-    a, b = discovery_index(primary), discovery_index(second)
+    a_all, b_all = discovery_index(primary), discovery_index(second)
+    a, b = executed(a_all), executed(b_all)
+    # Only fixtures that ran cleanly in BOTH runs can be attributed to a model.
     shared = sorted(set(a) & set(b))
 
     buckets = collections.defaultdict(list)
@@ -64,8 +79,8 @@ def compare(primary: dict, second: dict) -> dict:
     for fid in both_fail:
         by_tool[a[fid].get("expected_tool", "?")].append(fid)
 
-    a_passed, a_total, a_rate = pass_rate(a)
-    b_passed, b_total, b_rate = pass_rate(b)
+    a_passed, a_total, a_rate = pass_rate(a_all)
+    b_passed, b_total, b_rate = pass_rate(b_all)
 
     return {
         "primary": {
@@ -73,12 +88,14 @@ def compare(primary: dict, second: dict) -> dict:
             "passed": a_passed,
             "total": a_total,
             "rate": a_rate,
+            "errored": len(a_all) - len(a),
         },
         "second": {
             "model": second.get("model", "?"),
             "passed": b_passed,
             "total": b_total,
             "rate": b_rate,
+            "errored": len(b_all) - len(b),
         },
         "shared": len(shared),
         "both_pass": buckets[("pass", "pass")],
@@ -87,8 +104,10 @@ def compare(primary: dict, second: dict) -> dict:
         "both_fail": both_fail,
         "both_fail_by_tool": {t: sorted(ids) for t, ids in sorted(by_tool.items())},
         # Fixtures present in one report but not the other — a mismatch means the
-        # two runs used different fixture files or one crashed mid-sweep.
-        "unmatched": sorted(set(a) ^ set(b)),
+        # two runs used different fixture files. Compared over the full graded
+        # sets, so a fixture that merely errored is reported as errored rather
+        # than masquerading as a fixture-file mismatch.
+        "unmatched": sorted(set(a_all) ^ set(b_all)),
     }
 
 
@@ -101,15 +120,27 @@ def render(cmp_: dict, threshold: float) -> str:
     lines = [
         "### Cross-model comparison (discovery mode)",
         "",
-        "| Model | Passed | Rate | vs threshold |",
-        "|---|---|---|---|",
+        "Rates are over fixtures that actually ran. Transport errors (server 500,",
+        "throttling 429) are missing data, not wrong answers, and are counted",
+        "separately — treating them as failures once understated a model by 36 points.",
+        "",
+        "| Model | Passed | Rate | Errored | vs threshold |",
+        "|---|---|---|---|---|",
     ]
     for role, m in (("primary", p), ("second", s)):
         pct = round(100 * m["rate"])
         lines.append(
-            f"| `{m['model']}` ({role}) | {m['passed']}/{m['total']} | {pct}% | "
+            f"| `{m['model']}` ({role}) | {m['passed']}/{m['total']} | {pct}% | {m['errored']} | "
             f"{_verdict(m['rate'], threshold)} (>= {round(100 * threshold)}%) |"
         )
+
+    worst = max(p["errored"], s["errored"])
+    if worst:
+        lines += [
+            "",
+            f"> {worst} fixture(s) never reached the model. The rates above exclude them, "
+            "but a run with many errors is thin evidence — re-run before drawing conclusions.",
+        ]
 
     lines += [
         "",
