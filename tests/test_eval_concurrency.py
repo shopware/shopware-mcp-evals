@@ -85,6 +85,39 @@ def test_error_result_shape_discovery():
     assert rec["meta_calls"] == []
 
 
+def test_count_rate_limited_recognises_throttle_shapes():
+    results = [
+        {"error": "429 Too Many Requests"},
+        {"error": "RateLimitError: rate limit exceeded"},
+        {"error": "quota exhausted for this model"},
+        {"error": "connection reset by peer"},  # not throttling
+        {"passed": True},  # no error at all
+    ]
+    assert E.count_rate_limited(results) == 3
+
+
+def test_count_rate_limited_handles_none_and_empty():
+    assert E.count_rate_limited(None) == 0
+    assert E.count_rate_limited([]) == 0
+
+
+def test_write_ci_summary_is_a_noop_outside_actions(monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    E.write_ci_summary("github", "m", [], [], 1.0, True)  # must not raise
+
+
+def test_write_ci_summary_reports_throttled_count(tmp_path, monkeypatch):
+    out = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(out))
+    discovery = [{"passed": False, "error": "429 Too Many Requests"}, {"passed": True}]
+    E.write_ci_summary("github", "mistral-ai/mistral-medium-2505", None, discovery, 0.5, False)
+    text = out.read_text()
+    assert "mistral-ai/mistral-medium-2505" in text
+    assert "50%" in text
+    assert "FAIL" in text
+    assert text.strip().endswith("|")
+
+
 def test_github_provider_defaults_to_a_non_openai_publisher():
     """The second validator's value is being an independent implementation, so
     its default must not be another OpenAI model."""

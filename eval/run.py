@@ -620,6 +620,45 @@ PROVIDER_DEFAULTS = {
 }
 
 
+def count_rate_limited(results: list[dict] | None) -> int:
+    """Fixtures whose error looks like provider throttling.
+
+    Worth separating from ordinary failures: a throttled fixture says nothing
+    about tool-description quality, it just means we outran the quota. This is
+    the number that decides whether a free-tier validator is viable at our
+    fixture count.
+    """
+    needles = ("429", "rate limit", "rate_limit", "too many requests", "quota")
+    return sum(1 for r in results or [] if any(n in str(r.get("error", "")).lower() for n in needles))
+
+
+def write_ci_summary(provider, model, baseline, discovery, rate, ok) -> None:
+    """Append a one-line verdict to the GitHub Actions step summary.
+
+    Without this, reading a run's outcome means paging through a log whose tail
+    is entirely post-job cleanup — and for an advisory (continue-on-error) step
+    the reported conclusion is 'success' even when it failed, so the step status
+    cannot be trusted on its own.
+    """
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    graded = discovery if discovery is not None else baseline
+    errored = sum(1 for r in graded or [] if r.get("error"))
+    throttled = count_rate_limited(baseline) + count_rate_limited(discovery)
+    verdict = "PASS" if ok else "FAIL"
+    line = (
+        f"| `{provider}` | `{model}` | {round(rate * 100)}% | "
+        f"{len(graded or [])} | {errored} | {throttled} | {verdict} |"
+    )
+    with open(summary_path, "a") as handle:
+        handle.write("| provider | model | pass rate | graded | errors | throttled | gate |\n")
+        handle.write("|---|---|---:|---:|---:|---:|---|\n")
+        handle.write(line + "\n")
+    if throttled:
+        print(f"\n::warning::{throttled} fixture(s) hit provider rate limits — results are understated.")
+
+
 def skipped_result(fixture: dict, mode: str) -> dict:
     """A fixture whose expected tool is not registered on this instance is
     skipped, not failed — e.g. a dev-tools fixture on an instance without the
@@ -994,6 +1033,8 @@ def main():
     if not ok:
         failed_ids = [r["id"] for r in gating if not r["passed"]]
         print(f"  below threshold; failing: {', '.join(failed_ids)}")
+
+    write_ci_summary(provider, model, results_baseline, results_discovery, rate, ok)
     sys.exit(0 if ok else 1)
 
 
