@@ -364,6 +364,10 @@ jobs:
       # one that actually completes.
       - name: Run LLM eval (second validator, advisory)
         id: eval_second
+        # always(): the primary eval gates, so it fails exactly when a second
+        # opinion is most useful. Skipping this on its failure threw away the
+        # both-models-failed signal in the run that needed it.
+        if: always()
         continue-on-error: true
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
