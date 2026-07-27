@@ -17,6 +17,12 @@ brief for coding agents.
 - **Add unit tests for new logic.** New functional / eval / client behavior gets
   a pytest test under `tests/` — offline, faking the MCP server (see the existing
   tests). CI runs `ruff` + `pytest` + `shellcheck` on every push, so keep them green.
+- **Two workflows.** `lint.yml` is the fast gate (ruff + format + pytest +
+  shellcheck) and runs on every PR. `mcp-evals.yml` is the heavy one: it installs
+  Shopware at the pinned `shopware.sha`, checks the plugin repos out at their
+  **default branch** (so plugin churn can turn a run red without a change here),
+  and runs the functional + LLM layers. The Store/UCP part is opt-in via the
+  `run_store` dispatch input.
 
 ## v2 invariants (read before touching the runners)
 
@@ -96,10 +102,24 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 
 ## Scope
 
-Tools under test: the 3 discovery meta-tools, all `shopware-entity-*`,
-`shopware-system-config-*`, `shopware-order-state`, `shopware-media-upload`,
-`shopware-theme-config`, `merchant-*`, and `swag-dev-tools-*`.
-Example bundle tools (McpHelloWorld) and the Store API MCP endpoint are excluded.
+Admin endpoint (`--endpoint admin`, the default): the 3 discovery meta-tools, all
+`shopware-entity-*`, `shopware-system-config-*`, `shopware-order-state`,
+`shopware-media-upload`, `shopware-theme-config`, `merchant-*`, and
+`swag-dev-tools-*`. Example bundle tools (McpHelloWorld) are excluded.
+
+Store API endpoint (`--endpoint store`): the meta-tools, `shopware-store-api-context`
+and the `shopware-ucp-*` buyer-journey tools. The functional suite verifies
+discovery mechanics only — it does not execute cart/checkout, which needs
+provisioned state; tool *selection* for those is covered by the LLM eval.
+
+Where the tools come from:
+
+| Tools | Source |
+|---|---|
+| meta-tools, `shopware-entity-*`, `shopware-system-config-*`, `shopware-order-state`, `shopware-media-upload`, `shopware-theme-config`, `shopware-store-api-context` | Shopware core (`trunk`) |
+| `merchant-*` | `shopware/SwagMcpMerchantTools` |
+| `swag-dev-tools-*` | `shopware/SwagMcpDevTools` |
+| `shopware-ucp-*` | `shopware/agentic-commerce` (`src/Ucp/Mcp/Tool`) |
 
 ## Improving tool descriptions / groups
 
