@@ -15,6 +15,19 @@ def call_resp(payload):
     return {"result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}
 
 
+def search_tool(name, properties=None):
+    """A tool definition as shopware-tool-search embeds it in its result payload.
+
+    `properties` defaults to an object, matching a spec-conformant server; pass
+    `[]` to simulate the empty-array serialization that strict clients reject.
+    """
+    return {
+        "name": name,
+        "description": f"{name} description",
+        "inputSchema": {"type": "object", "properties": {} if properties is None else properties},
+    }
+
+
 # ---------------------------------------------------------------------------
 # _payload
 # ---------------------------------------------------------------------------
@@ -231,12 +244,16 @@ class FakeServer:
         if tool == "shopware-tool-search":
             query = args.get("query", "")
             count = min(args.get("maxResults", 5), 20)
+            # Search results carry the full tool definition, inputSchema included —
+            # that is what makes a surfaced tool directly callable. Omitting it here
+            # would let the schema-conformance check pass against a fake that is
+            # laxer than any real server.
             if "cart" in query or "shopping" in query:
-                data = [{"tool": {"name": "shopware-ucp-cart-add"}, "score": 0.9, "matchedIn": "desc"}]
+                data = [{"tool": search_tool("shopware-ucp-cart-add"), "score": 0.9, "matchedIn": "desc"}]
             elif "image" in query or "upload" in query:
-                data = [{"tool": {"name": "shopware-media-upload"}, "score": 0.9, "matchedIn": "desc"}]
+                data = [{"tool": search_tool("shopware-media-upload"), "score": 0.9, "matchedIn": "desc"}]
             else:
-                data = [{"tool": {"name": f"tool-{i}"}, "score": 0.5, "matchedIn": "name"} for i in range(count)]
+                data = [{"tool": search_tool(f"tool-{i}"), "score": 0.5, "matchedIn": "name"} for i in range(count)]
             return call_resp({"success": True, "data": data, "_meta": {"query": query, "totalCandidates": 20}})
         if tool == "shopware-store-api-context":
             return call_resp({"success": True, "data": {"salesChannelId": "sc1", "token": "tok"}})
@@ -328,6 +345,51 @@ def test_run_admin_flow_all_pass(monkeypatch):
     R.run_admin(rep, ADMIN, args, session)
     assert rep.failed == 0
     assert rep.passed >= 25
+
+
+def test_schema_check_catches_empty_properties_in_the_tool_search_payload(monkeypatch):
+    """The path that shipped broken three times.
+
+    tools/list is clean here; only the tool-search payload carries
+    `"properties": []`. Server-side normalization walks result.tools and never
+    reaches this, so a check that only inspects tools/list passes while an
+    OpenAI-compatible client rejects the whole request.
+    """
+    fake = FakeServer(ADMIN_TOOLSETS)
+    inner = fake.call
+
+    def call_with_malformed_search(session, tool, args, endpoint=None):
+        if tool == "shopware-tool-search":
+            return call_resp(
+                {
+                    "success": True,
+                    "data": [{"tool": search_tool("swag-dev-tools-list-skills", properties=[]), "score": 0.9}],
+                }
+            )
+        return inner(session, tool, args, endpoint=endpoint)
+
+    fake.call = call_with_malformed_search
+    _wire(monkeypatch, fake)
+    rep = Reporter("admin", color=False)
+    session, _ = fake.init()
+
+    R.verify_tool_schemas(rep, session, ADMIN)
+
+    failures = [r for r in rep.records if r["status"] == "fail"]
+    assert len(failures) == 1, failures
+    assert "tool-search payload" in failures[0]["label"]
+    assert "swag-dev-tools-list-skills" in failures[0]["error"]
+
+
+def test_schema_check_passes_when_every_path_is_conformant(monkeypatch):
+    fake = FakeServer(ADMIN_TOOLSETS)
+    _wire(monkeypatch, fake)
+    rep = Reporter("admin", color=False)
+    session, _ = fake.init()
+
+    R.verify_tool_schemas(rep, session, ADMIN)
+
+    assert rep.failed == 0, [r for r in rep.records if r["status"] == "fail"]
 
 
 def test_run_admin_skips_when_no_seed_data(monkeypatch):
