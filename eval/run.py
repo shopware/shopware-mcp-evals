@@ -32,6 +32,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -626,71 +627,122 @@ def skipped_result(fixture: dict, mode: str) -> dict:
     }
 
 
-def run_baseline_pass(provider, client, fixtures, model, system_prompt, available_tools, endpoint=ADMIN):
+def error_result(fixture: dict, mode: str, exc: Exception) -> dict:
+    """Uniform failure record for a fixture that raised."""
+    record = {
+        "id": fixture["id"],
+        "category": fixture.get("category", ""),
+        "mode": mode,
+        "prompt": fixture["prompt"],
+        "expected_tool": fixture["expected_tool"],
+        "selected_tool": None,
+        "passed": False,
+        "error": str(exc),
+    }
+    if mode == "discovery":
+        record |= {
+            "steps": 0,
+            "meta_calls": [],
+            "discovery_path": "none",
+            "search_hit": None,
+            "enabled_correct_toolset": None,
+        }
+    return record
+
+
+def run_fixtures_concurrently(fixtures: list[dict], worker, workers: int) -> list[dict]:
+    """Run `worker(fixture)` over the fixtures with a bounded thread pool.
+
+    Fixtures are independent (each discovery run opens its own MCP session), so
+    they parallelize cleanly — the wall-clock win is large because almost all of
+    the time is spent waiting on the LLM API. Results keep fixture order for the
+    report; progress is printed as each one lands, which is why every line is
+    prefixed with the fixture id.
+    """
+    results: list[dict | None] = [None] * len(fixtures)
+    if workers <= 1:
+        for index, fixture in enumerate(fixtures):
+            results[index] = worker(fixture)
+        return [r for r in results if r is not None]
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(worker, fixture): index for index, fixture in enumerate(fixtures)}
+        for future in as_completed(futures):
+            index = futures[future]
+            results[index] = future.result()
+            completed += 1
+            print(f"  {DIM}[{completed:02d}/{len(fixtures):02d}]{RESET} {results[index]['_line']}")
+    return [r for r in results if r is not None]
+
+
+def _render(result: dict) -> str:
+    """One-line progress summary for a finished fixture."""
+    if result.get("skipped"):
+        return f"{YELLOW}SKIP{RESET}  {result['id']}  ({result['expected_tool']} not registered)"
+    if result.get("error"):
+        return f"{RED}ERROR{RESET} {result['id']}: {result['error']}"
+    status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
+    line = f"{status}  {result['id']}  selected={result['selected_tool'] or '(none)'}"
+    if result["mode"] == "discovery":
+        line += f"  steps={result['steps']}  path={result['discovery_path']}"
+        if result.get("attempts", 1) > 1:
+            line += f"  (attempts={result['attempts']})"
+    return f"{line}  {result.get('latency_s', 0)}s"
+
+
+def run_baseline_pass(provider, client, fixtures, model, system_prompt, available_tools, endpoint=ADMIN, workers=1):
     print(f"\n{BOLD}── Mode: baseline (full catalogue, single shot) ──{RESET}\n")
     session_id, _ = mcp_init(endpoint=endpoint)
     enable_all_toolsets(session_id, endpoint=endpoint)
     mcp_tools = mcp_tools_list_all(session_id, endpoint=endpoint)
     tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
     tools = tools_fn(mcp_tools)
-    print(f"  Catalogue: {len(mcp_tools)} tools (all toolsets enabled)\n")
+    print(f"  Catalogue: {len(mcp_tools)} tools (all toolsets enabled), concurrency={workers}\n")
 
-    results = []
-    for i, fixture in enumerate(fixtures, 1):
-        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category', '')})")
-        print(f"           {DIM}{fixture['prompt'][:65]}...{RESET}")
+    def worker(fixture: dict) -> dict:
         if fixture["expected_tool"] not in available_tools:
-            results.append(skipped_result(fixture, "baseline"))
-            print(f"           {YELLOW}SKIP{RESET}  {fixture['expected_tool']} not registered")
-            print()
-            continue
-        try:
-            result = run_fixture_baseline(provider, client, tools, fixture, model, system_prompt)
-            results.append(result)
-            status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
-            print(f"           {status}  selected={result['selected_tool'] or '(none)'}  {result['latency_s']}s")
-        except Exception as e:
-            print(f"           {RED}ERROR{RESET}: {e}")
-            results.append(
-                {
-                    "id": fixture["id"],
-                    "category": fixture.get("category", ""),
-                    "mode": "baseline",
-                    "prompt": fixture["prompt"],
-                    "expected_tool": fixture["expected_tool"],
-                    "selected_tool": None,
-                    "passed": False,
-                    "error": str(e),
-                }
-            )
-        print()
-    return results
+            result = skipped_result(fixture, "baseline")
+        else:
+            try:
+                result = run_fixture_baseline(provider, client, tools, fixture, model, system_prompt)
+            except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
+                result = error_result(fixture, "baseline", exc)
+        result["_line"] = _render(result)
+        return result
+
+    return run_fixtures_concurrently(fixtures, worker, workers)
 
 
 def run_discovery_pass(
-    provider, client, fixtures, model, system_prompt, default_max_steps, available_tools, endpoint=ADMIN
+    provider,
+    client,
+    fixtures,
+    model,
+    system_prompt,
+    default_max_steps,
+    available_tools,
+    endpoint=ADMIN,
+    workers=1,
 ):
     print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
-    results = []
-    for i, fixture in enumerate(fixtures, 1):
-        max_steps = int(fixture.get("max_steps", default_max_steps))
-        print(f"  [{i:02d}/{len(fixtures):02d}] {fixture['id']} ({fixture.get('category', '')})")
-        print(f"           {DIM}{fixture['prompt'][:65]}...{RESET}")
+    print(f"  concurrency={workers}\n")
+
+    def worker(fixture: dict) -> dict:
         if fixture["expected_tool"] not in available_tools:
-            results.append(skipped_result(fixture, "discovery"))
-            print(f"           {YELLOW}SKIP{RESET}  {fixture['expected_tool']} not registered")
-            print()
-            continue
+            result = skipped_result(fixture, "discovery")
+            result["_line"] = _render(result)
+            return result
+        max_steps = int(fixture.get("max_steps", default_max_steps))
         try:
             result = run_fixture_discovery(
                 provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint
             )
             attempts = 1
-            # Retry once on failure: gpt-4o is nondeterministic, so a single
+            # Retry once on failure: the models are nondeterministic, so a single
             # borderline miss shouldn't flip CI red. A real regression fails
             # both attempts. Skips/errors are not retried.
             if not result["passed"]:
-                print(f"           {YELLOW}retry{RESET} (first attempt selected={result['selected_tool'] or '(none)'})")
                 retry = run_fixture_discovery(
                     provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint
                 )
@@ -698,35 +750,12 @@ def run_discovery_pass(
                 if retry["passed"]:
                     result = retry
             result["attempts"] = attempts
-            results.append(result)
-            status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
-            path = result["discovery_path"]
-            retry_note = f"  (attempts={attempts})" if attempts > 1 else ""
-            print(
-                f"           {status}  selected={result['selected_tool'] or '(none)'}  "
-                f"steps={result['steps']}  path={path}  {result['latency_s']}s{retry_note}"
-            )
-        except Exception as e:
-            print(f"           {RED}ERROR{RESET}: {e}")
-            results.append(
-                {
-                    "id": fixture["id"],
-                    "category": fixture.get("category", ""),
-                    "mode": "discovery",
-                    "prompt": fixture["prompt"],
-                    "expected_tool": fixture["expected_tool"],
-                    "selected_tool": None,
-                    "passed": False,
-                    "error": str(e),
-                    "steps": 0,
-                    "meta_calls": [],
-                    "discovery_path": "none",
-                    "search_hit": None,
-                    "enabled_correct_toolset": None,
-                }
-            )
-        print()
-    return results
+        except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
+            result = error_result(fixture, "discovery", exc)
+        result["_line"] = _render(result)
+        return result
+
+    return run_fixtures_concurrently(fixtures, worker, workers)
 
 
 def main():
@@ -746,6 +775,21 @@ def main():
     )
     parser.add_argument(
         "--no-system-prompt", action="store_true", help="Skip the MCP server system prompt (ad-hoc debugging)"
+    )
+    # Fixtures are independent and almost entirely LLM-API-bound, so running them
+    # concurrently cuts wall-clock roughly linearly. Discovery is kept lower
+    # because each step also hits the MCP endpoint, which throttles (HTTP 429).
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=int(os.environ.get("EVAL_CONCURRENCY", "8")),
+        help="Parallel fixtures in baseline mode (default 8; 1 = sequential)",
+    )
+    parser.add_argument(
+        "--discovery-concurrency",
+        type=int,
+        default=int(os.environ.get("EVAL_DISCOVERY_CONCURRENCY", "4")),
+        help="Parallel fixtures in discovery mode (default 4; lower, it also calls MCP)",
     )
     parser.add_argument(
         "--min-pass-rate",
@@ -841,12 +885,32 @@ def main():
     results_discovery = None
     if "baseline" in modes:
         results_baseline = run_baseline_pass(
-            provider, client, all_fixtures, model, system_prompt, available_tools, endpoint=endpoint
+            provider,
+            client,
+            all_fixtures,
+            model,
+            system_prompt,
+            available_tools,
+            endpoint=endpoint,
+            workers=args.concurrency,
         )
     if "discovery" in modes:
         results_discovery = run_discovery_pass(
-            provider, client, all_fixtures, model, system_prompt, args.max_steps, available_tools, endpoint=endpoint
+            provider,
+            client,
+            all_fixtures,
+            model,
+            system_prompt,
+            args.max_steps,
+            available_tools,
+            endpoint=endpoint,
+            workers=args.discovery_concurrency,
         )
+
+    # `_line` is progress-display scaffolding, not part of the report contract.
+    for bucket in (results_baseline, results_discovery):
+        for result in bucket or []:
+            result.pop("_line", None)
 
     if results_baseline and results_discovery:
         print_comparison(results_baseline, results_discovery)
