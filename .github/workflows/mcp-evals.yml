@@ -30,11 +30,11 @@ on:
         required: false
         default: ''
       agentic_commerce_ref:
-        description: 'SwagAgenticCommerce ref for the Store API / UCP tools. Still pinned: its default branch (trunk) does not carry the UCP tools yet.'
+        description: 'SwagAgenticCommerce ref (used when run_store=true). Pinned: no branch of that repo pulls in the ucp-php-sdk that provides the UCP tools.'
         required: false
         default: ''
-      skip_store:
-        description: 'Skip the Store API / UCP suite (it runs by default).'
+      run_store:
+        description: 'Also run the Store API / UCP suite. Opt-in: the UCP tools come from ucp-php-sdk, which CI does not install yet.'
         required: false
         default: 'false'
 
@@ -167,13 +167,13 @@ jobs:
           path: shopware/custom/plugins/SwagMcpMerchantTools
           fetch-depth: 1
 
-      # SwagAgenticCommerce is the exception and stays pinned: the UCP tools live
-      # only on this feature branch, and its default branch (trunk) diverges from
-      # it (25 ahead / 6 behind) pending a real merge. Checking out trunk would
-      # install a plugin without any shopware-ucp-* tools and fail the store
-      # suite. Drop the fallback once the UCP work lands on trunk.
+      # SwagAgenticCommerce stays pinned and the whole store suite stays opt-in.
+      # The shopware-ucp-* tools do NOT live in this plugin at all — they come
+      # from the separate ucp-php-sdk (core + symfony-bundle), which no branch of
+      # this repo requires and which CI does not install. Until that is wired up,
+      # a store run here cannot produce UCP tools regardless of the ref.
       - name: Checkout SwagAgenticCommerce (Store API / UCP)
-        if: github.event.inputs.skip_store != 'true'
+        if: github.event.inputs.run_store == 'true'
         uses: actions/checkout@v7
         with:
           repository: shopware/SwagAgenticCommerce
@@ -197,15 +197,15 @@ jobs:
             swag/mcp-merchant-tools:@dev \
             --no-interaction --no-scripts
 
-          # Store API / UCP tools — installed by default, skippable via skip_store.
-          if [ "${{ github.event.inputs.skip_store }}" != "true" ]; then
+          # Store API / UCP tools — opt-in via run_store (needs the ucp-php-sdk).
+          if [ "${{ github.event.inputs.run_store }}" = "true" ]; then
             composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
             composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts
           fi
 
           bin/console plugin:refresh --no-interaction
           bin/console plugin:install --activate SwagMcpMerchantTools --no-interaction
-          if [ "${{ github.event.inputs.skip_store }}" != "true" ]; then
+          if [ "${{ github.event.inputs.run_store }}" = "true" ]; then
             bin/console plugin:install --activate SwagAgenticCommerce --no-interaction
           fi
           bin/console cache:clear --no-interaction
@@ -347,10 +347,10 @@ jobs:
           python eval/run.py "${args[@]}"
 
       # -------------------------------------------------------------------
-      # Store API / UCP suite — runs by default; pass skip_store=true to skip.
+      # Store API / UCP suite — opt-in via run_store=true.
       # -------------------------------------------------------------------
       - name: Fetch sales-channel access key
-        if: github.event.inputs.skip_store != 'true'
+        if: github.event.inputs.run_store == 'true'
         id: sc
         run: |
           set -euo pipefail
@@ -365,14 +365,14 @@ jobs:
           echo "sc_access_key=${SC_KEY}" >> "$GITHUB_OUTPUT"
 
       - name: Run Store API functional tests
-        if: github.event.inputs.skip_store != 'true'
+        if: github.event.inputs.run_store == 'true'
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
         run: python functional/run.py --endpoint store
 
       - name: Run Store API LLM eval (advisory)
-        if: github.event.inputs.skip_store != 'true'
+        if: github.event.inputs.run_store == 'true'
         continue-on-error: true
         env:
           SW_BASE_URL: ${{ env.APP_URL }}

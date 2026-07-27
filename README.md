@@ -252,9 +252,13 @@ python functional/run.py --endpoint store               # Layer 1 (discovery mec
 python eval/run.py --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
 ```
 
-CI installs `SwagAgenticCommerce` and runs this suite on every run; pass the
-`skip_store` dispatch input to skip it. The store functional suite hard-fails
-like the admin one; the store LLM eval stays advisory.
+In CI this suite is **opt-in** via the `run_store` dispatch input, and it cannot
+pass there yet: the `shopware-ucp-*` tools are not part of `SwagAgenticCommerce`
+— they come from the separate `ucp-php-sdk` (`core` + `symfony-bundle`), which no
+branch of that plugin requires and which the workflow does not install. Locally
+it works because the SDK is checked out and wired in through composer path
+repositories. Wiring the SDK into CI is the prerequisite for making this suite
+mandatory. The store LLM eval stays advisory.
 
 ### Coverage
 
@@ -290,9 +294,10 @@ cannot flip the build red between commits. The plugin checkouts
 tracks its own repository default branch, so runs always exercise the latest
 plugin code. The trade-off is that plugin-side churn can turn a run red without
 a change here — pin a single run via the `dev_tools_ref` / `merchant_tools_ref`
-dispatch inputs. `SwagAgenticCommerce` is still pinned to
-`feature/agentic-commerce-core-coexistence`, because the UCP tools have not
-landed on its default branch (`trunk`) yet; drop that fallback once they do.
+dispatch inputs. `SwagAgenticCommerce` is only checked out for opt-in store runs
+and stays pinned to `feature/agentic-commerce-core-coexistence`; it is not the
+source of the UCP tools (see the Store API section), so tracking its default
+branch would not help.
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the
