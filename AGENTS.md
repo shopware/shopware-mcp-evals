@@ -17,6 +17,14 @@ brief for coding agents.
 - **Add unit tests for new logic.** New functional / eval / client behavior gets
   a pytest test under `tests/` — offline, faking the MCP server (see the existing
   tests). CI runs `ruff` + `pytest` + `shellcheck` on every push, so keep them green.
+- **Three prompts per tool, differing in kind.** Every tool needs at least three
+  fixtures: a canonical phrasing, a paraphrase avoiding the tool's own
+  vocabulary, and a boundary case set against a sibling tool. Restating one
+  sentence three ways proves nothing — the goal is to catch a description that
+  only works for one lucky wording. `tests/test_fixtures.py` enforces the count
+  (plus id/prompt uniqueness and toolset correctness) against
+  `tool-history/latest.json`, so a new server-side tool fails the unit tests
+  until it has prompts.
 - **Two workflows.** `lint.yml` is the fast gate (ruff + format + pytest +
   shellcheck) and runs on every PR. `mcp-evals.yml` is the heavy one: it installs
   Shopware at the pinned `shopware.sha`, checks the plugin repos out at their

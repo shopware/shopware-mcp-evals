@@ -181,8 +181,9 @@ python eval/run.py --provider openai --model gpt-4o-mini
 # with `models: read`, and its catalogue carries non-OpenAI publishers for genuine
 # cross-provider signal — but no Anthropic models).
 #
-# It is NOT used for CI: the free tier cannot carry a full sweep. 45 fixtures x 2
-# modes throttled *every* fixture, answering HTTP 403 "Too many requests" rather
+# It is NOT used for CI: the free tier cannot carry a full sweep. Even at the old
+# 45 fixtures x 2 modes it throttled *every* one, answering HTTP 403 "Too many
+# requests" rather
 # than 429. Lowering concurrency does not help against a per-day quota. Fine for
 # small local runs:
 python eval/run.py --provider github --id disambig_count_vs_search
@@ -240,9 +241,25 @@ The summary block also reports the input-token ratio discovery/baseline — the
 | `meta` | The discovery meta-tool itself is the correct answer |
 | `discovery` | Deep-deferred tools with no default-surface sibling; probes search/toolset ranking end to end |
 
-33 fixtures in total. Add more by appending to `eval/fixtures.yaml` with the
-required fields: `id`, `category`, `prompt`, `expected_tool`; optional:
-`expected_toolset` (for deferred tools), `max_steps`, `notes`.
+**90 admin fixtures** (`eval/fixtures.yaml`) and **42 store fixtures**
+(`eval/fixtures_store.yaml`) — at least **3 prompts per tool**.
+
+The three prompts must differ *in kind*, not just in wording: a canonical
+phrasing, a real-user paraphrase that avoids the tool's own vocabulary, and a
+boundary case framed next to a sibling tool. Three restatements of one sentence
+only prove the model can match one phrasing; the point is to find descriptions
+that work for a single lucky wording and no other.
+
+Add more by appending with the required fields: `id`, `category`, `prompt`,
+`expected_tool`; optional: `expected_toolset` (for deferred tools),
+`acceptable_tools`, `max_steps`, `notes`.
+
+`tests/test_fixtures.py` enforces the invariants without needing a server —
+unique ids and prompts, known categories, `expected_toolset` present on
+non-meta fixtures and matching the committed snapshot, and every tool in
+`tool-history/latest.json` carrying at least 3 prompts. That last one is the
+drift guard: a tool added server-side fails the unit tests until someone writes
+prompts for it.
 
 ## Scope
 
