@@ -243,7 +243,7 @@ are not installed in CI, so they are outside the tested catalogue.
 
 The **Store API MCP endpoint** (`/store-api/_mcp`) is covered experimentally: the
 UCP buyer-journey tools (`shopware-ucp-*`) and `shopware-store-api-context` come
-from the `SwagAgenticCommerce` plugin. It uses the same discovery mechanics as
+from the `shopware/agentic-commerce` plugin. It uses the same discovery mechanics as
 admin but authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`) plus
 a context token. Run it with:
 
@@ -252,13 +252,15 @@ python functional/run.py --endpoint store               # Layer 1 (discovery mec
 python eval/run.py --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
 ```
 
-In CI this suite is **opt-in** via the `run_store` dispatch input, and it cannot
-pass there yet: the `shopware-ucp-*` tools are not part of `SwagAgenticCommerce`
-— they come from the separate `ucp-php-sdk` (`core` + `symfony-bundle`), which no
-branch of that plugin requires and which the workflow does not install. Locally
-it works because the SDK is checked out and wired in through composer path
-repositories. Wiring the SDK into CI is the prerequisite for making this suite
-mandatory. The store LLM eval stays advisory.
+The `shopware-ucp-*` tools come from the **`shopware/agentic-commerce`** plugin
+(`src/Ucp/Mcp/Tool`, plugin class `Swag\AgenticCommerce\SwagAgenticCommerce`),
+which pulls the UCP protocol layer in via `ucp-php-sdk/symfony-bundle` — public
+on Packagist, so composer resolves it with no extra wiring.
+
+In CI this suite is **opt-in** via the `run_store` dispatch input while it is
+being validated; the store LLM eval stays advisory. Note the plugin currently
+declares `shopware/core: ~6.5 || ~6.6 || ~6.7`, so a run against `trunk`
+(6.8-dev) may need a constraint bump upstream before it resolves.
 
 ### Coverage
 
@@ -294,10 +296,8 @@ cannot flip the build red between commits. The plugin checkouts
 tracks its own repository default branch, so runs always exercise the latest
 plugin code. The trade-off is that plugin-side churn can turn a run red without
 a change here — pin a single run via the `dev_tools_ref` / `merchant_tools_ref`
-dispatch inputs. `SwagAgenticCommerce` is only checked out for opt-in store runs
-and stays pinned to `feature/agentic-commerce-core-coexistence`; it is not the
-source of the UCP tools (see the Store API section), so tracking its default
-branch would not help.
+dispatch inputs. `shopware/agentic-commerce` tracks its default branch too, but
+is only checked out for opt-in store runs (`run_store=true`).
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the

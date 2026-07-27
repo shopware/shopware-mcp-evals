@@ -30,7 +30,7 @@ on:
         required: false
         default: ''
       agentic_commerce_ref:
-        description: 'SwagAgenticCommerce ref (used when run_store=true). Pinned: no branch of that repo pulls in the ucp-php-sdk that provides the UCP tools.'
+        description: 'shopware/agentic-commerce ref (used when run_store=true). Default: empty = the repo default branch (latest).'
         required: false
         default: ''
       run_store:
@@ -167,17 +167,18 @@ jobs:
           path: shopware/custom/plugins/SwagMcpMerchantTools
           fetch-depth: 1
 
-      # SwagAgenticCommerce stays pinned and the whole store suite stays opt-in.
-      # The shopware-ucp-* tools do NOT live in this plugin at all — they come
-      # from the separate ucp-php-sdk (core + symfony-bundle), which no branch of
-      # this repo requires and which CI does not install. Until that is wired up,
-      # a store run here cannot produce UCP tools regardless of the ref.
-      - name: Checkout SwagAgenticCommerce (Store API / UCP)
+      # The agentic-commerce plugin (composer name shopware/agentic-commerce,
+      # plugin class Swag\AgenticCommerce\SwagAgenticCommerce) carries the 14
+      # shopware-ucp-* MCP tools under src/Ucp/Mcp/Tool. It pulls the UCP
+      # protocol layer in via ucp-php-sdk/symfony-bundle, which is public on
+      # Packagist, so composer resolves it without extra wiring. Tracks its
+      # default branch like the other plugins.
+      - name: Checkout agentic-commerce (Store API / UCP)
         if: github.event.inputs.run_store == 'true'
         uses: actions/checkout@v7
         with:
-          repository: shopware/SwagAgenticCommerce
-          ref: ${{ github.event.inputs.agentic_commerce_ref || 'feature/agentic-commerce-core-coexistence' }}
+          repository: shopware/agentic-commerce
+          ref: ${{ github.event.inputs.agentic_commerce_ref }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/plugins/SwagAgenticCommerce
           fetch-depth: 1
