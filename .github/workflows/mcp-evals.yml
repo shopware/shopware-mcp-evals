@@ -180,7 +180,14 @@ jobs:
       # Packagist, so composer resolves it without extra wiring. Tracks its
       # default branch like the other plugins.
       - name: Checkout agentic-commerce (Store API / UCP)
+        id: agentic_checkout
         if: env.RUN_STORE == 'true'
+        # Non-fatal, like the composer step below: this repo is private and
+        # PLUGINS_PAT may not be scoped to it (a 'Not Found' from the API means
+        # exactly that). An optional plugin the token cannot read must not take
+        # down the admin evals. We read steps.*.outcome, not .conclusion, so the
+        # real result is still visible to us rather than masked to success.
+        continue-on-error: true
         uses: actions/checkout@v7
         with:
           repository: shopware/agentic-commerce
@@ -191,6 +198,8 @@ jobs:
 
       - name: Wire up MCP bundle + plugin
         working-directory: shopware
+        env:
+          STORE_CHECKOUT_OK: ${{ steps.agentic_checkout.outcome == 'success' }}
         run: |
           set -euo pipefail
 
@@ -213,20 +222,27 @@ jobs:
           # It is recorded and warned about rather than swallowed — a silent skip is
           # exactly how these 42 fixtures went unrun for so long.
           STORE_PLUGIN_OK=false
-          if [ "${RUN_STORE}" = "true" ]; then
+          STORE_SKIP_REASON=""
+          if [ "${RUN_STORE}" != "true" ]; then
+            STORE_SKIP_REASON="run_store=false"
+          elif [ "${STORE_CHECKOUT_OK}" != "true" ]; then
+            STORE_SKIP_REASON="the \`shopware/agentic-commerce\` checkout failed — \`PLUGINS_PAT\` is most likely not scoped to that repository (the API answers \`Not Found\`). Grant the token access to it."
+          else
             composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
             if composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts; then
               STORE_PLUGIN_OK=true
             else
-              echo "::warning::shopware/agentic-commerce did not resolve against this Shopware ref — Store/UCP suite skipped. The plugin declares shopware/core ~6.5||~6.6||~6.7; trunk is 6.8-dev."
-              {
-                echo "### Store/UCP suite skipped"
-                echo ""
-                echo "\`shopware/agentic-commerce\` failed to resolve against this Shopware ref."
-                echo "It declares \`shopware/core: ~6.5 || ~6.6 || ~6.7\`; trunk is 6.8-dev."
-                echo "The 42 store fixtures did not run. Bump the constraint upstream to enable them."
-              } >> "$GITHUB_STEP_SUMMARY"
+              STORE_SKIP_REASON="\`shopware/agentic-commerce\` did not resolve against this Shopware ref. It declares \`shopware/core: ~6.5 || ~6.6 || ~6.7\`; trunk is 6.8-dev. Bump the constraint upstream."
             fi
+          fi
+
+          if [ "${STORE_PLUGIN_OK}" != "true" ] && [ "${RUN_STORE}" = "true" ]; then
+            echo "::warning::Store/UCP suite skipped: ${STORE_SKIP_REASON}"
+            {
+              echo "### Store/UCP suite skipped"
+              echo ""
+              echo "The 42 store fixtures did not run. Reason: ${STORE_SKIP_REASON}"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "STORE_PLUGIN_OK=${STORE_PLUGIN_OK}" >> "$GITHUB_ENV"
 
@@ -390,10 +406,16 @@ jobs:
       # one that actually completes.
       - name: Run LLM eval (second validator)
         id: eval_second
-        # always(): the primary eval gates, so it fails exactly when a second
-        # opinion is most useful. Skipping this on its failure threw away the
-        # both-models-failed signal in the run that needed it.
-        if: always()
+        # Run whenever the primary eval actually ran — it gates, so it fails
+        # exactly when a second opinion is most useful, and skipping this on its
+        # failure threw away the both-models-failed signal.
+        #
+        # But `always()` alone was too broad: when setup died early the primary
+        # was *skipped*, and this still fired into a runner with no dependencies
+        # installed and died on `No module named 'yaml'`, turning one real
+        # failure into two. Requiring the primary to have run keeps the trigger
+        # tied to a usable environment.
+        if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
         # No continue-on-error: this model gates at the same 90% as the primary.
         # It measured 91% on the 90-fixture set, so the bar is one it has
         # actually cleared, not an aspiration. continue-on-error would also
@@ -418,7 +440,7 @@ jobs:
       # actually ran, errors excluded and budgeted separately).
       - name: Compare models
         id: eval_compare
-        if: always()
+        if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
         run: |
           primary="results/eval-primary.json"
           second="results/eval-second-validator.json"
