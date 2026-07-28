@@ -21,7 +21,7 @@ discovery cost in tokens and steps?
 
 Usage:
     python eval/run.py                                  # both modes, Anthropic
-    python eval/run.py --provider openai --model gpt-4o
+    python eval/run.py --provider openai --model gpt-5.4-mini
     python eval/run.py --modes discovery --max-steps 8
     python eval/run.py --category disambiguation
     python eval/run.py --id disambig_count_vs_search
@@ -38,7 +38,10 @@ from pathlib import Path
 
 import yaml
 
-# mcp_client lives at the repo root (shared by the eval and functional layers).
+# mcp_client and ownership live at the repo root (shared by the eval and
+# functional layers). Do NOT add eval/ to sys.path here: eval/run.py and
+# functional/run.py are both called `run`, and putting eval/ first makes
+# `import run` resolve to the wrong one (it has broken tests/test_run.py twice).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mcp_client import (  # noqa: E402
@@ -58,6 +61,7 @@ from mcp_client import (  # noqa: E402
     mcp_result_text,
     mcp_tools_list_all,
 )
+from ownership import CORE, OPTIONAL, breakdown, core_rate, owner_of  # noqa: E402
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -126,15 +130,27 @@ def anthropic_turn(client, model: str, system_prompt: str | None, messages: list
     }
 
 
+# Which output-cap parameter a model accepts, discovered once per model.
+# gpt-4o and gpt-4.1 take either; every GPT-5 and o-series model rejects the old
+# `max_tokens` outright. Probing rather than hardcoding keeps third-party
+# OpenAI-compatible endpoints (the `github` provider) working — Mistral there
+# only knows `max_tokens`.
+_OUTPUT_CAP_PARAM: dict[str, str] = {}
+
+
 def openai_turn(client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
     """One assistant turn (system prompt must already be in messages)."""
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=1024,
-        tools=tools,
-        tool_choice="auto",
-        messages=messages,
-    )
+    kwargs = {"model": model, "tools": tools, "tool_choice": "auto", "messages": messages}
+    param = _OUTPUT_CAP_PARAM.get(model, "max_completion_tokens")
+    try:
+        response = client.chat.completions.create(**kwargs, **{param: 1024})
+    except Exception as exc:  # noqa: BLE001 — retried below, re-raised if it isn't the cap param
+        other = "max_tokens" if param == "max_completion_tokens" else "max_completion_tokens"
+        if model in _OUTPUT_CAP_PARAM or param not in str(exc):
+            raise
+        response = client.chat.completions.create(**kwargs, **{other: 1024})
+        param = other
+    _OUTPUT_CAP_PARAM[model] = param
     msg = response.choices[0].message
 
     tool_calls = []
@@ -508,6 +524,77 @@ def print_comparison(baseline: list[dict], discovery: list[dict]):
         )
 
 
+def gate_verdict(results, min_pass_rate, min_core_pass_rate, max_error_rate) -> dict:
+    """Decide whether a run passes, and on which of the three independent axes.
+
+    Kept pure and separate from main() so the policy is testable without a
+    server. The three failure modes are deliberately not folded together:
+
+    * quality  — the overall rate fell below threshold;
+    * core     — core specifically fell below threshold, on its own denominator;
+    * validity — too many fixtures never reached the model, so the run is
+                 missing data rather than reporting a bad model. Folding errors
+                 into the rate is how an 89% run once got read as 53%.
+
+    Core needs its own axis because the aggregate spans four repositories: with
+    90 admin fixtures and a single 90% gate, nine core misses still read PASS as
+    long as merchant-tools and dev-tools are clean — backwards, since the plugin
+    numbers are the ones we can afford to lose.
+
+    `min_core_pass_rate=None` means "same bar as the overall rate". That is a
+    deliberate default: the win here is core getting its own denominator, and
+    raising the bar is a decision to make once the per-tier rates have been
+    observed, not an aspiration invented up front.
+    """
+    graded = scored(results)
+    gating = executed(results)
+    errored = len(graded) - len(gating)
+    error_rate = errored / len(graded) if graded else 0.0
+
+    passed = sum(1 for r in gating if r["passed"])
+    rate = passed / len(gating) if gating else 1.0
+
+    core_passed, core_total, core_pct = core_rate(gating)
+    min_core = min_core_pass_rate if min_core_pass_rate is not None else min_pass_rate
+
+    quality_ok = rate >= min_pass_rate
+    core_ok = core_pct >= min_core
+    run_valid = error_rate <= max_error_rate
+    return {
+        "graded": graded,
+        "gating": gating,
+        "errored": errored,
+        "error_rate": error_rate,
+        "passed": passed,
+        "rate": rate,
+        "core_passed": core_passed,
+        "core_total": core_total,
+        "core_rate": core_pct,
+        "min_core": min_core,
+        "quality_ok": quality_ok,
+        "core_ok": core_ok,
+        "run_valid": run_valid,
+        "ok": quality_ok and core_ok and run_valid,
+    }
+
+
+def print_tier_block(gating: list[dict]) -> None:
+    """Per-owning-repo rates, so a bad number points at a repository.
+
+    'admin at 92%' does not say whether the misses were in core, in the
+    dev-tools bundle, or in an optional plugin — and those are not the same
+    finding.
+    """
+    tiers = breakdown(gating)
+    if len(tiers) < 2:
+        return
+    print(f"\n{BOLD}By owner:{RESET}")
+    for tier, b in tiers.items():
+        pct = round(100 * b["rate"])
+        note = f"  {DIM}(optional plugin){RESET}" if tier in OPTIONAL else ""
+        print(f"  {tier:<20} {pct_color(pct)}{b['passed']}/{b['total']} ({pct}%){RESET}{note}")
+
+
 def discovery_summary(discovery: list[dict]) -> dict:
     graded = scored(discovery)
     n = len(graded)
@@ -624,7 +711,18 @@ def _arrow(pct_before: int, pct_after: int) -> str:
 
 PROVIDER_DEFAULTS = {
     "anthropic": "claude-sonnet-4-6",
-    "openai": "gpt-4o",
+    # This is what CI resolves the PRIMARY eval to — the workflow's `eval_model`
+    # input defaults to empty, so changing this constant changes the gating
+    # model. It used to be gpt-4o, which made the primary and the gpt-4o-mini
+    # second validator two variants of one model: same vendor, same generation,
+    # same function-calling stack, so they tended to fail for the same reasons
+    # and the both-fail bucket carried little independent signal.
+    #
+    # gpt-5.4-mini is a generation removed from gpt-4o-mini while being cheaper
+    # than gpt-4o ($0.75 vs ~$2.50 per 1M input) at the same latency. Measured
+    # on the 24 disambiguation fixtures — the category most sensitive to
+    # description quality — it scored 19/19 against gpt-4o's 18/19.
+    "openai": "gpt-5.4-mini",
     # A non-OpenAI publisher on purpose: as the second validator its value is
     # being an independent implementation, so it catches tool-description
     # problems that are specific to one vendor's function-calling behaviour.
@@ -649,31 +747,58 @@ def count_rate_limited(results: list[dict] | None) -> int:
     return sum(1 for r in results or [] if any(n in str(r.get("error", "")).lower() for n in needles))
 
 
-def write_ci_summary(provider, model, baseline, discovery, rate, ok) -> None:
-    """Append a one-line verdict to the GitHub Actions step summary.
+def write_summary_row(provider, model, baseline, discovery, rate, ok, args) -> dict:
+    """Record this run's verdict as a JSON row for the consolidated job summary.
 
-    Without this, reading a run's outcome means paging through a log whose tail
-    is entirely post-job cleanup — and for an advisory (continue-on-error) step
-    the reported conclusion is 'success' even when it failed, so the step status
-    cannot be trusted on its own.
+    Reading a run's outcome from the log alone doesn't work: the tail is
+    entirely post-job cleanup, and for an advisory (continue-on-error) step the
+    reported conclusion is 'success' even when it failed, so the step status
+    can't be trusted either.
+
+    This used to append its own markdown table straight to GITHUB_STEP_SUMMARY.
+    Three eval processes doing that produced three one-row tables, each
+    re-printing the header, with the cross-model comparison wedged between rows
+    two and three — and no way to tell which suite the third belonged to.
+    Markdown appended from separate processes can't be made into one table, so
+    the row is emitted as data and `eval/summary.py` renders them together at
+    the end of the job.
+
+    Returns the row (for tests); writes it only when --summary-row is set.
     """
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not summary_path:
-        return
     graded = discovery if discovery is not None else baseline
-    errored = sum(1 for r in graded or [] if r.get("error"))
     throttled = count_rate_limited(baseline) + count_rate_limited(discovery)
-    verdict = "PASS" if ok else "FAIL"
-    line = (
-        f"| `{provider}` | `{model}` | {round(rate * 100)}% | "
-        f"{len(graded or [])} | {errored} | {throttled} | {verdict} |"
+    row = {
+        "suite": args.suite_label or args.endpoint,
+        "provider": provider,
+        "model": model,
+        "rate": rate,
+        "graded": len(graded or []),
+        "errored": sum(1 for r in graded or [] if r.get("error")),
+        "throttled": throttled,
+        "gate": "PASS" if ok else "FAIL",
+        "advisory": bool(args.advisory),
+        # Per-owning-repo split, so the summary can say whether a failure landed
+        # in core or in an optional plugin. One aggregate rate cannot. Built
+        # over executed() — the same exclusions as the overall rate, so the
+        # per-tier numbers stay comparable with it.
+        "by_tier": breakdown(executed(graded)),
+    }
+
+    # Also on stdout: the job summary now only appears once every eval has run,
+    # so a timed-out or cancelled job would otherwise show nothing at all.
+    print(
+        f"\nSummary row: {row['suite']} | {provider} {model} | {round(rate * 100)}% | "
+        f"graded={row['graded']} errors={row['errored']} throttled={throttled} | {row['gate']}"
     )
-    with open(summary_path, "a") as handle:
-        handle.write("| provider | model | pass rate | graded | errors | throttled | gate |\n")
-        handle.write("|---|---|---:|---:|---:|---:|---|\n")
-        handle.write(line + "\n")
+
+    if args.summary_row:
+        path = Path(args.summary_row)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(row, indent=2))
+
     if throttled:
         print(f"\n::warning::{throttled} fixture(s) hit provider rate limits — results are understated.")
+    return row
 
 
 def skipped_result(fixture: dict, mode: str) -> dict:
@@ -867,6 +992,15 @@ def main():
         help="Min gating-mode pass rate for exit 0, over fixtures that ran (default 0.9; 1.0 for strict)",
     )
     parser.add_argument(
+        "--min-core-pass-rate",
+        type=float,
+        default=(float(os.environ["EVAL_MIN_CORE_PASS_RATE"]) if os.environ.get("EVAL_MIN_CORE_PASS_RATE") else None),
+        help=(
+            "Min pass rate for core (shopware/shopware) fixtures alone, on their own denominator, so a core "
+            "regression cannot hide behind clean optional-plugin numbers. Defaults to --min-pass-rate."
+        ),
+    )
+    parser.add_argument(
         "--max-error-rate",
         type=float,
         default=float(os.environ.get("EVAL_MAX_ERROR_RATE", "0.1")),
@@ -887,6 +1021,26 @@ def main():
     parser.add_argument("--category", help="Run only fixtures of this category")
     parser.add_argument("--id", help="Run only this fixture ID")
     parser.add_argument("--output", help="Path to save JSON report")
+    parser.add_argument(
+        "--summary-row",
+        help=(
+            "Path to write this run's one-row verdict as JSON, for eval/summary.py to render into the "
+            "GitHub job summary. Omit for local runs."
+        ),
+    )
+    parser.add_argument(
+        "--suite-label",
+        help=(
+            "How this run is named in the job summary's run table (e.g. 'admin · primary'). "
+            "The workflow knows which role a run plays; the script cannot infer it from --endpoint alone, "
+            "since the primary and the second validator share one. Defaults to --endpoint."
+        ),
+    )
+    parser.add_argument(
+        "--advisory",
+        action="store_true",
+        help="Mark this run as non-gating in the job summary (e.g. the Store/UCP suite, which is continue-on-error)",
+    )
     args = parser.parse_args()
 
     provider = args.provider
@@ -1036,6 +1190,9 @@ def main():
             "results": results_discovery,
         }
         report["discovery_summary"] = discovery_summary(results_discovery)
+    # Per-owning-repo rates over the gating mode, so the report answers "which
+    # codebase regressed" without re-deriving attribution downstream.
+    report["by_tier"] = breakdown(executed(results_discovery if results_discovery is not None else results_baseline))
     Path(output_path).write_text(json.dumps(report, indent=2))
     print(f"Report saved: {output_path}")
 
@@ -1048,27 +1205,28 @@ def main():
     # borderline/flaky fixtures shouldn't flip CI red, but a real regression
     # (the rate collapsing) still fails. Each failed discovery fixture is also
     # retried once (see run_discovery_pass). Set --min-pass-rate 1.0 for strict.
-    graded = scored(results_discovery if results_discovery is not None else results_baseline)
-    gating = executed(results_discovery if results_discovery is not None else results_baseline)
-    errored = len(graded) - len(gating)
-    error_rate = errored / len(graded) if graded else 0.0
-
-    passed = sum(1 for r in gating if r["passed"])
-    rate = passed / len(gating) if gating else 1.0
-
-    # Two independent ways to fail, kept separate so the reason is unambiguous:
-    # a genuine quality regression (rate below threshold) versus a run that did
-    # not really happen (too many fixtures never reached the model). Folding
-    # errors into the rate conflates them and reports a broken server as a bad
-    # model — which is exactly how a 89% run once got read as 53%.
-    quality_ok = rate >= args.min_pass_rate
-    run_valid = error_rate <= args.max_error_rate
-    ok = quality_ok and run_valid
+    v = gate_verdict(
+        results_discovery if results_discovery is not None else results_baseline,
+        min_pass_rate=args.min_pass_rate,
+        min_core_pass_rate=args.min_core_pass_rate,
+        max_error_rate=args.max_error_rate,
+    )
+    graded, gating = v["graded"], v["gating"]
+    errored, error_rate, passed, rate = v["errored"], v["error_rate"], v["passed"], v["rate"]
+    core_passed, core_total, core_pct = v["core_passed"], v["core_total"], v["core_rate"]
+    min_core, core_ok = v["min_core"], v["core_ok"]
+    quality_ok, run_valid, ok = v["quality_ok"], v["run_valid"], v["ok"]
 
     print(
         f"\nGate: {passed}/{len(gating)} = {round(rate * 100)}% "
         f"(threshold {round(args.min_pass_rate * 100)}%) → {'PASS' if quality_ok else 'FAIL'}"
     )
+    print_tier_block(gating)
+    if core_total:
+        print(
+            f"  Core gate: {core_passed}/{core_total} = {round(core_pct * 100)}% "
+            f"(threshold {round(min_core * 100)}%) → {'PASS' if core_ok else 'FAIL'}"
+        )
     if errored:
         print(
             f"  {errored}/{len(graded)} fixtures never reached the model ({round(error_rate * 100)}%, "
@@ -1077,10 +1235,13 @@ def main():
     if not quality_ok:
         failed_ids = [r["id"] for r in gating if not r["passed"]]
         print(f"  below threshold; failing: {', '.join(failed_ids)}")
+    if not core_ok:
+        core_failed = [r["id"] for r in gating if not r["passed"] and owner_of(r.get("expected_tool", "")) == CORE]
+        print(f"  {RED}core below threshold{RESET}; failing: {', '.join(core_failed)}")
     if not run_valid:
         print("  too many fixtures errored to trust this run — fix the server/provider, then re-run.")
 
-    write_ci_summary(provider, model, results_baseline, results_discovery, rate, ok)
+    write_summary_row(provider, model, results_baseline, results_discovery, rate, ok, args)
     sys.exit(0 if ok else 1)
 
 

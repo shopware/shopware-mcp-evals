@@ -1,6 +1,9 @@
 .env
 .claude/
 results/*.json
+# Per-run job-summary rows (eval/run.py --summary-row); `results/*.json` above
+# only covers the top level.
+results/rows/
 __pycache__/
 *.pyc
 .venv/

@@ -156,19 +156,122 @@ def test_gate_modes(tmp_path, monkeypatch, capsys, gate, strong_pass, weak_pass,
     capsys.readouterr()
 
 
-def test_step_summary_is_appended_when_ci_sets_it(tmp_path, monkeypatch, capsys):
+def test_step_summary_is_left_to_the_summary_renderer(tmp_path, monkeypatch, capsys):
+    """This script must not touch GITHUB_STEP_SUMMARY any more.
+
+    eval/summary.py renders the job summary once, from --output. Appending here
+    too would put a second copy of these tables in the middle of it.
+    """
     a = tmp_path / "a.json"
     b = tmp_path / "b.json"
     a.write_text(json.dumps(report("strong", [("f1", True, "t1", False)])))
     b.write_text(json.dumps(report("weak", [("f1", True, "t1", False)])))
     summary = tmp_path / "summary.md"
+    out_json = tmp_path / "cmp.json"
 
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    monkeypatch.setattr(sys, "argv", ["compare_runs.py", str(a), str(b)])
+    monkeypatch.setattr(sys, "argv", ["compare_runs.py", str(a), str(b), "--output", str(out_json)])
 
     assert C.main() == 0
-    assert "Cross-model comparison" in summary.read_text()
-    capsys.readouterr()
+    assert not summary.exists()
+    assert json.loads(out_json.read_text())["shared"] == 1
+    assert "Cross-model comparison" in capsys.readouterr().out
+
+
+def test_both_fail_detail_records_what_each_model_picked():
+    """The confusion pair is the finding — naming only the expected tool says a
+    description is wrong but not what it lost to."""
+    a = report("strong", [("f1", False, "wanted", False)])
+    b = report("weak", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+    b["modes"]["discovery"]["results"][0] |= {"selected_tool": None, "fail_reason": "no_tool_call"}
+
+    detail = C.compare(a, b)["both_fail_detail"]
+
+    assert detail == [
+        {
+            "id": "f1",
+            "expected_tool": "wanted",
+            "primary_selected": "sibling",
+            "second_selected": None,
+            "primary_reason": "wrong_tool",
+            "second_reason": "no_tool_call",
+        }
+    ]
+
+
+def test_both_fail_detail_degrades_when_fields_are_absent():
+    """Older reports have no selected_tool/fail_reason; that must not raise."""
+    a = report("strong", [("f1", False, "t1", False)])
+
+    detail = C.compare(a, a)["both_fail_detail"]
+
+    assert detail[0]["primary_selected"] is None
+    assert detail[0]["primary_reason"] is None
+
+
+def test_actionable_table_shows_both_picks_and_hides_wrong_tool():
+    a = report("strong", [("f1", False, "wanted", False)])
+    b = report("weak", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling_a", "fail_reason": "wrong_tool"}
+    b["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling_b", "fail_reason": "wrong_tool"}
+
+    out = C.render_actionable(C.compare(a, b), "strong", "weak")
+
+    assert "`sibling_a`" in out
+    assert "`sibling_b`" in out
+    # Redundant with the two picked columns, so it is not printed.
+    assert "wrong_tool" not in out
+
+
+def test_actionable_table_keeps_reasons_the_columns_cannot_show():
+    a = report("strong", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {"selected_tool": None, "fail_reason": "step_cap"}
+
+    out = C.render_actionable(C.compare(a, a))
+
+    assert "both: step_cap" in out
+    assert "(none)" in out
+
+
+def test_actionable_table_says_so_when_nothing_failed_twice():
+    a = report("strong", [("f1", True, "t1", False)])
+    assert "No fixture failed for both models." in C.render_actionable(C.compare(a, a))
+
+
+def test_actionable_table_lists_one_row_per_fixture():
+    a = report("strong", [("f1", False, "busy", False), ("f2", False, "busy", False), ("f3", False, "lonely", False)])
+
+    out = C.render_actionable(C.compare(a, a))
+    rows = [ln for ln in out.splitlines() if ln.startswith("| ") and "|---" not in ln and "Expected tool" not in ln]
+
+    assert len(rows) == 3
+    assert out.index("`busy`") < out.index("`lonely`")
+
+
+def test_actionable_table_puts_core_failures_above_plugin_failures():
+    """Owner decides urgency: a core description problem outranks a plugin one
+    however many prompts the plugin lost."""
+    a = report(
+        "strong",
+        [
+            ("p1", False, "merchant-order-summary", False),
+            ("p2", False, "merchant-order-summary", False),
+            ("c1", False, "shopware-entity-read", False),
+        ],
+    )
+
+    out = C.render_actionable(C.compare(a, a))
+
+    assert out.index("shopware-entity-read") < out.index("merchant-order-summary")
+
+
+def test_actionable_table_names_the_owning_repository():
+    a = report("strong", [("f1", False, "swag-dev-tools-load-skill", False)])
+
+    out = C.render_actionable(C.compare(a, a))
+
+    assert "| dev-tools |" in out
 
 
 def test_unreadable_report_exits_two(tmp_path, monkeypatch, capsys):

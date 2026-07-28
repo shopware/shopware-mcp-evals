@@ -388,7 +388,12 @@ jobs:
           [ -n "${EVAL_PROVIDER}" ] && args+=(--provider "${EVAL_PROVIDER}")
           [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
           # Fixed path so the cross-model comparison step can find it.
-          python eval/run.py "${args[@]}" --output "results/eval-primary.json"
+          # --summary-row feeds the consolidated job summary rendered at the end
+          # of the job; the numeric prefix fixes the row's position in its table.
+          python eval/run.py "${args[@]}" \
+            --output "results/eval-primary.json" \
+            --summary-row "results/rows/1-admin-primary.json" \
+            --suite-label "admin · primary"
 
       # Second opinion on the same fixtures: a fixture both models miss points at
       # the tool description, while one both pass is noise.
@@ -400,10 +405,18 @@ jobs:
       # concurrency would not fix a per-day quota. `--provider github` still works
       # for small local runs; it is just not viable for a full CI sweep.
       #
-      # gpt-4o-mini runs on the existing project key. Same vendor as the primary
-      # eval, so this checks "is the description clear enough for a weaker model"
-      # rather than cross-provider behaviour — the weaker of the two signals, but
-      # one that actually completes.
+      # gpt-4o-mini runs on the existing project key. It is still the same vendor
+      # as the primary, but no longer the same model family: the primary moved
+      # from gpt-4o to gpt-5.4-mini precisely because gpt-4o and gpt-4o-mini
+      # shared a generation and function-calling stack, so they failed for the
+      # same reasons and agreeing told us little. Across two generations, a
+      # both-fail is real evidence about the description rather than one model
+      # family's quirk. Still not cross-*vendor* — that needs a second API key,
+      # and GitHub Models (see above) cannot carry the volume.
+      #
+      # Its 90% gate is a measured bar: gpt-4o-mini scored 91% on the 90-fixture
+      # set. Keep that in mind before swapping this model too — the threshold
+      # would have to be re-measured.
       - name: Run LLM eval (second validator)
         id: eval_second
         # Run whenever the primary eval actually ran — it gates, so it fails
@@ -427,7 +440,9 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python eval/run.py --provider openai --model gpt-4o-mini \
-            --output "results/eval-second-validator.json"
+            --output "results/eval-second-validator.json" \
+            --summary-row "results/rows/2-admin-second.json" \
+            --suite-label "admin · second validator"
 
       # Reduce both runs to the split that matters: a fixture BOTH models miss
       # is a tool-description problem, one only the weaker model misses is its
@@ -496,7 +511,34 @@ jobs:
           args=()
           [ -n "${EVAL_PROVIDER}" ] && args+=(--provider "${EVAL_PROVIDER}")
           [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
-          python eval/run.py --endpoint store --modes discovery "${args[@]}"
+          # --advisory: this step is continue-on-error, so its row must not be
+          # read as a gating verdict. Without the suite label it rendered as a
+          # third, unexplained openai/gpt-4o result.
+          python eval/run.py --endpoint store --modes discovery "${args[@]}" \
+            --summary-row "results/rows/3-store.json" \
+            --suite-label "store · UCP" \
+            --advisory
+
+      # One render for the whole job. The three eval runs are separate
+      # processes, so they emit JSON rows rather than markdown — appended
+      # markdown from separate processes cannot form a single table, which is
+      # why this used to be three one-row tables with the comparison wedged in
+      # between them.
+      #
+      # The condition matches the other post-eval steps rather than always():
+      # it must still run when the gate FAILS (that is when the summary is most
+      # worth reading), but not when setup died before the primary eval, where
+      # it would only turn one real failure into two.
+      #
+      # No continue-on-error, for the reason stated on the compare step: it
+      # reports a failed step as successful. A broken renderer should be
+      # visible; the read paths inside summary.py are the defensive part.
+      - name: Write job summary
+        if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
+        run: |
+          python eval/summary.py \
+            --rows "results/rows" \
+            --comparison "results/eval-comparison.json"
 
       - name: Upload eval results
         if: always()

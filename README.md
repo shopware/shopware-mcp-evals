@@ -169,11 +169,11 @@ tool call of any kind is graded.
 # Both modes, Anthropic (default), claude-sonnet-4-6
 python eval/run.py
 
-# OpenAI
-python eval/run.py --provider openai --model gpt-4o
+# OpenAI — gpt-5.4-mini is the CI primary and the openai default
+python eval/run.py --provider openai --model gpt-5.4-mini
 
-# Second validator in CI — a weaker model on the same fixtures. A fixture both
-# models miss points at the tool description; one both pass is noise.
+# Second validator in CI — an older-generation model on the same fixtures. A
+# fixture both models miss points at the tool description; one both pass is noise.
 python eval/run.py --provider openai --model gpt-4o-mini
 
 # GitHub Models is also supported (free, OpenAI-compatible, auth via GITHUB_TOKEN
@@ -211,6 +211,16 @@ validator each gate themselves, and `eval/compare_runs.py --gate both` is the
 consolidated verdict. Baseline mode is the comparison reference and stays
 advisory.
 
+**Core is additionally gated on its own denominator.** The admin suite spans
+four repositories, so one aggregate rate lets a core regression hide behind
+clean plugin numbers: nine core misses out of 90 fixtures still reads 90% PASS
+as long as merchant-tools and dev-tools are perfect — backwards, since the
+plugin numbers are the ones we can afford to lose. `--min-core-pass-rate`
+(default: same as `--min-pass-rate`) is checked over core fixtures alone. The
+default is deliberately not stricter: the win is core getting its own
+denominator, and raising the bar is a decision to make once the per-owner rates
+have been observed, not a number invented up front.
+
 The rate is computed over **fixtures that actually ran**. Two categories are
 held out, for different reasons:
 
@@ -229,6 +239,62 @@ Because the LLM is nondeterministic, each failed discovery fixture is **retried
 once** (only a double failure counts), and 90% tolerates a couple of borderline
 fixtures so one flaky prompt can't flip CI red — while a real regression still
 fails. Use `--min-pass-rate 1.0` for strict all-must-pass.
+
+### The CI job summary
+
+`mcp-evals.yml` runs `eval/run.py` three times — admin primary, admin second
+validator, Store/UCP advisory — in three separate processes. Each writes a JSON
+verdict row (`--summary-row`, labelled with `--suite-label`) instead of markdown,
+and a final `eval/summary.py` step renders them as **one** suite-labelled table
+followed by the cross-model comparison:
+
+```
+| Suite                    | Provider | Model         | Pass rate | Graded | Errors | Throttled | Gate            |
+| admin · primary          | openai   | gpt-5.4-mini  | 92%       | 90     | 0      | 0         | PASS            |
+| admin · second validator | openai   | gpt-4o-mini   | 91%       | 90     | 0      | 0         | PASS            |
+| store · UCP              | openai   | gpt-5.4-mini  | 90%       | 42     | 0      | 0         | PASS (advisory) |
+```
+
+A second table splits the same runs by **owning repository**, because "admin at
+92%" spans core, a first-party bundle and two optional plugins, and those
+failures are not worth the same:
+
+| Owner | Prefix | Repository | Enforcement |
+|---|---|---|---|
+| `core · discovery` | the 3 meta-tools | `shopware/shopware` | core gate + suite rate |
+| `core` | `shopware-*` | `shopware/shopware` | core gate + suite rate |
+| `dev-tools` | `swag-dev-tools-*` | `SwagMcpDevTools` (bundle) | suite rate |
+| `merchant-tools` | `merchant-*` | `SwagMcpMerchantTools` (plugin) | suite rate |
+| `agentic-commerce` | `shopware-ucp-*` | `shopware/agentic-commerce` | advisory |
+
+Attribution is by tool-name prefix (`ownership.py`), longest match first —
+`shopware-ucp-*` is agentic-commerce, not core. A fixture is attributed by its
+`expected_tool`: the description that should have won is the one under test, so
+a cross-boundary miss counts against the tool that lost. Because prefixes are a
+convention, `tests/test_ownership.py` fails when a tool in the snapshot matches
+none of them, rather than silently filing it under core.
+
+The discovery meta-tools are reported apart — a break there makes every tool
+undiscoverable — but counted inside core for gating: nine fixtures is too small
+a denominator to gate on, one miss swings it 11 points.
+
+The both-fail table names the **confusion pair**, not just the expected tool —
+knowing `swag-dev-tools-list-skills` failed tells you a description is wrong;
+knowing the model reached for `swag-dev-tools-load-skill` instead tells you what
+to rewrite it against:
+
+```
+| Owner     | Expected tool              | Fixture               | primary `gpt-5.4-mini` picked | second `gpt-4o-mini` picked | Note |
+| dev-tools | swag-dev-tools-list-skills | list_skills_available | swag-dev-tools-load-skill     | shopware-tool-search        |      |
+```
+
+Rows are ordered core-first, then by how many prompts the tool lost: owner
+decides urgency, count decides whether it is a description to rewrite (3/3) or
+one awkward prompt (1/3).
+
+`fail_reason` shows in the Note column only when the picked columns can't convey
+it (`no_tool_call`, `step_cap`); `wrong_tool` is already implied by the picks.
+Run `eval/summary.py` locally against a `results/rows/` directory to preview it.
 
 ### Discovery metrics
 

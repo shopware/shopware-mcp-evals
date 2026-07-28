@@ -33,6 +33,27 @@ brief for coding agents.
   skip it with `run_store=false`. If `agentic-commerce` fails to resolve against
   the pinned Shopware ref, the store steps skip with a warning rather than
   taking down the admin evals.
+- **One job summary, rendered once.** Each `eval/run.py` invocation writes a
+  JSON verdict row (`--summary-row`, `--suite-label`, `--advisory`) and the
+  final `eval/summary.py` step renders every row, plus the cross-model
+  comparison, into `GITHUB_STEP_SUMMARY`. Don't append markdown to the step
+  summary from the runners: three processes appending cannot form one table,
+  which is how the summary ended up as three one-row tables repeating each
+  other's numbers, with an unlabelled Store row at the bottom.
+  `compare_runs.py` still prints its full report (including the per-model rate
+  table) to stdout for local use — only the CI render is centralized, and it
+  drops the rates because `summary.py` already shows them per suite.
+- **Attribute failures to a repository.** `ownership.py` maps a tool name to
+  the codebase that owns it (core / dev-tools / merchant-tools /
+  agentic-commerce) by longest-matching prefix, and core is gated on its own
+  denominator so a core regression cannot be averaged away by clean plugin
+  numbers. Add new prefixes there, not inline: `tests/test_ownership.py` fails
+  when a tool in `tool-history/latest.json` matches none of them, which is the
+  point — an unattributed tool would silently be filed under core.
+- **Pin the tooling, range the runtime.** `eval/requirements.txt` keeps ranges
+  (with major caps) so CI tests against current SDKs; `requirements-dev.txt`
+  pins `ruff` exactly and bounds `pytest`. A linter release adds rules and
+  turns CI red with no code change, which is not a failure worth having.
 
 ## v2 invariants (read before touching the runners)
 

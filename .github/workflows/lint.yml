@@ -26,8 +26,11 @@ jobs:
         with:
           python-version-file: .python-version
 
+      # ruff is NOT installed bare here any more — requirements-dev.txt pins it.
+      # Unpinned, every ruff release landed in CI unreviewed, so a new lint rule
+      # could fail this gate without anyone touching the repo.
       - name: Install dev dependencies
-        run: pip install ruff -r requirements-dev.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Ruff (lint)
         run: ruff check eval functional mcp_client.py tests

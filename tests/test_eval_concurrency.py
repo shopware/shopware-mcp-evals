@@ -111,21 +111,9 @@ def test_count_rate_limited_handles_none_and_empty():
     assert E.count_rate_limited([]) == 0
 
 
-def test_write_ci_summary_is_a_noop_outside_actions(monkeypatch):
-    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
-    E.write_ci_summary("github", "m", [], [], 1.0, True)  # must not raise
-
-
-def test_write_ci_summary_reports_throttled_count(tmp_path, monkeypatch):
-    out = tmp_path / "summary.md"
-    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(out))
-    discovery = [{"passed": False, "error": "429 Too Many Requests"}, {"passed": True}]
-    E.write_ci_summary("github", "mistral-ai/mistral-medium-2505", None, discovery, 0.5, False)
-    text = out.read_text()
-    assert "mistral-ai/mistral-medium-2505" in text
-    assert "50%" in text
-    assert "FAIL" in text
-    assert text.strip().endswith("|")
+# write_ci_summary became write_summary_row (it emits a JSON row for
+# eval/summary.py instead of appending its own markdown table). Its tests moved
+# to tests/test_eval_summary_row.py.
 
 
 def test_github_provider_defaults_to_a_non_openai_publisher():
