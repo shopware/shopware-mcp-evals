@@ -216,11 +216,11 @@ jobs:
           # Store API / UCP tools. ucp-php-sdk is public on Packagist, so composer
           # resolves the protocol layer without extra wiring.
           #
-          # Non-fatal on purpose: the plugin declares shopware/core ~6.5||~6.6||~6.7
-          # and we usually run against trunk (6.8-dev), so resolution can legitimately
-          # fail. That must not take down the admin evals, which are the main signal.
-          # It is recorded and warned about rather than swallowed — a silent skip is
-          # exactly how these 42 fixtures went unrun for so long.
+          # Non-fatal on purpose: this is an optional private plugin, and a
+          # credential or resolution problem with it must not take down the admin
+          # evals, which are the main signal. It is recorded and warned about
+          # rather than swallowed — a silent skip is exactly how these 42 fixtures
+          # went unrun for so long.
           STORE_PLUGIN_OK=false
           STORE_SKIP_REASON=""
           if [ "${RUN_STORE}" != "true" ]; then
@@ -232,7 +232,7 @@ jobs:
             if composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts; then
               STORE_PLUGIN_OK=true
             else
-              STORE_SKIP_REASON="\`shopware/agentic-commerce\` did not resolve against this Shopware ref. It declares \`shopware/core: ~6.5 || ~6.6 || ~6.7\`; trunk is 6.8-dev. Bump the constraint upstream."
+              STORE_SKIP_REASON="\`composer require shopware/agentic-commerce\` failed against this Shopware ref — see the step log for the resolver output."
             fi
           fi
 

@@ -309,13 +309,15 @@ In CI this suite **runs by default**; pass `run_store=false` to skip it. The
 store LLM eval stays advisory until it has a track record — the store functional
 suite does gate.
 
-The plugin declares `shopware/core: ~6.5 || ~6.6 || ~6.7` while trunk is
-6.8-dev, so `composer require` can legitimately fail to resolve. That is
-**non-fatal**: the workflow records `STORE_PLUGIN_OK=false`, emits a
-`::warning::` and a job-summary note, skips the store steps, and lets the admin
-evals finish. It is never swallowed silently — a silent skip is precisely how
-these 42 fixtures went unrun. If you see that note, the fix is a constraint bump
-in `shopware/agentic-commerce`.
+Both wiring it up (private checkout, `composer require`) and running it are
+**non-fatal**: on failure the workflow records `STORE_PLUGIN_OK=false`, emits a
+`::warning::` and a job-summary note naming the cause, skips the store steps,
+and lets the admin evals finish. It is never swallowed silently — a silent skip
+is precisely how these 42 fixtures went unrun for so long.
+
+The usual cause is credentials: `shopware/agentic-commerce` is private, so
+`PLUGINS_PAT` needs read access to it. (Composer resolution is fine —
+`dev-trunk` is `6.7.x-dev` and the plugin accepts `~6.7`.)
 
 ### Coverage
 
