@@ -114,7 +114,7 @@ def _throttle_wait(resp: requests.Response) -> float:
         match = re.search(r"(\d+)\s*second", resp.json().get("error", {}).get("message", ""))
         if match:
             return min(float(match.group(1)), THROTTLE_MAX_WAIT_S)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         pass
     return 5.0
 

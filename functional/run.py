@@ -67,7 +67,7 @@ def _payload(resp: dict) -> dict:
     try:
         parsed = json.loads(mcp_result_text(resp) or "{}")
         return parsed if isinstance(parsed, dict) else {}
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return {}
 
 
@@ -128,7 +128,7 @@ def assert_tool_error(
     if not is_error:
         try:
             is_error = json.loads(text).get("success") is False
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
     if not is_error:
         rep.check_fail(label, "expected an error response, got: NO_ERROR")
@@ -201,7 +201,7 @@ def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None
         sse_session, _ = mcp_init(endpoint=endpoint)
         toolsets = mcp_toolsets_list(sse_session, endpoint=endpoint)
         if not toolsets:
-            rep.skip("tool schema conformance (post-enable listing)", "no toolsets advertised")
+            rep.skip("tool schema conformance (post-enable listing: no toolsets advertised)")
             return
         enable_toolset(sse_session, toolsets[0]["name"], endpoint=endpoint)
         after_enable = mcp_tools_list_all(sse_session, endpoint=endpoint)
@@ -232,7 +232,7 @@ def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None
         return
 
     if not search_tools:
-        rep.skip("tool schema conformance (tool-search payload)", "tool-search returned no tools")
+        rep.skip("tool schema conformance (tool-search payload: tool-search returned no tools)")
         return
 
     malformed = _malformed_schemas(search_tools)
@@ -256,7 +256,7 @@ def _search_payload_tools(session: str, endpoint: Endpoint) -> list[dict]:
         payload = mcp_result_text(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint))
         try:
             data = json.loads(payload).get("data", [])
-        except (json.JSONDecodeError, TypeError, AttributeError):
+        except json.JSONDecodeError, TypeError, AttributeError:
             continue
         for row in data:
             tool = row.get("tool") if isinstance(row, dict) else None

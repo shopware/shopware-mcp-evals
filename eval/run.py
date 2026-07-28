@@ -244,7 +244,7 @@ def _search_result_tools(result_text: str) -> list[dict]:
     in MCP tool shape ({name, description, inputSchema})."""
     try:
         payload = json.loads(result_text)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return []
     tools = []
     for r in payload.get("data", []):

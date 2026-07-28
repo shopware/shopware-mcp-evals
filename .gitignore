@@ -1,5 +1,10 @@
 .env
 .claude/
+# Editor / type-checker setup, kept personal like .claude/ above. Unlike
+# .editorconfig and ruff.toml, which are shared because CI enforces them.
+.zed/
+pyrightconfig.json
+.basedpyright/
 results/*.json
 # Per-run job-summary rows (eval/run.py --summary-row); `results/*.json` above
 # only covers the top level.

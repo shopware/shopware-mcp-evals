@@ -203,7 +203,7 @@ def main() -> int:
     if args.comparison:
         try:
             cmp_ = json.loads(Path(args.comparison).read_text())
-        except (OSError, json.JSONDecodeError):
+        except OSError, json.JSONDecodeError:
             # Expected whenever the comparison step skipped, which it does when
             # either eval run failed to produce a report. Rendered as a note in
             # the summary rather than warned about here.
