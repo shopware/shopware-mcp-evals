@@ -30,13 +30,13 @@ on:
         required: false
         default: ''
       agentic_commerce_ref:
-        description: 'shopware/agentic-commerce ref (used when run_store=true). Default: empty = the repo default branch (latest).'
+        description: 'shopware/agentic-commerce ref (used when the Store suite runs). Default: empty = the repo default branch (latest).'
         required: false
         default: ''
       run_store:
-        description: 'Also run the Store API / UCP suite. Opt-in: the UCP tools come from ucp-php-sdk, which CI does not install yet.'
+        description: 'Run the Store API / UCP suite. On by default; set false to skip it (saves the agentic-commerce checkout and ~42 LLM fixtures).'
         required: false
-        default: 'false'
+        default: 'true'
 
 permissions:
   contents: write
@@ -58,6 +58,12 @@ jobs:
       EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
       EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
       APP_URL: http://localhost:8000
+      # Store/UCP suite: on by default, opt OUT with run_store=false.
+      # `github.event.inputs` is null on push/schedule, so `!= 'false'` resolves
+      # to true there — which is the point. It used to be `== 'true'`, meaning
+      # the whole Store suite only ever ran on a manual dispatch that nobody
+      # triggered, so its 42 fixtures had never once executed against a server.
+      RUN_STORE: ${{ github.event.inputs.run_store != 'false' }}
 
     steps:
       - name: Checkout evals repo
@@ -174,7 +180,7 @@ jobs:
       # Packagist, so composer resolves it without extra wiring. Tracks its
       # default branch like the other plugins.
       - name: Checkout agentic-commerce (Store API / UCP)
-        if: github.event.inputs.run_store == 'true'
+        if: env.RUN_STORE == 'true'
         uses: actions/checkout@v7
         with:
           repository: shopware/agentic-commerce
@@ -198,15 +204,35 @@ jobs:
             swag/mcp-merchant-tools:@dev \
             --no-interaction --no-scripts
 
-          # Store API / UCP tools — opt-in via run_store (needs the ucp-php-sdk).
-          if [ "${{ github.event.inputs.run_store }}" = "true" ]; then
+          # Store API / UCP tools. ucp-php-sdk is public on Packagist, so composer
+          # resolves the protocol layer without extra wiring.
+          #
+          # Non-fatal on purpose: the plugin declares shopware/core ~6.5||~6.6||~6.7
+          # and we usually run against trunk (6.8-dev), so resolution can legitimately
+          # fail. That must not take down the admin evals, which are the main signal.
+          # It is recorded and warned about rather than swallowed — a silent skip is
+          # exactly how these 42 fixtures went unrun for so long.
+          STORE_PLUGIN_OK=false
+          if [ "${RUN_STORE}" = "true" ]; then
             composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
-            composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts
+            if composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts; then
+              STORE_PLUGIN_OK=true
+            else
+              echo "::warning::shopware/agentic-commerce did not resolve against this Shopware ref — Store/UCP suite skipped. The plugin declares shopware/core ~6.5||~6.6||~6.7; trunk is 6.8-dev."
+              {
+                echo "### Store/UCP suite skipped"
+                echo ""
+                echo "\`shopware/agentic-commerce\` failed to resolve against this Shopware ref."
+                echo "It declares \`shopware/core: ~6.5 || ~6.6 || ~6.7\`; trunk is 6.8-dev."
+                echo "The 42 store fixtures did not run. Bump the constraint upstream to enable them."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
+          echo "STORE_PLUGIN_OK=${STORE_PLUGIN_OK}" >> "$GITHUB_ENV"
 
           bin/console plugin:refresh --no-interaction
           bin/console plugin:install --activate SwagMcpMerchantTools --no-interaction
-          if [ "${{ github.event.inputs.run_store }}" = "true" ]; then
+          if [ "${STORE_PLUGIN_OK}" = "true" ]; then
             bin/console plugin:install --activate SwagAgenticCommerce --no-interaction
           fi
           bin/console cache:clear --no-interaction
@@ -410,10 +436,10 @@ jobs:
             --output "results/eval-comparison.json"
 
       # -------------------------------------------------------------------
-      # Store API / UCP suite — opt-in via run_store=true.
+      # Store API / UCP suite — runs by default; skip with run_store=false.
       # -------------------------------------------------------------------
       - name: Fetch sales-channel access key
-        if: github.event.inputs.run_store == 'true'
+        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
         id: sc
         run: |
           set -euo pipefail
@@ -428,14 +454,14 @@ jobs:
           echo "sc_access_key=${SC_KEY}" >> "$GITHUB_OUTPUT"
 
       - name: Run Store API functional tests
-        if: github.event.inputs.run_store == 'true'
+        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
         run: python functional/run.py --endpoint store
 
       - name: Run Store API LLM eval (advisory)
-        if: github.event.inputs.run_store == 'true'
+        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
         continue-on-error: true
         env:
           SW_BASE_URL: ${{ env.APP_URL }}

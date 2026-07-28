@@ -29,8 +29,10 @@ brief for coding agents.
   shellcheck) and runs on every PR. `mcp-evals.yml` is the heavy one: it installs
   Shopware at the pinned `shopware.sha`, checks the plugin repos out at their
   **default branch** (so plugin churn can turn a run red without a change here),
-  and runs the functional + LLM layers. The Store/UCP part is opt-in via the
-  `run_store` dispatch input.
+  and runs the functional + LLM layers. The Store/UCP part runs by default too;
+  skip it with `run_store=false`. If `agentic-commerce` fails to resolve against
+  the pinned Shopware ref, the store steps skip with a warning rather than
+  taking down the admin evals.
 
 ## v2 invariants (read before touching the runners)
 

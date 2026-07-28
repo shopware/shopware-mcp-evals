@@ -15,9 +15,8 @@ three discovery meta-tools, and the agent pulls in everything it needs on demand
 via `shopware-tool-search` or by enabling toolsets with
 `shopware-toolset-enable`. There is no default set of entity/entry tools — the
 model must always discover and enable. The admin (`/api/_mcp`) and Store API
-(`/store-api/_mcp`) endpoints share the same discovery mechanics; this suite
-currently exercises the admin endpoint (Store API coverage is planned). Three
-things can go wrong:
+(`/store-api/_mcp`) endpoints share the same discovery mechanics, and this suite
+exercises both. Three things can go wrong:
 
 1. **The tool itself is broken**: wrong payload shape, missing fields, server
    error. A unit test in the Shopware repo cannot catch this end-to-end because
@@ -306,10 +305,17 @@ The `shopware-ucp-*` tools come from the **`shopware/agentic-commerce`** plugin
 which pulls the UCP protocol layer in via `ucp-php-sdk/symfony-bundle` — public
 on Packagist, so composer resolves it with no extra wiring.
 
-In CI this suite is **opt-in** via the `run_store` dispatch input while it is
-being validated; the store LLM eval stays advisory. Note the plugin currently
-declares `shopware/core: ~6.5 || ~6.6 || ~6.7`, so a run against `trunk`
-(6.8-dev) may need a constraint bump upstream before it resolves.
+In CI this suite **runs by default**; pass `run_store=false` to skip it. The
+store LLM eval stays advisory until it has a track record — the store functional
+suite does gate.
+
+The plugin declares `shopware/core: ~6.5 || ~6.6 || ~6.7` while trunk is
+6.8-dev, so `composer require` can legitimately fail to resolve. That is
+**non-fatal**: the workflow records `STORE_PLUGIN_OK=false`, emits a
+`::warning::` and a job-summary note, skips the store steps, and lets the admin
+evals finish. It is never swallowed silently — a silent skip is precisely how
+these 42 fixtures went unrun. If you see that note, the fix is a constraint bump
+in `shopware/agentic-commerce`.
 
 ### Coverage
 
@@ -345,8 +351,8 @@ cannot flip the build red between commits. The plugin checkouts
 tracks its own repository default branch, so runs always exercise the latest
 plugin code. The trade-off is that plugin-side churn can turn a run red without
 a change here — pin a single run via the `dev_tools_ref` / `merchant_tools_ref`
-dispatch inputs. `shopware/agentic-commerce` tracks its default branch too, but
-is only checked out for opt-in store runs (`run_store=true`).
+dispatch inputs. `shopware/agentic-commerce` tracks its default branch too, and
+is checked out unless `run_store=false`.
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the
