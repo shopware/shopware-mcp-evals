@@ -58,12 +58,15 @@ skip_covered = true
 # workflow so a local `pytest --cov` enforces the same number CI does — a
 # threshold you only discover in CI is one you find out about after pushing.
 #
-# The run sits at ~83% branch coverage, so this leaves ~3 points of slack. That
-# is deliberate: the same suite reports a few statements differently on linux
-# than on darwin (the .env load path, a couple of platform branches), and a floor
-# with no slack would fail on that difference alone.
+# The run sits at ~87% branch coverage, so this leaves ~2 points of slack, which
+# is for ordinary churn rather than for platform drift: measured on identical code,
+# linux CI reported 83.04% against darwin's ~83%, so the two agree to well under a
+# point. Do not read the slack as room for a real dip.
 #
-# Raising it is a decision to make when the number has moved, not an aspiration
-# to encode now. The parts worth covering next are eval/runner.run_fixture_discovery
-# (the agentic loop) and functional/runner's verify_* checks.
-fail_under = 80
+# Was 80 while the run sat at ~83%. Dropping baseline mode removed its branches,
+# and the replacement tests reached run_fixture_discovery, which had no direct
+# coverage at all, so the number moved to ~87% on its own. Raised to hold that
+# rather than let it drift back.
+#
+# The part worth covering next is functional/runner's verify_* checks, at 79%.
+fail_under = 85

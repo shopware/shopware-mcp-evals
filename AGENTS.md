@@ -108,7 +108,7 @@ python -m functional.runner --endpoint store
 
 # Unit tests (offline, no server) — reporting, runner logic, throttle retry
 .venv/bin/python3 -m pytest tests -q
-.venv/bin/python3 -m pytest tests -q --cov   # enforces the 80% branch-coverage floor
+.venv/bin/python3 -m pytest tests -q --cov   # enforces the 85% branch-coverage floor
 ```
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
