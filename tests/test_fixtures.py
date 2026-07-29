@@ -8,6 +8,7 @@ the drift a purely manual review keeps missing.
 
 import collections
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -123,3 +124,49 @@ def test_every_advertised_admin_tool_is_covered():
     counts = _counts(ADMIN)
     uncovered = {t: counts.get(t, 0) for t in sorted(SNAPSHOT_TOOLS) if counts.get(t, 0) < MIN_PROMPTS_PER_TOOL}
     assert not uncovered, f"tools in {SNAPSHOT.name} with fewer than {MIN_PROMPTS_PER_TOOL} prompts: {uncovered}"
+
+
+# ---------------------------------------------------------------------------
+# Prompt hygiene — the fixtures must not hand the model the answer
+# ---------------------------------------------------------------------------
+# Only `prompt` reaches the model: eval/runner.py builds the user message from it
+# and nothing else, and `notes` goes into the result record for reporting. So the
+# YAML comments and notes cannot influence a run — but a prompt naming its own
+# tool would, and it would turn a description test into a string match.
+@pytest.mark.parametrize("label,fixtures", ALL_FILES)
+def test_no_prompt_names_the_tool_it_expects(label, fixtures):
+    """A prompt containing a tool name tests string matching, not description
+    quality. The whole design is user vocabulary that avoids the tool's own
+    words — see the coverage rule at the top of fixtures.yaml."""
+    offenders = [(f["id"], name) for f in fixtures for name in SNAPSHOT_TOOLS if name.lower() in f["prompt"].lower()]
+
+    assert not offenders, f"{label}: prompts naming a tool outright: {offenders}"
+
+
+# Toolset names are ordinary domain words — `order`, `media`, `entity`, `theme` —
+# so a prompt "matching" one is usually just English ("Mark order 10000 as
+# shipped"). Only the meta fixtures may name a group on purpose, because
+# resolving a named group IS what shopware-toolset-enable does.
+ALLOWED_TOOLSET_MENTIONS = {"meta_enable_dev_logs", "meta_enable_media_group"}
+
+
+SNAPSHOT_TOOLSETS = {ts["name"] for ts in json.loads(SNAPSHOT.read_text())["toolsets"]}
+
+
+@pytest.mark.parametrize("label,fixtures", ALL_FILES)
+def test_only_meta_fixtures_name_a_toolset_as_a_toolset(label, fixtures):
+    """Guards the narrower thing that would be cheating: handing over a group's
+    key next to the word "toolset"/"group", which routes discovery for free."""
+    offenders = []
+    for f in fixtures:
+        prompt = f["prompt"].lower()
+        for ts in SNAPSHOT_TOOLSETS:
+            # The key next to a grouping word, e.g. "the dev-logs toolset".
+            if re.search(rf"\b{re.escape(ts.lower())}\b\s*(toolset|tool group|group)", prompt):
+                if f["id"] not in ALLOWED_TOOLSET_MENTIONS:
+                    offenders.append((f["id"], ts))
+
+    assert not offenders, (
+        f"prompts routing discovery by naming a toolset: {offenders}. "
+        f"Add to ALLOWED_TOOLSET_MENTIONS only if that is the point of the fixture."
+    )
