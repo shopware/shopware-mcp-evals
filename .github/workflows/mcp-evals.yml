@@ -500,86 +500,32 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
         run: python -m functional.runner --endpoint admin
 
-      - name: Run LLM eval
-        id: eval
-        continue-on-error: ${{ steps.drift.outputs.drift == 'true' }}
-        env:
-          SW_BASE_URL: ${{ env.APP_URL }}
-          SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
-          SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          EVAL_PROVIDER: ${{ env.EVAL_PROVIDER }}
-          EVAL_MODEL: ${{ env.EVAL_MODEL }}
-        run: |
-          args=()
-          [ -n "${EVAL_PROVIDER}" ] && args+=(--provider "${EVAL_PROVIDER}")
-          [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
-          # Fixed path so the cross-model comparison step can find it.
-          # --summary-row feeds the consolidated job summary rendered at the end
-          # of the job; the numeric prefix fixes the row's position in its table.
-          python -m eval.runner "${args[@]}" \
-            --output "results/eval-primary.json" \
-            --summary-row "results/rows/1-admin-primary.json" \
-            --suite-label "admin · primary"
-
-      # Second opinion on the same fixtures: a fixture both models miss points at
-      # the tool description, while one both pass is noise.
+      # Why gpt-4o-mini as the second opinion, and why 85%
       #
-      # This deliberately does NOT use GitHub Models. That was tried (free, and
-      # would have given cross-provider signal via Mistral) and its free tier
-      # cannot carry this volume: 45 fixtures x 2 modes throttled every single
-      # fixture, answering HTTP 403 "Too many requests" rather than 429. Lowering
-      # concurrency would not fix a per-day quota. `--provider github` still works
-      # for small local runs; it is just not viable for a full CI sweep.
+      # A fixture both models miss points at the tool description; one only the
+      # weaker model misses is its own capability gap. That split is the reason a
+      # second model runs at all.
       #
-      # gpt-4o-mini runs on the existing project key. It is still the same vendor
-      # as the primary, but no longer the same model family: the primary moved
-      # from gpt-4o to gpt-5.4-mini precisely because gpt-4o and gpt-4o-mini
-      # shared a generation and function-calling stack, so they failed for the
-      # same reasons and agreeing told us little. Across two generations, a
-      # both-fail is real evidence about the description rather than one model
-      # family's quirk. Still not cross-*vendor* — that needs a second API key,
-      # and GitHub Models (see above) cannot carry the volume.
+      # It deliberately does NOT use GitHub Models. That was tried (free, and would
+      # have given cross-provider signal via Mistral) and its free tier cannot carry
+      # this volume: at 45 fixtures it throttled every single one, answering HTTP 403
+      # "Too many requests" rather than 429. Lowering concurrency does not fix a
+      # per-day quota. `--provider github` still works for small local runs.
       #
-      # It gates at 85%, not the primary's 90%. It measured 91% on the 90-fixture
-      # set, so 90% was a bar it had cleared — but only just, and it flapped there:
-      # it scored 89% on one commit and 90% on the next with no change to
-      # descriptions or fixtures in between, and later failed a run on 88% core
-      # while the primary was clean at 21/21 dev-tools. Its worth is the
-      # INTERSECTION with the primary (a fixture both models miss points at the
-      # description; one only it misses is its own capability gap) and that signal
-      # survives a few points of slack. 85% still catches a collapse, which is what
-      # this gate is for. Re-measure before swapping the model.
-      - name: Run LLM eval (second validator)
-        id: eval_second
-        # Run whenever the primary eval actually ran — it gates, so it fails
-        # exactly when a second opinion is most useful, and skipping this on its
-        # failure threw away the both-models-failed signal.
-        #
-        # But `always()` alone was too broad: when setup died early the primary
-        # was *skipped*, and this still fired into a runner with no dependencies
-        # installed and died on `No module named 'yaml'`, turning one real
-        # failure into two. Requiring the primary to have run keeps the trigger
-        # tied to a usable environment.
-        if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
-        # No continue-on-error: this still gates, just at a lower bar than the
-        # primary (see above). continue-on-error would report a failed step as
-        # successful, which has misled us once already.
-        env:
-          SW_BASE_URL: ${{ env.APP_URL }}
-          SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
-          SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Applies to the overall AND core gates: min_core_pass_rate defaults to
-          # min_pass_rate, and it was the core gate at 88% that failed a run whose
-          # primary was clean.
-          EVAL_MIN_PASS_RATE: '0.85'
-        run: |
-          python -m eval.runner --provider openai --model gpt-4o-mini \
-            --output "results/eval-second-validator.json" \
-            --summary-row "results/rows/2-admin-second.json" \
-            --suite-label "admin · second validator"
+      # gpt-4o-mini runs on the existing project key. Same vendor as the primary but
+      # no longer the same model family: the primary moved from gpt-4o to gpt-5.4-mini
+      # precisely because gpt-4o and gpt-4o-mini shared a generation and
+      # function-calling stack, so they failed for the same reasons and agreeing told
+      # us little. Across two generations a both-fail is evidence about the
+      # description rather than one family's quirk. Still not cross-VENDOR, which
+      # needs a second API key.
+      #
+      # 85%, not the primary's 90%: it measured 91% on the 90-fixture set, so 90% was
+      # a bar it had cleared, but only just, and it flapped there — 89% on one commit
+      # and 90% on the next with no change to descriptions or fixtures in between,
+      # and later a run failed on 88% core while the primary was clean at 21/21
+      # dev-tools. 85% still catches a collapse, which is what the gate is for.
+      # Re-measure before swapping the model.
 
       # Reduce both runs to the split that matters: a fixture BOTH models miss
       # is a tool-description problem, one only the weaker model misses is its
@@ -591,6 +537,97 @@ jobs:
       # it exists so the policy is declared in one visible place and so the two
       # rates are compared on identical terms (both computed over fixtures that
       # actually ran, errors excluded and budgeted separately).
+      #
+      # Both admin models run CONCURRENTLY in this one step, because they are
+      # independent: separate MCP sessions, separate report files, separate summary
+      # rows. Sequentially they were 155s + 159s of a 481s job; overlapped, the pair
+      # costs the slower of the two.
+      #
+      # One step rather than two parallel jobs: a second job would repeat the whole
+      # ~140s setup (install Shopware, wire up the bundle, seed data) and then need
+      # the reports shuttled between jobs as artifacts for the comparison step.
+      #
+      # The two gate differently, which is the whole reason this is not a plain
+      # `&`-and-forget. Their exit codes are captured separately and applied
+      # separately at the bottom:
+      #   primary  90%, but ADVISORY when the catalogue has drifted from the
+      #            committed baseline (what used to be continue-on-error on this
+      #            step) — the descriptions under test are then not the ones the
+      #            baseline recorded, so its verdict is not attributable.
+      #   second   85%, always gating.
+      #
+      # Output is captured per model and replayed in order afterwards. Two runners
+      # writing to the same stdout interleave line by line, and these logs are how
+      # a failure gets diagnosed.
+      - name: Run LLM evals (primary + second validator, in parallel)
+        id: eval
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
+          SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EVAL_PROVIDER: ${{ env.EVAL_PROVIDER }}
+          EVAL_MODEL: ${{ env.EVAL_MODEL }}
+          DRIFTED: ${{ steps.drift.outputs.drift }}
+        # No `set -e`: the exit codes are the result here, so the script must
+        # outlive a failing runner rather than abort on the first one.
+        run: |
+          set -uo pipefail
+          mkdir -p results/rows
+
+          args=()
+          [ -n "${EVAL_PROVIDER}" ] && args+=(--provider "${EVAL_PROVIDER}")
+          [ -n "${EVAL_MODEL}" ] && args+=(--model "${EVAL_MODEL}")
+
+          # Fixed output paths so the cross-model comparison step can find them.
+          # --summary-row feeds the consolidated job summary rendered at the end of
+          # the job; the numeric prefix fixes each row's position in its table.
+          python -m eval.runner "${args[@]}" \
+            --output "results/eval-primary.json" \
+            --summary-row "results/rows/1-admin-primary.json" \
+            --suite-label "admin · primary" > primary.log 2>&1 &
+          pid_primary=$!
+
+          # gpt-4o-mini is pinned: it is the fixed second opinion, not a
+          # dispatch-overridable arm, so it ignores EVAL_PROVIDER/EVAL_MODEL.
+          # EVAL_MIN_PASS_RATE applies to its overall AND core gates, because
+          # min_core_pass_rate defaults to min_pass_rate — and it was the core gate
+          # at 88% that once failed a run whose primary was clean.
+          EVAL_MIN_PASS_RATE=0.85 python -m eval.runner --provider openai --model gpt-4o-mini \
+            --output "results/eval-second-validator.json" \
+            --summary-row "results/rows/2-admin-second.json" \
+            --suite-label "admin · second validator" > second.log 2>&1 &
+          pid_second=$!
+
+          wait "${pid_primary}"; rc_primary=$?
+          wait "${pid_second}"; rc_second=$?
+
+          echo "::group::admin · primary (exit ${rc_primary})"
+          cat primary.log
+          echo "::endgroup::"
+          echo "::group::admin · second validator (exit ${rc_second})"
+          cat second.log
+          echo "::endgroup::"
+
+          echo "primary_exit=${rc_primary}" >> "$GITHUB_OUTPUT"
+          echo "second_exit=${rc_second}" >> "$GITHUB_OUTPUT"
+
+          failed=0
+          if [ "${rc_primary}" -ne 0 ]; then
+            if [ "${DRIFTED}" = "true" ]; then
+              echo "::warning::admin · primary failed (exit ${rc_primary}), treated as advisory because the tool catalogue has drifted from the committed baseline."
+            else
+              echo "::error::admin · primary failed (exit ${rc_primary})."
+              failed=1
+            fi
+          fi
+          if [ "${rc_second}" -ne 0 ]; then
+            echo "::error::admin · second validator failed (exit ${rc_second})."
+            failed=1
+          fi
+          exit "${failed}"
+
       - name: Compare models
         id: eval_compare
         if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
