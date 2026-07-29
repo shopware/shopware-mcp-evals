@@ -61,6 +61,17 @@ jobs:
       EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
       EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
       APP_URL: http://localhost:8000
+      # Discovery mode is the bulk of the wall clock: ~425s of summed fixture
+      # latency per model against ~138s for baseline. It shipped at 4-way because
+      # the MCP endpoint answered 429 above that, and the step below now disables
+      # the MCP rate limiter on the throwaway instance, which removes that ceiling.
+      #
+      # 12 is deliberately short of the theoretical floor. sum_latency/12 is ~35s
+      # against a slowest-single-fixture bound of ~14s, so there is still headroom,
+      # and the next ceilings (the OpenAI account's own limits and one PHP-FPM
+      # worker pool) are not measured yet. The runner reads this as the default for
+      # --discovery-concurrency, so it applies to the admin and store suites alike.
+      EVAL_DISCOVERY_CONCURRENCY: '12'
       # Store/UCP suite: on by default, opt OUT with run_store=false.
       # `github.event.inputs` is null on push/schedule, so `!= 'false'` resolves
       # to true there — which is the point. It used to be `== 'true'`, meaning
@@ -254,6 +265,41 @@ jobs:
           if [ "${STORE_PLUGIN_OK}" = "true" ]; then
             bin/console plugin:install --activate SwagAgenticCommerce --no-interaction
           fi
+
+          # Turn the MCP rate limiter off on this throwaway instance.
+          #
+          # It was the wall-clock ceiling and nothing said so. Shopware's test env
+          # overrides only `login` and `login_user`, so CI inherited the PRODUCTION
+          # mcp_admin_api limits (300/60s, 1000/10min) - and each eval step already
+          # issues roughly 650 MCP requests in ~155s, about 250 req/min, some 85% of
+          # the per-minute cap. That is why --discovery-concurrency sat at 4: the
+          # comment on the flag says higher throttles with HTTP 429. Making the run
+          # faster does not reduce the request count, it compresses it into a
+          # shorter window, which is precisely what a per-minute limiter punishes,
+          # so no amount of parallelism could help while this was on.
+          #
+          # Throttling is not what these fixtures measure (they measure tool
+          # selection) and the instance dies with the job. The cost is stated
+          # plainly: CI no longer exercises MCP throttling, so a regression in the
+          # limiter itself has to be caught by tests/integration in
+          # shopware/shopware, not here.
+          #
+          # Project + env-specific config is the highest-precedence layer, so this
+          # beats the bundle defaults. It has to land BEFORE the cache:clear below,
+          # and the directory must stay the env the web server actually serves
+          # (test, set by setup-shopware) or the override silently stops applying
+          # and the run silently goes back to being throttled.
+          mkdir -p config/packages/test
+          cat > config/packages/test/z-eval-no-mcp-rate-limit.yaml <<'YAML'
+          shopware:
+              api:
+                  rate_limiter:
+                      mcp_admin_api:
+                          enabled: false
+                      mcp_store_api:
+                          enabled: false
+          YAML
+
           bin/console cache:clear --no-interaction
           bin/console cache:warmup --no-interaction
 
