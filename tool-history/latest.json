@@ -1,0 +1,848 @@
+{
+  "default_tools": [
+    "shopware-tool-search",
+    "shopware-toolset-enable",
+    "shopware-toolsets-list"
+  ],
+  "server_instructions": "This MCP server exposes Shopware e-commerce platform capabilities.\nUse entity tools to search, read, and manage shop data.\nThe advertised tool list is not the full catalogue. If no advertised tool matches the requested action, call shopware-tool-search first instead of assuming the action is unsupported; use shopware-toolsets-list and shopware-toolset-enable to make a matched tool callable if your client cannot invoke it inline.\nAll operations respect the authenticated user's ACL permissions.\n",
+  "tools": [
+    {
+      "description": "Ranks individual products by units sold in a date range \u2014 best sellers, top performers, which products shifted the most units. Excludes cancelled orders. Provide ISO 8601 dates (e.g. \"2025-01-01\"). Per-product ranking only, not shop-wide money totals over time \u2014 merchant-revenue-report does that. Returns {success, data: {period, bestsellers: [{productId, productNumber, name, totalQuantity, orderCount, totalRevenue}]}}.",
+      "inputSchema": {
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "salesChannelId": {
+            "default": "",
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "name": "merchant-bestseller-report"
+    },
+    {
+      "description": "Turns a cart into a real order \u2014 place the order, complete the purchase, convert cart to order. If you already have a cart token, call this directly; do not re-create the cart. Requires that token plus salesChannelId and a customerId (registered customer). Payment and shipping methods are optional: omit them for the channel defaults, and if you don't already know the method IDs, merchant-checkout-methods will tell you. Defaults to dryRun=true for order preview.",
+      "inputSchema": {
+        "properties": {
+          "customerId": {
+            "type": "string"
+          },
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "paymentMethodId": {
+            "default": "",
+            "type": "string"
+          },
+          "salesChannelId": {
+            "type": "string"
+          },
+          "shippingMethodId": {
+            "default": "",
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "salesChannelId",
+          "token",
+          "customerId"
+        ],
+        "type": "object"
+      },
+      "name": "merchant-cart-checkout"
+    },
+    {
+      "description": "Manage a storefront shopping cart. Actions: \"create\" (new cart, returns token), \"add\" (add product by productId), \"remove\" (remove by lineItemId), \"update\" (change quantity by lineItemId), \"get\" (view current cart). Requires salesChannelId (see shopware://sales-channels resource). All actions except \"create\" require the token returned by \"create\". Optionally pass customerId for customer-specific pricing. Edits line items only \u2014 it never places or converts the cart into an order; merchant-cart-checkout does that.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "customerId": {
+            "default": null,
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "lineItemId": {
+            "default": "",
+            "type": "string"
+          },
+          "productId": {
+            "default": "",
+            "type": "string"
+          },
+          "quantity": {
+            "default": 1,
+            "type": "integer"
+          },
+          "salesChannelId": {
+            "type": "string"
+          },
+          "token": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "salesChannelId",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "merchant-cart-manage"
+    },
+    {
+      "description": "Which payment methods and delivery options a sales channel offers at checkout \u2014 including whether customers can pay by a specific method. Use type \"payment\" for payment methods only, \"shipping\" for shipping methods only, or \"all\" for both. Read-only: it returns method names and IDs, it never places an order \u2014 merchant-cart-checkout does that.",
+      "inputSchema": {
+        "properties": {
+          "salesChannelId": {
+            "type": "string"
+          },
+          "type": {
+            "default": "all",
+            "type": "string"
+          }
+        },
+        "required": [
+          "salesChannelId"
+        ],
+        "type": "object"
+      },
+      "name": "merchant-checkout-methods"
+    },
+    {
+      "description": "Pull up one customer account by email, customer number, or UUID \u2014 profile plus order history and lifetime order total. Provide at least one identifier. Single customer only: shopware-entity-search handles requests that span more than one customer. Returns {success, data: {id, email, customerNumber, firstName, lastName, group, orderCount, orderTotalAmount, recentOrders: [...]}}.",
+      "inputSchema": {
+        "properties": {
+          "customerId": {
+            "default": "",
+            "type": "string"
+          },
+          "customerNumber": {
+            "default": "",
+            "type": "string"
+          },
+          "email": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "merchant-customer-lookup"
+    },
+    {
+      "description": "The right tool when the user names ONE order and wants everything about it \u2014 customer, line items, payment status, delivery status. Provide either orderNumber (e.g. \"10001\") or orderId (UUID). Single order only: shopware-entity-search handles multi-order queries. Read-only: it never alters the order; shopware-order-state does that. Returns {success, data: {id, orderNumber, status, amountTotal, customer, lineItems, transactions, deliveries}}.",
+      "inputSchema": {
+        "properties": {
+          "orderId": {
+            "default": "",
+            "type": "string"
+          },
+          "orderNumber": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "merchant-order-summary"
+    },
+    {
+      "description": "The right tool for adding a brand-new product, article, or item to the catalog. Give it plain values (name, product number, price, tax rate) \u2014 it resolves tax rate to tax ID, currency ISO code to currency ID, exact category names to category IDs, and builds the nested price structure. New products only; for a product that is already in the catalog, shopware-entity-upsert is the raw fallback. Defaults to dryRun=true. Returns the generated payload in dryRun mode, or the created product ID on commit.",
+      "inputSchema": {
+        "properties": {
+          "active": {
+            "default": true,
+            "type": "boolean"
+          },
+          "categories": {
+            "default": "",
+            "type": "string"
+          },
+          "currencyCode": {
+            "default": "EUR",
+            "type": "string"
+          },
+          "description": {
+            "default": "",
+            "type": "string"
+          },
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "grossPrice": {
+            "type": "number"
+          },
+          "name": {
+            "type": "string"
+          },
+          "productNumber": {
+            "type": "string"
+          },
+          "stock": {
+            "default": 0,
+            "type": "integer"
+          },
+          "taxRate": {
+            "default": 19,
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "productNumber",
+          "grossPrice"
+        ],
+        "type": "object"
+      },
+      "name": "merchant-product-create"
+    },
+    {
+      "description": "Money totals over a date range \u2014 revenue, turnover, total sales, average order value, period-over-period comparison. Provide ISO 8601 dates (e.g. \"2025-01-01\"). Excludes cancelled orders. Optional groupBy: day (default), week, month. Use page/limit to paginate the timeline buckets. Never a per-product ranking \u2014 merchant-bestseller-report does that. Returns {success, data: {period, totalRevenue, orderCount, averageOrderValue, timeline: [{date, revenue}]}, _meta: {page, limit, total}}.",
+      "inputSchema": {
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "groupBy": {
+            "default": "day",
+            "type": "string"
+          },
+          "limit": {
+            "default": 31,
+            "type": "integer"
+          },
+          "page": {
+            "default": 1,
+            "type": "integer"
+          },
+          "salesChannelId": {
+            "default": "",
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "name": "merchant-revenue-report"
+    },
+    {
+      "description": "Customer-facing full-text product discovery and browsing \u2014 NOT for looking up a product by its exact productNumber or field value (use shopware-entity-search for that). Returns prices resolved for the sales channel including customer group pricing, tax rules, and product visibility. Use term for full-text search. Use the properties parameter to filter by human-readable property names (e.g. {\"Color\": \"Red\", \"Size\": \"42\"}) \u2014 the tool resolves names to IDs automatically. Pass salesChannelId to select the channel (see shopware://sales-channels); optionally pass customerId for customer-specific pricing.",
+      "inputSchema": {
+        "properties": {
+          "criteria": {
+            "default": "{}",
+            "type": "string"
+          },
+          "customerId": {
+            "default": null,
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "properties": {
+            "default": "{}",
+            "type": "string"
+          },
+          "salesChannelId": {
+            "default": "",
+            "type": "string"
+          },
+          "term": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "merchant-storefront-search"
+    },
+    {
+      "description": "The correct tool for count, sum, average, and other aggregate questions. Use this \u2014 not shopware-entity-search \u2014 for any 'how many', 'total value', or 'average' query. Note: entity-search's _meta.total is pagination metadata, not a reporting count. Supports: count, avg, sum, min, max, terms, date-histogram. Returns only aggregation results, no entity rows. Pass aggregation definitions as Admin API criteria JSON.",
+      "inputSchema": {
+        "properties": {
+          "aggregations": {
+            "type": "string"
+          },
+          "entity": {
+            "type": "string"
+          },
+          "filters": {
+            "default": "[]",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "aggregations"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-entity-aggregate"
+    },
+    {
+      "description": "Delete Shopware entities by their UUIDs. Always use dryRun=true (default) first to preview cascade effects and dependent entity deletions, then set dryRun=false to execute. Returns {success, data: {deleted, notFound}, _meta: {dryRun}}.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "entity": {
+            "type": "string"
+          },
+          "ids": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "ids"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-entity-delete"
+    },
+    {
+      "description": "Read a single Shopware entity by its UUID. Use when you already have an entity ID. For searching by other fields, use shopware-entity-search instead. Returns {success, data: {id, ...fields}, _meta: {}}. Pass criteria JSON to include associations or select fields.",
+      "inputSchema": {
+        "properties": {
+          "criteria": {
+            "default": "{}",
+            "type": "string"
+          },
+          "entity": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-entity-read"
+    },
+    {
+      "description": "Get the field and association schema of a Shopware entity definition: field names, types, and associations for building shopware-entity-search criteria. Returns {success, data: {fields: [...], associations: [...]}}. See shopware://entities resource for all available entity names.",
+      "inputSchema": {
+        "properties": {
+          "entity": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-entity-schema"
+    },
+    {
+      "description": "Search and filter Shopware entities \u2014 use this to look up a product by its productNumber or any exact field value, including as the first step in Storefront cart/checkout workflows. For count/sum/average reporting, use shopware-entity-aggregate instead (the _meta.total here is pagination metadata, not a reporting count). Accepts Admin API criteria JSON. Returns {success, data: [...], _meta: {total, page, limit}}. If you don't already know the field names, shopware-entity-schema will tell you.",
+      "inputSchema": {
+        "properties": {
+          "criteria": {
+            "default": "{}",
+            "type": "string"
+          },
+          "entity": {
+            "type": "string"
+          },
+          "limit": {
+            "default": 25,
+            "type": "integer"
+          },
+          "page": {
+            "default": 1,
+            "type": "integer"
+          },
+          "term": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-entity-search"
+    },
+    {
+      "description": "Create or update Shopware entity data. Always use dryRun=true (default) first to validate, then set dryRun=false to persist. If you don't already know the required fields, shopware-entity-schema will tell you. Returns validation result in dryRun mode, or the written entity data on commit.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "entity": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity",
+          "payload"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-entity-upsert"
+    },
+    {
+      "description": "Upload any image or file \u2014 including product cover images \u2014 to Shopware's media library from a URL. url is the only required parameter; productId, fileName, and mediaFolderId are all optional. Call this tool immediately with just the URL whenever the user asks to upload, import, or add an image. Returns the new mediaId.",
+      "inputSchema": {
+        "properties": {
+          "fileName": {
+            "default": "",
+            "type": "string"
+          },
+          "mediaFolderId": {
+            "default": "",
+            "type": "string"
+          },
+          "productId": {
+            "default": "",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-media-upload"
+    },
+    {
+      "description": "Change the state of an order, its transactions, and/or its deliveries in one call. Looks up the order by orderNumber or orderId. Provide at least one of orderAction, transactionAction, or deliveryAction. Common actions: cancel, process, complete, reopen, paid, refund, ship, retour. Always use dryRun=true (default) to preview available transitions before executing with dryRun=false. See shopware://state-machines resource for all valid states and transitions.",
+      "inputSchema": {
+        "properties": {
+          "deliveryAction": {
+            "default": "",
+            "type": "string"
+          },
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "orderAction": {
+            "default": "",
+            "type": "string"
+          },
+          "orderId": {
+            "default": "",
+            "type": "string"
+          },
+          "orderNumber": {
+            "default": "",
+            "type": "string"
+          },
+          "transactionAction": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "shopware-order-state"
+    },
+    {
+      "description": "Read Shopware application configuration values in the core.* namespace. Pass a domain prefix (e.g. \"core.listing\") to get all keys, or a full dotted key to read a single value. For theme appearance settings (colors, logos, fonts), use shopware-theme-config instead. Optionally scope to a sales channel.",
+      "inputSchema": {
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "salesChannelId": {
+            "default": null,
+            "type": [
+              "null",
+              "string"
+            ]
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-system-config-read"
+    },
+    {
+      "description": "Modify or overwrite a Shopware system configuration value \u2014 use this whenever the user wants to change, set, or update a config key. Provide the full dotted key (e.g. 'core.basicInformation.shopName') and the new value. dryRun=true (default) shows a before/after diff without saving; set dryRun=false to persist. Optionally scope to a sales channel.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          },
+          "salesChannelId": {
+            "default": null,
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-system-config-write"
+    },
+    {
+      "description": "Read or update theme appearance settings (colors, logos, fonts) for a sales channel. Use action \"get\" to read the current theme config. Use action \"update\" with a config JSON to change values; dryRun=true (default) previews changes. Pass a salesChannelId to scope to a specific channel (see shopware://sales-channels for IDs).",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "default": "get",
+            "type": "string"
+          },
+          "config": {
+            "default": "{}",
+            "type": "string"
+          },
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "salesChannelId": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "shopware-theme-config"
+    },
+    {
+      "description": "Search the allowed Shopware MCP tool catalogue by free-text query and return the most relevant tool definitions inline. Use this when a needed tool is not visible in tools/list.",
+      "inputSchema": {
+        "properties": {
+          "maxResults": {
+            "default": 3,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-tool-search"
+    },
+    {
+      "description": "Enable one MCP toolset for the current session and ask the client to refresh tools/list. The toolset remains enabled only for this MCP session.",
+      "inputSchema": {
+        "properties": {
+          "toolset": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "toolset"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-toolset-enable"
+    },
+    {
+      "description": "List MCP toolsets that can be enabled for the current session. Use this first for any task: no domain tools are advertised until you enable their toolset.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "shopware-toolsets-list"
+    },
+    {
+      "description": "List installed Shopware extensions (plugins and apps) with their absolute rootPath, PSR-4 namespace, base class, whether they are managed by Composer, and a \"writable\" flag. Use this FIRST when scaffolding code into an existing extension so you know where files belong and which namespace to use. writable=false means the extension lives in vendor/ (composer-managed) and must NOT be edited in place \u2014 extend it from your own custom plugin instead. Composer-installed plugins are included (unlike a plain custom/plugins folder scan).",
+      "inputSchema": {
+        "properties": {
+          "type": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "swag-dev-tools-list-extensions"
+    },
+    {
+      "description": "List which Shopware Agent Skills exist in this project: those shipped under .agents/skills/ plus any shipped by installed extensions. Returns the catalogue, one entry per skill, with its name, a one-line description, and its source (core or extension). These skills are the authoritative source of truth for Shopware coding conventions. DO NOT use this to read a skill's instructions: it returns the index only, never the SKILL.md body. Use swag-dev-tools-load-skill for that. Returns an empty list on installs that do not ship the source (e.g. production/composer installs).",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "swag-dev-tools-list-skills"
+    },
+    {
+      "description": "Read the body of a Shopware Agent Skill by name, e.g. \"shopware-php-code\" or \"shopware-admin-js\". If you don't already know the skill name, swag-dev-tools-list-skills will tell you. Returns the SKILL.md content \u2014 the authoritative Shopware coding guidance. Load the relevant skill BEFORE generating or editing code so the output follows current conventions. Note: these skills target CORE contribution; core-only rules (BC promises, @internal/@final policy, RELEASE_INFO/UPGRADE, OpenAPI JSON under src/Core) do not apply to extension development.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "swag-dev-tools-load-skill"
+    },
+    {
+      "description": "Search a Monolog application log FILE on disk (default: var/log/{env}.log) for entries matching a substring. Optionally narrow by minimum level (DEBUG/INFO/NOTICE/WARNING/ERROR/CRITICAL/ALERT/EMERGENCY) and file name. Scans from the most recent entries backwards. Use for \"find the stack trace for exception X\", \"which log lines mention correlation-id Y?\", \"did we log anything about payment webhook failures?\". DO NOT use this for the log_entry database table \u2014 query that with shopware-entity-search on entity \"log_entry\" plus a ContainsFilter on the message field instead.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "default": "",
+            "type": "string"
+          },
+          "level": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          },
+          "query": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "swag-dev-tools-log-search"
+    },
+    {
+      "description": "Read recent entries from a Monolog application log FILE on disk (default: var/log/{env}.log). Contains the full runtime stream: PHP errors, stack traces, deprecation warnings, framework events, and everything bundles write via Monolog handlers. Filter by minimum level (DEBUG/INFO/NOTICE/WARNING/ERROR/CRITICAL/ALERT/EMERGENCY) and ISO-8601 since timestamp. Use this for \"what broke on the server?\", \"show me the last stack trace\", \"any PHP deprecations recently?\". DO NOT use this for the log_entry database table (structured DAL entity for business events / Admin-visible notifications) \u2014 query that with shopware-entity-search on entity \"log_entry\" instead.",
+      "inputSchema": {
+        "properties": {
+          "file": {
+            "default": "",
+            "type": "string"
+          },
+          "level": {
+            "default": "",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "type": "integer"
+          },
+          "since": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "swag-dev-tools-log-stream"
+    },
+    {
+      "description": "Poll for Shopware background operation notifications: indexer completions, import/export results. Use after triggering long-running operations like dal:refresh:index or import jobs. Set wait=true to block until a notification arrives \u2014 streams progress updates via SSE up to timeout seconds. Use since=<ISO-8601> for incremental polling; pass the returned timestamp as since on the next call to get only new events. DO NOT use this for runtime PHP errors or stack traces \u2014 use swag-dev-tools-log-stream instead. DO NOT use this for structured business event logs \u2014 query entity \"log_entry\" with shopware-entity-search instead.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "default": 20,
+            "type": "integer"
+          },
+          "since": {
+            "default": null,
+            "type": [
+              "null",
+              "string"
+            ]
+          },
+          "timeout": {
+            "default": 60,
+            "type": "integer"
+          },
+          "wait": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "name": "swag-dev-tools-notifications"
+    },
+    {
+      "description": "Generate Shopware extension code the right way. Call with no arguments to list every available scaffold (plugin, theme, app, storefront/admin/store-api endpoints, custom entity, migration, subscriber, admin module, cms element, plugin config, scheduled task, message handler, console command, rule, flow action, and extend-plugin) plus the argument names each accepts. Then call again with type=<type> and options (a JSON object keyed by those argument names, e.g. {\"target\":\"SwagFoo\",\"aclPrivileges\":\"product:read\"}) to get opinionated, convention-correct instructions to follow. Resolve the target extension first with swag-dev-tools-list-extensions; the server returns instructions only and never writes files.",
+      "inputSchema": {
+        "properties": {
+          "options": {
+            "default": "",
+            "type": "string"
+          },
+          "type": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "swag-dev-tools-scaffold"
+    }
+  ],
+  "toolsets": [
+    {
+      "description": "Tools explicitly assigned to the \"dev-extensions\" MCP tool group.",
+      "name": "dev-extensions",
+      "title": "Dev extensions tools",
+      "tools": [
+        "swag-dev-tools-list-extensions",
+        "swag-dev-tools-notifications"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"dev-logs\" MCP tool group.",
+      "name": "dev-logs",
+      "title": "Dev logs tools",
+      "tools": [
+        "swag-dev-tools-log-search",
+        "swag-dev-tools-log-stream"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"dev-scaffold\" MCP tool group.",
+      "name": "dev-scaffold",
+      "title": "Dev scaffold tools",
+      "tools": [
+        "swag-dev-tools-scaffold"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"dev-skills\" MCP tool group.",
+      "name": "dev-skills",
+      "title": "Dev skills tools",
+      "tools": [
+        "swag-dev-tools-list-skills",
+        "swag-dev-tools-load-skill"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"entity\" MCP tool group.",
+      "name": "entity",
+      "title": "Entity tools",
+      "tools": [
+        "shopware-entity-aggregate",
+        "shopware-entity-delete",
+        "shopware-entity-read",
+        "shopware-entity-schema",
+        "shopware-entity-search",
+        "shopware-entity-upsert"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"media\" MCP tool group.",
+      "name": "media",
+      "title": "Media tools",
+      "tools": [
+        "shopware-media-upload"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"merchant-analytics\" MCP tool group.",
+      "name": "merchant-analytics",
+      "title": "Merchant analytics tools",
+      "tools": [
+        "merchant-bestseller-report",
+        "merchant-customer-lookup",
+        "merchant-order-summary",
+        "merchant-revenue-report"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"merchant-catalog\" MCP tool group.",
+      "name": "merchant-catalog",
+      "title": "Merchant catalog tools",
+      "tools": [
+        "merchant-product-create"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"merchant-sales\" MCP tool group.",
+      "name": "merchant-sales",
+      "title": "Merchant sales tools",
+      "tools": [
+        "merchant-cart-checkout",
+        "merchant-cart-manage",
+        "merchant-checkout-methods",
+        "merchant-storefront-search"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"order\" MCP tool group.",
+      "name": "order",
+      "title": "Order tools",
+      "tools": [
+        "shopware-order-state"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"system-config\" MCP tool group.",
+      "name": "system-config",
+      "title": "System config tools",
+      "tools": [
+        "shopware-system-config-read",
+        "shopware-system-config-write"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"theme\" MCP tool group.",
+      "name": "theme",
+      "title": "Theme tools",
+      "tools": [
+        "shopware-theme-config"
+      ]
+    }
+  ]
+}

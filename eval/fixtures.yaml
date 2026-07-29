@@ -1,7 +1,79 @@
 # LLM Eval Fixtures
-# Each fixture: prompt sent to Claude with all tools available.
-# expected_tool: the single tool that should be selected first.
-# notes: explains why this case is interesting (disambiguation, chaining, etc.)
+#
+# Only the three discovery meta-tools (shopware-tool-search, -toolsets-list,
+# -toolset-enable) are advertised by default; every other tool is deferred and
+# must be discovered and enabled. So each non-meta fixture belongs to a toolset.
+#
+# Coverage rule: every advertised tool has at least 3 prompts, and they must
+# differ in KIND, not just wording — a canonical phrasing, a real-user
+# paraphrase that avoids the tool's own vocabulary, and a boundary case framed
+# next to a sibling tool. Three restatements of the same sentence only prove the
+# model can match one phrasing. tests/test_fixtures.py enforces the count.
+#
+# Fields:
+#   expected_tool:    the tool that should be selected. The first NON-meta tool
+#                     call is the graded one; discovery meta-calls on the way to
+#                     it are executed and fed back, not graded.
+#   acceptable_tools: (optional) list of additional tool names that also count
+#                     as correct — for genuinely multi-valid prompts.
+#   expected_toolset: (optional) the toolset containing expected_tool — grades
+#                     whether toolset-enable picked the right group in discovery
+#                     mode. Only the `meta` fixtures omit it (they need no toolset).
+#   max_steps:        (optional) per-fixture override of the discovery step cap.
+#   notes:            why this case is interesting (disambiguation, chaining...)
+#
+# Categories:
+#   unambiguous     one clear tool
+#   disambiguation  multiple tools could apply, only one is correct
+#   chain           multi-step task; grade the FIRST (non-meta) tool
+#   meta            the discovery meta-tool itself is the right answer
+#   discovery       deep-deferred tools that exercise the discovery layer
+#
+# Values inside a prompt — the rule that two broken fixtures cost us:
+#
+# The runner grades the tool the model *chose* and never executes it, so no value
+# in a prompt is ever sent anywhere. Synthetic ones are therefore fine, and
+# preferable to real ones: a real skill name or sales-channel id goes stale when
+# its source repo changes, for no gain. What matters is only that a value is
+# SHAPED like the thing it stands for, because that is what the model reasons
+# about when picking a tool.
+#
+#   fine       'abc123' as a cart token, a phantom UUID, 'storefront-controller'
+#              as a skill name — each reads as an identifier of its kind. None of
+#              the three skill names any load-skill fixture uses exists, and two
+#              of them pass consistently, which is the point: the value only has
+#              to be plausible, not real.
+#   NOT fine   a vague reference the model must resolve before it can call the
+#              expected tool: "our main sales channel", "the default warehouse".
+#              The lookup is correct behaviour, so the model reaches for
+#              entity-search and the fixture scores it as the wrong tool.
+#
+# `checkout_methods_shipping` was graded wrong for exactly that: it said "our main
+# sales channel" while merchant-checkout-methods requires a salesChannelId, and
+# both models' trails showed them searching for the channel first.
+#
+# The obvious next thought is to keep that wording as a `chain` fixture asserting
+# the lookup. That was tried (checkout_methods_needs_channel_lookup) and removed
+# one run later, because there is no single correct first tool: the runner never
+# executes anything, so calling merchant-checkout-methods straight away is a
+# perfectly gradeable selection even though it would fail at runtime without an
+# id. The primary resolved the channel first on one instance and went direct in
+# CI, and the fixture turned that coin flip into a both-fail — i.e. into the
+# "actionable description problem" signal, for a fixture artefact. A prompt with
+# two defensible first moves does not belong in this suite at all; the rule above
+# is the durable form of the lesson.
+#
+# Two habits that would have caught all of this earlier:
+#
+#   Check for flakiness before rewording. `load_skill_entity_definition` looked
+#   like a phrasing bug across three CI runs; an A/B of both wordings on one
+#   instance reversed the result. See its notes.
+#
+#   Verify against CI's descriptions, not a local instance's. The fixture above
+#   was validated locally while this machine's merchant-checkout-methods and
+#   shopware-entity-search descriptions differed from CI's — two of the eleven
+#   that had drifted — so the local pass meant nothing. `python -m eval.drift`
+#   against tool-history/latest.json tells you whether they match.
 
 fixtures:
 
@@ -13,91 +85,349 @@ fixtures:
     category: unambiguous
     prompt: "What fields and associations does the product entity have?"
     expected_tool: shopware-entity-schema
-    notes: Schema lookup, not a search.
+    expected_toolset: entity
+    notes: Schema lookup, not a search. Deferred — must be discovered/enabled.
 
   - id: entity_search_orders
     category: unambiguous
     prompt: "List the last 10 orders in the shop."
     expected_tool: shopware-entity-search
+    expected_toolset: entity
     notes: Generic entity search, not merchant-order-summary (which is for a single known order).
 
   - id: entity_read_by_id
     category: unambiguous
     prompt: "Fetch the product with ID 001cd6c6df7e42c38530de7b53dfcf25."
     expected_tool: shopware-entity-read
+    expected_toolset: entity
     notes: Explicit UUID → entity-read, not entity-search.
+
+  - id: entity_read_order_assoc
+    category: unambiguous
+    prompt: "Load order 2b7f1a0c9d4e4f80a1b2c3d4e5f60718 including its lineItems association."
+    expected_tool: shopware-entity-read
+    expected_toolset: entity
+    notes: Read-by-ID with an association — checks the description covers associations, not just plain reads.
 
   - id: system_config_read
     category: unambiguous
     prompt: "What is the current value of core.basicInformation?"
     expected_tool: shopware-system-config-read
+    expected_toolset: system-config
+
+  - id: system_config_read_maintenance
+    category: unambiguous
+    prompt: "Is maintenance mode currently switched on?"
+    expected_tool: shopware-system-config-read
+    expected_toolset: system-config
+    notes: >
+      Real-user phrasing with no config key and no tool vocabulary — the model
+      has to know maintenance mode lives in system_config.
 
   - id: system_config_write
     category: unambiguous
     prompt: "Change the shop name in core.basicInformation.shopName to 'My New Shop'."
     expected_tool: shopware-system-config-write
+    expected_toolset: system-config
+
+  - id: system_config_write_maintenance
+    category: unambiguous
+    prompt: "Switch the shop into maintenance mode."
+    expected_tool: shopware-system-config-write
+    expected_toolset: system-config
+    notes: Intent-only phrasing, no key given — the write counterpart of system_config_read_maintenance.
 
   - id: bestseller_report
     category: unambiguous
     prompt: "Show me the top 5 best-selling products in January 2025."
     expected_tool: merchant-bestseller-report
+    expected_toolset: merchant-analytics
+
+  - id: bestseller_units_last_month
+    category: unambiguous
+    prompt: "Which products shifted the most units last month?"
+    expected_tool: merchant-bestseller-report
+    expected_toolset: merchant-analytics
+    notes: Vernacular phrasing ("shifted the most units") with a relative period instead of explicit dates.
 
   - id: revenue_report_monthly
     category: unambiguous
     prompt: "Give me the monthly revenue breakdown for Q1 2025."
     expected_tool: merchant-revenue-report
+    expected_toolset: merchant-analytics
+
+  - id: revenue_last_week
+    category: unambiguous
+    prompt: "How much did the shop turn over last week?"
+    expected_tool: merchant-revenue-report
+    expected_toolset: merchant-analytics
+    notes: '"Turn over" instead of "revenue" — tests vocabulary coverage in the description.'
 
   - id: customer_lookup_email
     category: unambiguous
     prompt: "Find the customer with email b.meyer@gmail.com."
     expected_tool: merchant-customer-lookup
+    expected_toolset: merchant-analytics
 
   - id: order_summary
     category: unambiguous
     prompt: "Show me all details for order number 10000 — customer, items, payment, delivery."
     expected_tool: merchant-order-summary
+    expected_toolset: merchant-analytics
     notes: Full order detail view → merchant-order-summary, not entity-search.
+
+  - id: order_summary_by_number
+    category: unambiguous
+    prompt: "Give me the full breakdown of order 10042 — line items, payment state and shipping status."
+    expected_tool: merchant-order-summary
+    expected_toolset: merchant-analytics
 
   - id: checkout_methods
     category: unambiguous
     prompt: "What payment and shipping methods are available in the Storefront sales channel?"
     expected_tool: merchant-checkout-methods
+    expected_toolset: merchant-sales
+
+  - id: checkout_methods_payment
+    category: unambiguous
+    prompt: "Can customers pay by invoice in the Storefront sales channel?"
+    expected_tool: merchant-checkout-methods
+    expected_toolset: merchant-sales
+    notes: A yes/no question about one method rather than a request to list them all.
+
+  - id: checkout_methods_shipping
+    category: unambiguous
+    # Names the channel, like its two siblings above. It used to say "our main
+    # sales channel", which is not a channel name — merchant-checkout-methods
+    # requires salesChannelId, so both models correctly went looking for one
+    # (trail: enable(merchant-sales) → tool-search "sales channels" →
+    # entity-search) and were graded wrong for a lookup the prompt forced. That
+    # made the fixture test channel resolution instead of the vocabulary gap
+    # below, which is the thing it exists for.
+    prompt: "Which delivery options does a buyer get to choose from at checkout in the Storefront sales channel?"
+    expected_tool: merchant-checkout-methods
+    expected_toolset: merchant-sales
+    notes: '"Delivery options" rather than "shipping methods" — the shipping half of the same tool.'
 
   - id: product_create
     category: unambiguous
     prompt: "Create a new product called 'Blue T-Shirt' with product number SHIRT-001, priced at 29.99 EUR with 19% VAT."
     expected_tool: merchant-product-create
+    expected_toolset: merchant-catalog
+
+  - id: product_create_jacket
+    category: unambiguous
+    prompt: "Add a new article 'Winter Jacket', number JACKET-77, 149.00 EUR at the standard tax rate."
+    expected_tool: merchant-product-create
+    expected_toolset: merchant-catalog
+    notes: '"Article" is the common German-market word for a product — vocabulary coverage.'
 
   - id: storefront_search
     category: unambiguous
     prompt: "Search for 'running shoes' in the Storefront sales channel and return the results with pricing."
     expected_tool: merchant-storefront-search
+    expected_toolset: merchant-sales
     notes: Sales channel aware product search → storefront-search, not entity-search.
 
   - id: log_search
     category: unambiguous
     prompt: "Find all log entries that mention 'PaymentException'."
     expected_tool: swag-dev-tools-log-search
+    expected_toolset: dev-logs
+    notes: File-based Monolog logs. Deferred — requires the SwagMcpDevTools bundle.
+
+  - id: log_search_by_string
+    category: unambiguous
+    prompt: "Grep the logs for the string 'Deprecated'."
+    expected_tool: swag-dev-tools-log-search
+    expected_toolset: dev-logs
+    notes: '"Grep" phrasing — a developer asking for a substring match.'
 
   - id: log_stream
     category: unambiguous
     prompt: "Show me the last 20 log lines from the application."
     expected_tool: swag-dev-tools-log-stream
+    expected_toolset: dev-logs
+
+  - id: log_stream_tail_errors
+    category: unambiguous
+    prompt: "Tail the application log and show me only the error-level entries."
+    expected_tool: swag-dev-tools-log-stream
+    expected_toolset: dev-logs
+    notes: Recency tail with a level filter — still stream, not search.
 
   - id: theme_config_read
     category: unambiguous
     prompt: "What are the current theme settings for the Storefront sales channel?"
     expected_tool: shopware-theme-config
+    expected_toolset: theme
+
+  - id: theme_config_font
+    category: unambiguous
+    prompt: "Which font family is my Storefront theme using?"
+    expected_tool: shopware-theme-config
+    expected_toolset: theme
+    notes: One specific theme variable rather than the whole config — no "theme settings" keyword handed over.
 
   - id: media_upload
     category: unambiguous
     prompt: "Upload this image as a product cover: https://example.com/shirt.jpg"
     expected_tool: shopware-media-upload
+    expected_toolset: media
+
+  - id: media_upload_from_cdn
+    category: unambiguous
+    prompt: "Add the file at https://cdn.example.com/logo.svg to the media library."
+    expected_tool: shopware-media-upload
+    expected_toolset: media
+    notes: Non-image asset (SVG logo) — checks the description is not read as photos-only.
 
   - id: order_state
     category: unambiguous
     prompt: "Mark order 10000 as shipped."
     expected_tool: shopware-order-state
+    expected_toolset: order
+
+  - id: order_state_paid
+    category: unambiguous
+    prompt: "Set order 10005 to paid."
+    expected_tool: shopware-order-state
+    expected_toolset: order
+    notes: Payment state rather than delivery state — the tool covers all three state machines.
+
+  - id: entity_upsert_stock
+    category: unambiguous
+    prompt: "Set the stock of product 001cd6c6df7e42c38530de7b53dfcf25 to 50."
+    expected_tool: shopware-entity-upsert
+    expected_toolset: entity
+    notes: Writing an entity field → upsert (with dryRun preview), not search/read.
+
+  - id: entity_upsert_description
+    category: unambiguous
+    prompt: "Update the description of product 001cd6c6df7e42c38530de7b53dfcf25 to 'Comfortable cotton tee'."
+    expected_tool: shopware-entity-upsert
+    expected_toolset: entity
+
+  - id: entity_delete_media
+    category: unambiguous
+    prompt: "Delete the media file 5c4b3a2918273645ac9e8f7d6b5a4938 for good."
+    expected_tool: shopware-entity-delete
+    expected_toolset: entity
+
+  - id: cart_manage_add
+    category: unambiguous
+    prompt: "Add 2 units of product 001cd6c6df7e42c38530de7b53dfcf25 to cart token abc123 in the Storefront sales channel."
+    expected_tool: merchant-cart-manage
+    expected_toolset: merchant-sales
+    notes: Modifying an existing cart's line items → cart-manage (action=add).
+
+  - id: cart_manage_remove
+    category: unambiguous
+    prompt: "Take line item li_44 out of cart token abc123 in the Storefront sales channel."
+    expected_tool: merchant-cart-manage
+    expected_toolset: merchant-sales
+    notes: The remove action of the same tool.
+
+  - id: cart_checkout_place
+    category: unambiguous
+    prompt: "Place the order for cart token abc123 for customer 11111111111111111111111111111111 in the Storefront sales channel."
+    expected_tool: merchant-cart-checkout
+    expected_toolset: merchant-sales
+    notes: Converting a cart into an order → cart-checkout (dryRun preview first).
+
+  - id: cart_checkout_convert
+    category: unambiguous
+    prompt: "Turn cart token abc123 into a real order for customer 11111111111111111111111111111111 in the Storefront sales channel."
+    expected_tool: merchant-cart-checkout
+    expected_toolset: merchant-sales
+
+  - id: list_extensions
+    category: unambiguous
+    prompt: "Which plugins and apps are installed on this shop?"
+    expected_tool: swag-dev-tools-list-extensions
+    expected_toolset: dev-extensions
+
+  - id: list_extensions_check_active
+    category: unambiguous
+    prompt: "Is the SwagMcpDevTools plugin installed and active here?"
+    expected_tool: swag-dev-tools-list-extensions
+    expected_toolset: dev-extensions
+    notes: Asking about one named extension rather than for the whole list.
+
+  - id: list_skills
+    category: unambiguous
+    prompt: "What Shopware agent skills are available in this project?"
+    expected_tool: swag-dev-tools-list-skills
+    expected_toolset: dev-skills
+
+  - id: list_skills_available
+    category: unambiguous
+    prompt: "Which agent skills can I load in here?"
+    expected_tool: swag-dev-tools-list-skills
+    expected_toolset: dev-skills
+
+  - id: load_skill
+    category: unambiguous
+    prompt: "Show me the full contents of the agent skill named 'phpunit-unit-test-writing'."
+    expected_tool: swag-dev-tools-load-skill
+    expected_toolset: dev-skills
+    notes: Reading one skill's body by name → load-skill, not list-skills.
+
+  - id: load_skill_by_name
+    category: unambiguous
+    prompt: "Open the skill called 'storefront-controller' and walk me through its guidance."
+    expected_tool: swag-dev-tools-load-skill
+    expected_toolset: dev-skills
+
+  - id: load_skill_entity_definition
+    category: unambiguous
+    prompt: "Read me the instructions in the 'entity-definition' skill."
+    expected_tool: swag-dev-tools-load-skill
+    expected_toolset: dev-skills
+    notes: >
+      A tool description that tells the model to look a value up will make it look
+      the value up. This fixture spent 9 CI runs losing to list-skills because
+      load-skill's own description ended by pointing at it for the name ("(as listed
+      by ...)", later "If you don't already know the skill name, ... will tell you"),
+      and the trail was identical every time: enable dev-skills, then list-skills
+      with empty input. It was 0 passes in 9 runs on the primary, or 18 consecutive
+      lost attempts once the runner's retry is counted, and flaky on the second
+      validator (6 of 9, two only on retry). SwagMcpDevTools#11 removed the pointer
+      and said to call with the name given; both verification runs then went 21/21 on
+      the primary with this fixture passing first try on both models. If it regresses,
+      look for a reintroduced pointer in load-skill before touching anything else.
+      Do not reword the PROMPT to chase it. Three list-skills wordings were measured
+      against it for nothing (the original, #9's negated variant, #10's overlap-free
+      one), and an A/B against "the skill named 'X'" that appeared to help ran on a
+      local instance, which the header above rules out as evidence: the descriptions
+      there had drifted from CI's. The lever was never the wording on this side.
+
+  - id: notifications_poll
+    category: unambiguous
+    prompt: "Are there any background operation notifications, e.g. from the product indexer or an import?"
+    expected_tool: swag-dev-tools-notifications
+    expected_toolset: dev-extensions
+
+  - id: notifications_import_job
+    category: unambiguous
+    prompt: "Did the last import job report anything back?"
+    expected_tool: swag-dev-tools-notifications
+    expected_toolset: dev-extensions
+    notes: Casual phrasing with no mention of "notification".
+
+  - id: scaffold_plugin
+    category: unambiguous
+    prompt: "Scaffold the code for a new Shopware plugin skeleton."
+    expected_tool: swag-dev-tools-scaffold
+    expected_toolset: dev-scaffold
+    notes: Code generation for extensions → scaffold, not list-extensions.
+
+  - id: scaffold_admin_module
+    category: unambiguous
+    prompt: "Generate the boilerplate for a new administration module in my plugin."
+    expected_tool: swag-dev-tools-scaffold
+    expected_toolset: dev-scaffold
+    notes: A specific scaffold target rather than a whole plugin.
 
   # -------------------------------------------------------------------------
   # Disambiguation — multiple tools could apply, only one is correct
@@ -107,15 +437,19 @@ fixtures:
     category: disambiguation
     prompt: "How many products are currently in the shop?"
     expected_tool: shopware-entity-aggregate
+    expected_toolset: entity
     notes: >
       Count = aggregate, NOT search. entity-search returns records;
       entity-aggregate returns counts. A common mistake is to search with limit=1
-      and read _meta.total instead of using aggregate.
+      and read _meta.total instead of using aggregate. Both are deferred now, so
+      the model must discover the aggregate tool by name/intent rather than
+      settle for a visible sibling.
 
   - id: disambig_log_vs_entity_log
     category: disambiguation
     prompt: "Find log entries about payment webhook failures."
     expected_tool: swag-dev-tools-log-search
+    expected_toolset: dev-logs
     notes: >
       File-based Monolog logs → swag-dev-tools-log-search.
       NOT entity-search on the 'log_entry' table (that's a different store).
@@ -125,6 +459,7 @@ fixtures:
     category: disambiguation
     prompt: "List all orders from the last 7 days."
     expected_tool: shopware-entity-search
+    expected_toolset: entity
     notes: >
       Listing/filtering multiple orders → entity-search with a date filter.
       merchant-order-summary is for a single known order with full detail.
@@ -133,46 +468,323 @@ fixtures:
     category: disambiguation
     prompt: "Search for 'red shoes' with correct pricing for the Storefront sales channel."
     expected_tool: merchant-storefront-search
+    expected_toolset: merchant-sales
     notes: >
       When pricing, tax, and sales channel visibility matter → storefront-search.
       entity-search returns raw DAL data without storefront price calculation.
+
+  - id: disambig_storefront_shopper_view
+    category: disambiguation
+    prompt: "What would a shopper actually see if they searched our shop for 'winter jacket', including the prices they'd be charged?"
+    expected_tool: merchant-storefront-search
+    expected_toolset: merchant-sales
+    notes: >
+      Framed from the buyer's point of view with no sales-channel keyword.
+      Visibility + calculated price is exactly what separates storefront-search
+      from entity-search.
 
   - id: disambig_read_vs_search
     category: disambiguation
     prompt: "Get the product with ID 001cd6c6df7e42c38530de7b53dfcf25 including its categories."
     expected_tool: shopware-entity-read
+    expected_toolset: entity
     notes: Have the UUID → entity-read (not entity-search).
 
   - id: disambig_schema_before_search
     category: disambiguation
     prompt: "I want to filter orders by their billing address country. What field name should I use?"
     expected_tool: shopware-entity-schema
+    expected_toolset: entity
     notes: Field name lookup → schema, not search.
 
   - id: disambig_aggregate_sum
     category: disambiguation
     prompt: "What is the total stock value across all products?"
     expected_tool: shopware-entity-aggregate
+    expected_toolset: entity
     notes: Sum aggregation, not a search returning all records.
 
+  - id: disambig_aggregate_avg
+    category: disambiguation
+    prompt: "What is the average price of a product in the catalog?"
+    expected_tool: shopware-entity-aggregate
+    expected_toolset: entity
+    notes: Average aggregation, not entity-search. Paraphrase of the count/sum cases.
+
+  - id: disambig_log_stream_vs_search
+    category: disambiguation
+    prompt: "Show me the most recent PHP errors and stack traces from the application log."
+    expected_tool: swag-dev-tools-log-stream
+    expected_toolset: dev-logs
+    notes: >
+      "Most recent … errors" → log-stream (tail recent entries by level).
+      log-search is for a substring query, not a recency tail.
+
+  - id: disambig_customer_by_number
+    category: disambiguation
+    prompt: "Pull up the account and order history for customer number 10042."
+    expected_tool: merchant-customer-lookup
+    expected_toolset: merchant-analytics
+    notes: >
+      Customer lookup by customerNumber (not email) — paraphrase testing that
+      the description covers all three lookup keys. Not entity-search.
+
+  - id: disambig_media_import_phrasing
+    category: disambiguation
+    prompt: "Import the picture at https://example.com/banner.png into my media library."
+    expected_tool: shopware-media-upload
+    expected_toolset: media
+    notes: '"Import a picture from a URL" paraphrase of upload — still media-upload.'
+
+  - id: disambig_bestseller_vs_revenue
+    category: disambiguation
+    prompt: "Rank our products by how many units sold in 2025 — I don't need the money figures, just the ranking."
+    expected_tool: merchant-bestseller-report
+    expected_toolset: merchant-analytics
+    notes: >
+      Per-product ranking → bestseller-report. revenue-report aggregates money
+      over time periods and cannot rank products.
+
+  - id: disambig_revenue_vs_bestseller
+    category: disambiguation
+    prompt: "Compare total sales for December 2024 against November 2024."
+    expected_tool: merchant-revenue-report
+    expected_toolset: merchant-analytics
+    notes: >
+      Period-over-period money totals → revenue-report, not bestseller-report
+      (which ranks products) and not entity-aggregate (raw DAL sums, no order
+      state handling).
+
+  - id: disambig_product_create_vs_upsert
+    category: disambiguation
+    prompt: "I want to list a brand new item in the catalog: 'Ceramic Mug', number MUG-12, 9.90 EUR gross."
+    expected_tool: merchant-product-create
+    expected_toolset: merchant-catalog
+    notes: >
+      Creating a product → merchant-product-create, which assembles the required
+      price/tax/visibility payload. entity-upsert is the raw fallback and would
+      need all of that spelled out by hand.
+
+  - id: disambig_upsert_vs_product_create
+    category: disambiguation
+    prompt: "Rename category 3d5e7f9a1b2c4d6e8f0a1b2c3d4e5f60 to 'Summer Sale'."
+    expected_tool: shopware-entity-upsert
+    expected_toolset: entity
+    notes: >
+      Writing a field on a non-product entity → entity-upsert. There is no
+      dedicated category tool, so the model must fall back to the generic writer.
+
+  - id: disambig_delete_vs_upsert
+    category: disambiguation
+    prompt: "Remove the customer record 11111111111111111111111111111111 from the database entirely."
+    expected_tool: shopware-entity-delete
+    expected_toolset: entity
+    notes: >
+      A hard delete → entity-delete. Not an upsert flipping an active/deleted
+      flag, which is the tempting near-miss.
+
+  - id: disambig_cart_manage_quantity
+    category: disambiguation
+    prompt: "Change the quantity of line item li_44 in cart abc123 to 5 in the Storefront sales channel."
+    expected_tool: merchant-cart-manage
+    expected_toolset: merchant-sales
+    notes: Editing an existing cart's line items → cart-manage (action=update), not cart-checkout.
+
+  - id: disambig_checkout_vs_cart_manage
+    category: disambiguation
+    prompt: "Everything in cart abc123 is final — complete the purchase for customer 11111111111111111111111111111111."
+    expected_tool: merchant-cart-checkout
+    expected_toolset: merchant-sales
+    notes: Finalizing a cart into an order → cart-checkout; cart-manage only edits line items.
+
+  - id: disambig_order_state_vs_summary
+    category: disambiguation
+    prompt: "Cancel order 10009 — move it into the cancelled state."
+    expected_tool: shopware-order-state
+    expected_toolset: order
+    notes: >
+      Transitioning the order state machine → order-state. merchant-order-summary
+      only reads an order and cannot change it.
+
+  - id: disambig_config_write_vs_theme
+    category: disambiguation
+    prompt: "Set core.listing.productsPerPage to 48."
+    expected_tool: shopware-system-config-write
+    expected_toolset: system-config
+    notes: >
+      A system_config key → system-config-write. theme-config writes theme
+      variables only and does not reach core.* settings.
+
+  - id: disambig_list_vs_load_skill
+    category: disambiguation
+    prompt: "Show me the catalogue of skills with a one-line description of each."
+    expected_tool: swag-dev-tools-list-skills
+    expected_toolset: dev-skills
+    notes: The index → list-skills; load-skill returns one skill's full body.
+
+  - id: disambig_notifications_vs_logs
+    category: disambiguation
+    prompt: "Something failed in the background — is there an admin notification about it?"
+    expected_tool: swag-dev-tools-notifications
+    expected_toolset: dev-extensions
+    notes: >
+      The admin notification store → notifications. log-search reads Monolog
+      files, which is the tempting near-miss for "something failed".
+
+  - id: disambig_scaffold_vs_load_skill
+    category: disambiguation
+    prompt: "Create the file skeleton for a new Shopware app."
+    expected_tool: swag-dev-tools-scaffold
+    expected_toolset: dev-scaffold
+    notes: >
+      Generating files → scaffold. load-skill only returns documentation about
+      how to write them, which is the near-miss here.
+
   # -------------------------------------------------------------------------
-  # Multi-step chains — verify the FIRST tool selected
+  # Multi-step chains — verify the FIRST (non-meta) tool selected
   # -------------------------------------------------------------------------
 
   - id: chain_customer_then_order
     category: chain
     prompt: "Find the customer b.meyer@gmail.com and show me their most recent order."
     expected_tool: merchant-customer-lookup
+    expected_toolset: merchant-analytics
+    max_steps: 8
     notes: Step 1 is customer lookup; step 2 would be order-summary.
 
   - id: chain_search_then_cart
     category: chain
-    prompt: "Search for product number SHIRT-001 and add one to a new cart in the Storefront sales channel."
+    prompt: "Look up product number SHIRT-001, then add one to a new cart in the Storefront sales channel."
     expected_tool: shopware-entity-search
-    notes: Step 1 find product ID; step 2 cart-manage create + add.
+    acceptable_tools: [merchant-storefront-search]
+    expected_toolset: entity
+    max_steps: 8
+    notes: >
+      Step 1 finds the product; step 2 is cart-manage. entity-search is the
+      exact-field lookup, but the "Storefront sales channel" framing makes
+      storefront-search a defensible first step too — accept either.
 
   - id: chain_schema_then_search
     category: chain
     prompt: "First check the product entity schema, then search for active products sorted by name."
     expected_tool: shopware-entity-schema
+    expected_toolset: entity
+    max_steps: 8
     notes: Explicitly ordered — schema first.
+
+  - id: chain_summary_then_state
+    category: chain
+    prompt: "Look up order 10042 and, if it has already been paid, mark it as shipped."
+    expected_tool: merchant-order-summary
+    expected_toolset: merchant-analytics
+    max_steps: 8
+    notes: >
+      Read before write: step 1 is order-summary, step 2 order-state. Grading the
+      first call catches models that jump straight to the state transition.
+
+  - id: chain_config_read_then_write
+    category: chain
+    prompt: "Check the current value of core.listing.productsPerPage and then double it."
+    expected_tool: shopware-system-config-read
+    expected_toolset: system-config
+    max_steps: 8
+    notes: '"Double it" is only computable after a read — step 2 is system-config-write.'
+
+  - id: chain_extensions_then_logs
+    category: chain
+    prompt: "Check whether SwagMcpDevTools is active, then look for any errors it has logged."
+    expected_tool: swag-dev-tools-list-extensions
+    expected_toolset: dev-extensions
+    max_steps: 8
+    notes: >
+      Spans two toolsets (dev-extensions then dev-logs), so discovery mode has to
+      enable a second toolset mid-run.
+
+  # -------------------------------------------------------------------------
+  # Meta — the discovery meta-tool itself is the correct answer.
+  # In discovery mode the FIRST tool call of any kind is graded.
+  # -------------------------------------------------------------------------
+
+  - id: meta_list_toolsets
+    category: meta
+    prompt: "What groups of tools does this MCP server offer that I could enable?"
+    expected_tool: shopware-toolsets-list
+    notes: Asking about available tool groups → toolsets-list, not tool-search.
+
+  - id: meta_toolsets_inventory
+    category: meta
+    prompt: "Show me every toolset on this server and how many tools each one contains."
+    expected_tool: shopware-toolsets-list
+    notes: Inventory phrasing — the counts are part of the toolsets-list payload.
+
+  - id: meta_toolsets_enabled_state
+    category: meta
+    prompt: "Which capability groups are already active in my session right now?"
+    expected_tool: shopware-toolsets-list
+    notes: >
+      Enabled-state question → toolsets-list, which reports it per toolset.
+      Neither tool-search nor toolset-enable answers this.
+
+  - id: meta_enable_toolset
+    category: meta
+    prompt: "Enable the analytics toolset so I can run sales reports in this session."
+    expected_tool: shopware-toolset-enable
+    notes: >
+      Explicit enable request. The model may call shopware-toolsets-list first
+      to resolve the exact toolset name — that is valid discovery flow and the
+      runner treats it as a non-terminal step, grading the eventual enable call.
+
+  - id: meta_enable_dev_logs
+    category: meta
+    prompt: "Turn on the dev-logs toolset."
+    expected_tool: shopware-toolset-enable
+    notes: Exact toolset name given — the simplest possible enable.
+
+  - id: meta_enable_media_group
+    category: meta
+    prompt: "I need the media tools available — activate that group for this session."
+    expected_tool: shopware-toolset-enable
+    notes: Group named by intent rather than by its exact toolset key.
+
+  - id: meta_tool_search
+    category: meta
+    prompt: "Is there a tool for uploading images to the media library? Find it for me."
+    expected_tool: shopware-tool-search
+    notes: Explicit capability search → tool-search, not toolsets-list.
+
+  - id: meta_search_capability
+    category: meta
+    prompt: "Search the tool catalogue for anything related to changing theme colors."
+    expected_tool: shopware-tool-search
+    notes: Free-text capability query → tool-search.
+
+  - id: meta_search_order_state
+    category: meta
+    prompt: "Do you have anything that can transition an order's status? Look it up in the catalogue."
+    expected_tool: shopware-tool-search
+    notes: >
+      Capability question about a specific tool → tool-search. toolsets-list
+      would only return group names, which does not answer it.
+
+  # -------------------------------------------------------------------------
+  # Discovery probes — deep-deferred tools with no default-surface sibling,
+  # exercising search/toolset quality end to end.
+  # -------------------------------------------------------------------------
+
+  - id: discovery_entity_delete
+    category: discovery
+    prompt: "Permanently delete the product with ID 001cd6c6df7e42c38530de7b53dfcf25."
+    expected_tool: shopware-entity-delete
+    expected_toolset: entity
+    notes: >
+      Delete is deferred; nothing on the default surface deletes. The model must
+      discover entity-delete (and should later use dryRun first — not graded here).
+
+  - id: discovery_theme_color
+    category: discovery
+    prompt: "Change the primary color of my storefront theme to #ff0000."
+    expected_tool: shopware-theme-config
+    expected_toolset: theme
+    notes: >
+      theme-config is deferred in the 'theme' toolset. Probes whether search
+      ranks it for theme/color queries and whether the model reaches it.

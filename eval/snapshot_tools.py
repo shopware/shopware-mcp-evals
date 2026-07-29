@@ -1,79 +1,38 @@
 #!/usr/bin/env python3
 """
-Snapshot the live MCP server's tool list.
+Snapshot the live MCP server's full tool catalogue.
 
-Writes a normalized JSON document (sorted by tool name) so a `git diff` between
-two snapshots surfaces description / schema churn directly.
+MCP Server v2 advertises only a small default surface on a fresh session; the
+rest of the catalogue hides behind toolsets. The snapshot therefore captures:
+
+  - default_tools:  tool names advertised on a fresh session (paginated walk)
+  - toolsets:       the toolset taxonomy (name, title, description, tools)
+  - tools:          full definitions of the whole catalogue, taken after
+                    enabling every toolset for the snapshot session
+
+Everything is normalized and sorted so a `git diff` between two snapshots
+surfaces default-surface changes, toolset membership changes, and
+description/schema churn directly.
 
 Usage:
-    python eval/snapshot_tools.py --output tool-history/latest.json
+    python -m eval.snapshot_tools --output tool-history/latest.json
 """
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-import requests
-
-BASE = Path(__file__).parent.parent
-
-
-def load_env() -> None:
-    env_file = BASE / ".env"
-    if not env_file.exists():
-        return
-    for line in env_file.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, _, v = line.partition("=")
-            os.environ.setdefault(k.strip(), v.strip())
-
-
-def fetch_tools(base_url: str, access_key: str, secret_key: str) -> list[dict]:
-    auth = {
-        "sw-access-key": access_key,
-        "sw-secret-access-key": secret_key,
-        "Content-Type": "application/json",
-    }
-
-    init = requests.post(
-        f"{base_url}/api/_mcp",
-        headers=auth,
-        json={
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "mcp-eval-snapshot", "version": "1.0"},
-            },
-            "id": 1,
-        },
-        timeout=30,
-    )
-    if not init.ok:
-        print(f"initialize failed: HTTP {init.status_code}", file=sys.stderr)
-        print(f"response body: {init.text[:2000]}", file=sys.stderr)
-        init.raise_for_status()
-
-    session_id = init.headers.get("Mcp-Session-Id", "")
-    if not session_id:
-        raise RuntimeError("No Mcp-Session-Id in initialize response")
-
-    server_instructions = init.json().get("result", {}).get("instructions", "")
-
-    listing = requests.post(
-        f"{base_url}/api/_mcp",
-        headers={**auth, "Mcp-Session-Id": session_id},
-        json={"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 2},
-        timeout=30,
-    )
-    listing.raise_for_status()
-    tools = listing.json().get("result", {}).get("tools", [])
-
-    return server_instructions, tools
+from mcp_client import (
+    BASE,
+    SW_ACCESS_KEY,
+    SW_BASE_URL,
+    SW_SECRET_ACCESS_KEY,
+    enable_all_toolsets,
+    mcp_init,
+    mcp_tools_list_all,
+    mcp_toolsets_list,
+)
 
 
 def main() -> int:
@@ -85,19 +44,35 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    load_env()
-    base_url = os.environ.get("SW_BASE_URL", "").rstrip("/")
-    access_key = os.environ.get("SW_ACCESS_KEY", "")
-    secret_key = os.environ.get("SW_SECRET_ACCESS_KEY", "")
-
-    if not (base_url and access_key and secret_key):
+    if not (SW_BASE_URL and SW_ACCESS_KEY and SW_SECRET_ACCESS_KEY):
         print("ERROR: SW_BASE_URL, SW_ACCESS_KEY, SW_SECRET_ACCESS_KEY required", file=sys.stderr)
         return 1
 
-    instructions, tools = fetch_tools(base_url, access_key, secret_key)
+    session_id, instructions = mcp_init()
+
+    default_tools = sorted(t.get("name", "") for t in mcp_tools_list_all(session_id))
+
+    toolsets = sorted(
+        (
+            {
+                "name": ts.get("name", ""),
+                "title": ts.get("title", ""),
+                "description": ts.get("description", ""),
+                # 'enabled' is session state, not catalogue shape — drop it.
+                "tools": sorted(ts.get("tools", [])),
+            }
+            for ts in mcp_toolsets_list(session_id)
+        ),
+        key=lambda ts: ts["name"],
+    )
+
+    enable_all_toolsets(session_id)
+    full_catalogue = mcp_tools_list_all(session_id)
 
     normalized = {
         "server_instructions": instructions,
+        "default_tools": default_tools,
+        "toolsets": toolsets,
         "tools": sorted(
             (
                 {
@@ -105,7 +80,7 @@ def main() -> int:
                     "description": t.get("description", ""),
                     "inputSchema": t.get("inputSchema", {}),
                 }
-                for t in tools
+                for t in full_catalogue
             ),
             key=lambda t: t["name"],
         ),
@@ -114,7 +89,10 @@ def main() -> int:
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n")
-    print(f"Wrote {out} ({len(normalized['tools'])} tools)")
+    print(
+        f"Wrote {out} ({len(default_tools)} default tools, "
+        f"{len(toolsets)} toolsets, {len(normalized['tools'])} tools total)"
+    )
     return 0
 
 

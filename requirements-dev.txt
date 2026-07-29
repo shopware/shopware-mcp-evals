@@ -1,0 +1,12 @@
+-r eval/requirements.txt
+
+# The dev tooling is pinned while the runtime deps in eval/requirements.txt stay
+# ranged, and the asymmetry is deliberate: a linter or test-runner release adds
+# rules or changes collection behaviour and turns CI red with no code change at
+# all. Floating those means the build can break while nobody touched the repo.
+#
+# ruff is pre-1.0 and ships lint rules in minor releases, so it takes ==.
+# Bumping either is a deliberate PR, the same way shopware.sha is.
+pytest>=8,<10
+pytest-cov>=6,<8
+ruff==0.16.0

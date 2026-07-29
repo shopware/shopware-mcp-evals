@@ -1,0 +1,64 @@
+name: Lint & unit tests
+
+# Fast, self-contained quality gate (no Shopware install). Intentionally in its
+# own workflow with a permanent pull_request trigger so it keeps running on every
+# PR regardless of what happens to the heavy eval workflow's triggers.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version-file: .python-version
+
+      # ruff is NOT installed bare here any more — requirements-dev.txt pins it.
+      # Unpinned, every ruff release landed in CI unreviewed, so a new lint rule
+      # could fail this gate without anyone touching the repo.
+      - name: Install dev dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          # Editable install so `python -m eval.runner` and the tests can
+          # import mcp_client/ownership without a sys.path prelude.
+          # --no-deps: the requirements file above is the single source of
+          # truth for versions; pyproject.toml declares none.
+          pip install -e . --no-deps
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Ruff (format check)
+        run: ruff format --check .
+
+      - name: Pytest (unit tests)
+        # --cov both reports where the gaps are AND gates. No --cov-fail-under is
+        # passed here, but `fail_under` in pyproject.toml applies anyway and
+        # pytest-cov exits 1 below it, so a dip IS a red build. That is deliberate:
+        # the floor lives in one place, so a local `pytest --cov` fails on exactly
+        # what CI fails on.
+        run: pytest tests -q --cov
+
+      - name: ShellCheck (shell lint)
+        run: |
+          shopt -s nullglob globstar
+          scripts=(functional/**/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No shell scripts to lint."
+          else
+            printf 'Linting: %s\n' "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+          fi

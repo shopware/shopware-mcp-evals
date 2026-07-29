@@ -1,0 +1,21 @@
+# Lint config for the Python eval + functional layers.
+# Tracks .python-version, which is what CI resolves the interpreter from
+# (actions/setup-python with python-version-file in lint.yml and mcp-evals.yml).
+# Keeping this behind the real version silently disables the pyupgrade (UP)
+# rewrites for everything newer than the target.
+target-version = "py314"
+line-length = 120
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # import sorting
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # comprehensions
+]
+
+[lint.isort]
+known-first-party = ["mcp_client", "ownership", "eval", "functional"]

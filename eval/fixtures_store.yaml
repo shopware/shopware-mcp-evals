@@ -1,0 +1,327 @@
+# LLM Eval Fixtures — Store API endpoint (/store-api/_mcp)
+#
+# Same discovery model as admin: only the three meta-tools are advertised by
+# default; the UCP buyer-journey tools are deferred in the `shopware` toolset
+# and shopware-store-api-context in the `store-api` toolset. Run with:
+#   python -m eval.runner --endpoint store
+#
+# Fields are identical to fixtures.yaml (see its header), and the same coverage
+# rule applies: at least 3 prompts per tool, differing in kind rather than
+# wording. Buyer-journey tools sit unusually close together (cart-cancel vs
+# checkout-cancel, cart-get vs checkout-get), so most of the extra prompts are
+# boundary cases between neighbouring stages of the funnel.
+#
+# Grading is on tool selection; the terminal UCP tool is never executed.
+
+fixtures:
+
+  # -------------------------------------------------------------------------
+  # Catalog
+  # -------------------------------------------------------------------------
+
+  - id: catalog_search
+    category: unambiguous
+    prompt: "Search the storefront catalog for running shoes."
+    expected_tool: shopware-ucp-catalog-search
+    expected_toolset: shopware
+    notes: Free-text catalog discovery → catalog-search.
+
+  - id: catalog_search_shopper_intent
+    category: unambiguous
+    prompt: "I'm looking for a gift under 50 euros — what have you got?"
+    expected_tool: shopware-ucp-catalog-search
+    expected_toolset: shopware
+    notes: Open-ended shopper browse with no product ID and no "search" keyword.
+
+  - id: disambig_search_vs_lookup
+    category: disambiguation
+    prompt: "Do you sell anything in blue? Show me a few options."
+    expected_tool: shopware-ucp-catalog-search
+    expected_toolset: shopware
+    notes: >
+      No identifiers, so lookup is impossible — this has to be a text query.
+      The mirror image of disambig_lookup_vs_search.
+
+  - id: catalog_lookup
+    category: disambiguation
+    prompt: "Load the full product details for product IDs 0a1b and 0c2d from the catalog."
+    expected_tool: shopware-ucp-catalog-lookup
+    expected_toolset: shopware
+    notes: Known IDs → catalog-lookup, not catalog-search (which is a text query).
+
+  - id: catalog_lookup_price
+    category: unambiguous
+    prompt: "Get the current price and availability for product 0a1b."
+    expected_tool: shopware-ucp-catalog-lookup
+    expected_toolset: shopware
+
+  - id: disambig_lookup_vs_search
+    category: disambiguation
+    prompt: "Before I add it to my basket, confirm that product 0a1b is still in stock."
+    expected_tool: shopware-ucp-catalog-lookup
+    expected_toolset: shopware
+    notes: >
+      An ID is in hand → lookup. The "add to basket" framing is a distractor
+      toward cart-update; nothing is being added yet.
+
+  # -------------------------------------------------------------------------
+  # Cart
+  # -------------------------------------------------------------------------
+
+  - id: cart_create
+    category: unambiguous
+    prompt: "Start a brand new shopping cart for me."
+    expected_tool: shopware-ucp-cart-create
+    expected_toolset: shopware
+
+  - id: cart_create_start_shopping
+    category: unambiguous
+    prompt: "I'd like to start shopping — open a basket for me."
+    expected_tool: shopware-ucp-cart-create
+    expected_toolset: shopware
+    notes: '"Basket" rather than "cart" — vocabulary coverage.'
+
+  - id: chain_cart_create_then_add
+    category: chain
+    prompt: "Create a cart for me and put product 0a1b in it."
+    expected_tool: shopware-ucp-cart-create
+    expected_toolset: shopware
+    max_steps: 8
+    notes: >
+      No cart ID exists yet, so step 1 must be cart-create and step 2
+      cart-update. Catches models that jump straight to adding a line item.
+
+  - id: cart_get
+    category: unambiguous
+    prompt: "Show me the current contents of cart cart_abc123."
+    expected_tool: shopware-ucp-cart-get
+    expected_toolset: shopware
+
+  - id: cart_get_total
+    category: unambiguous
+    prompt: "What does cart cart_abc123 come to in total?"
+    expected_tool: shopware-ucp-cart-get
+    expected_toolset: shopware
+    notes: Totals are part of the cart payload — a read, not a checkout step.
+
+  - id: disambig_cart_get_vs_checkout_get
+    category: disambiguation
+    prompt: "What's in my basket right now — cart_abc123? I haven't started checking out yet."
+    expected_tool: shopware-ucp-cart-get
+    expected_toolset: shopware
+    notes: >
+      Cart-stage read → cart-get. checkout-get needs a checkout session, which
+      does not exist here.
+
+  - id: cart_update
+    category: disambiguation
+    prompt: "Set the quantity of line item li_9 in cart cart_abc123 to 3."
+    expected_tool: shopware-ucp-cart-update
+    expected_toolset: shopware
+    notes: Writing new line-item state to an existing cart → cart-update, not cart-get/create.
+
+  - id: cart_update_add_more
+    category: unambiguous
+    prompt: "Add two more of product 0a1b to cart cart_abc123."
+    expected_tool: shopware-ucp-cart-update
+    expected_toolset: shopware
+    notes: Adding to an existing cart → cart-update; cart-create would discard it.
+
+  - id: cart_update_remove_line
+    category: unambiguous
+    prompt: "Take line item li_9 out of cart cart_abc123."
+    expected_tool: shopware-ucp-cart-update
+    expected_toolset: shopware
+    notes: >
+      Removing one line → cart-update. cart-cancel is the near-miss and would
+      throw away the whole cart.
+
+  - id: cart_cancel
+    category: unambiguous
+    prompt: "Discard cart cart_abc123, I don't want it anymore."
+    expected_tool: shopware-ucp-cart-cancel
+    expected_toolset: shopware
+
+  - id: cart_cancel_delete
+    category: unambiguous
+    prompt: "Empty and abandon cart cart_abc123 completely."
+    expected_tool: shopware-ucp-cart-cancel
+    expected_toolset: shopware
+
+  - id: disambig_cart_cancel_vs_checkout_cancel
+    category: disambiguation
+    prompt: "Throw away the shopping cart cart_abc123 — I never started a checkout for it."
+    expected_tool: shopware-ucp-cart-cancel
+    expected_toolset: shopware
+    notes: Cart-stage abandon → cart-cancel, not checkout-cancel.
+
+  - id: discount_apply
+    category: unambiguous
+    prompt: "Apply the discount code SUMMER10 to cart cart_abc123."
+    expected_tool: shopware-ucp-discount-apply
+    expected_toolset: shopware
+
+  - id: discount_apply_voucher
+    category: unambiguous
+    prompt: "I have a voucher code WELCOME5 — use it on cart cart_abc123."
+    expected_tool: shopware-ucp-discount-apply
+    expected_toolset: shopware
+    notes: '"Voucher" rather than "discount code" — vocabulary coverage.'
+
+  - id: disambig_discount_vs_cart_update
+    category: disambiguation
+    prompt: "Redeem promotion code BLACKFRIDAY on cart cart_abc123 before I check out."
+    expected_tool: shopware-ucp-discount-apply
+    expected_toolset: shopware
+    notes: >
+      A promotion code has its own endpoint → discount-apply, not cart-update
+      (which is for line items) and not checkout-create.
+
+  # -------------------------------------------------------------------------
+  # Checkout
+  # -------------------------------------------------------------------------
+
+  - id: checkout_create
+    category: unambiguous
+    prompt: "Begin checkout for cart cart_abc123."
+    expected_tool: shopware-ucp-checkout-create
+    expected_toolset: shopware
+
+  - id: checkout_create_ready_to_buy
+    category: unambiguous
+    prompt: "I'm ready to buy what's in cart cart_abc123 — take me to checkout."
+    expected_tool: shopware-ucp-checkout-create
+    expected_toolset: shopware
+
+  - id: disambig_checkout_create_vs_complete
+    category: disambiguation
+    prompt: "Convert cart cart_abc123 into a checkout session."
+    expected_tool: shopware-ucp-checkout-create
+    expected_toolset: shopware
+    notes: >
+      Opening a checkout → checkout-create. checkout-complete places the order
+      and needs an existing session ID, which this prompt does not supply.
+
+  - id: checkout_get
+    category: unambiguous
+    prompt: "What is the current status of checkout session co_xyz789?"
+    expected_tool: shopware-ucp-checkout-get
+    expected_toolset: shopware
+
+  - id: checkout_get_paid
+    category: unambiguous
+    prompt: "Has checkout co_xyz789 been paid yet?"
+    expected_tool: shopware-ucp-checkout-get
+    expected_toolset: shopware
+
+  - id: checkout_get_totals
+    category: unambiguous
+    prompt: "Fetch the current state of checkout session co_xyz789 including its totals."
+    expected_tool: shopware-ucp-checkout-get
+    expected_toolset: shopware
+    notes: Totals at the checkout stage → checkout-get, not cart-get.
+
+  - id: checkout_update
+    category: disambiguation
+    prompt: "Set the shipping address on checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-update
+    expected_toolset: shopware
+    notes: Editing an open checkout → checkout-update, not checkout-create/complete.
+
+  - id: checkout_update_email
+    category: unambiguous
+    prompt: "Change the email address on checkout co_xyz789 to buyer@example.com."
+    expected_tool: shopware-ucp-checkout-update
+    expected_toolset: shopware
+
+  - id: checkout_update_shipping_option
+    category: unambiguous
+    prompt: "Pick the express delivery option for checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-update
+    expected_toolset: shopware
+    notes: Selecting a shipping method is a checkout field write, not a new checkout.
+
+  - id: checkout_complete
+    category: disambiguation
+    prompt: "Everything looks good — place the order for checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-complete
+    expected_toolset: shopware
+    notes: Finalizing/placing the order → checkout-complete, not checkout-update.
+
+  - id: checkout_complete_confirm_pay
+    category: unambiguous
+    prompt: "Confirm and pay for checkout co_xyz789."
+    expected_tool: shopware-ucp-checkout-complete
+    expected_toolset: shopware
+
+  - id: checkout_complete_submit
+    category: unambiguous
+    prompt: "Submit checkout session co_xyz789 — I authorize the payment."
+    expected_tool: shopware-ucp-checkout-complete
+    expected_toolset: shopware
+
+  - id: checkout_cancel
+    category: unambiguous
+    prompt: "Cancel checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-cancel
+    expected_toolset: shopware
+
+  - id: checkout_cancel_abort
+    category: unambiguous
+    prompt: "Abort checkout session co_xyz789."
+    expected_tool: shopware-ucp-checkout-cancel
+    expected_toolset: shopware
+
+  - id: disambig_checkout_cancel_vs_cart_cancel
+    category: disambiguation
+    prompt: "Stop the checkout co_xyz789 — I don't want to complete it, but keep my cart."
+    expected_tool: shopware-ucp-checkout-cancel
+    expected_toolset: shopware
+    notes: >
+      "Keep my cart" rules out cart-cancel: only the checkout session is being
+      cancelled.
+
+  # -------------------------------------------------------------------------
+  # Order & context
+  # -------------------------------------------------------------------------
+
+  - id: order_get
+    category: unambiguous
+    prompt: "Show me the details of order ord_55501."
+    expected_tool: shopware-ucp-order-get
+    expected_toolset: shopware
+
+  - id: order_get_tracking
+    category: unambiguous
+    prompt: "Track order ord_55501 — has it shipped yet?"
+    expected_tool: shopware-ucp-order-get
+    expected_toolset: shopware
+
+  - id: disambig_order_get_vs_checkout_get
+    category: disambiguation
+    prompt: "What did I end up paying for order ord_55501?"
+    expected_tool: shopware-ucp-order-get
+    expected_toolset: shopware
+    notes: >
+      A placed order → order-get. checkout-get is for a session that has not
+      been completed yet.
+
+  - id: store_context
+    category: unambiguous
+    prompt: "Which sales channel, currency and language is this session using, and am I logged in as a customer?"
+    expected_tool: shopware-store-api-context
+    expected_toolset: store-api
+    notes: Reading the session's sales-channel context → store-api-context.
+
+  - id: store_context_currency
+    category: unambiguous
+    prompt: "Which currency and language will prices be shown in for me?"
+    expected_tool: shopware-store-api-context
+    expected_toolset: store-api
+
+  - id: store_context_logged_in
+    category: unambiguous
+    prompt: "Am I signed in, and which shop am I browsing?"
+    expected_tool: shopware-store-api-context
+    expected_toolset: store-api
+    notes: Customer login state is part of the context payload — not a cart or order read.
