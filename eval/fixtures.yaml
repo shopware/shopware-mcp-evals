@@ -150,7 +150,14 @@ fixtures:
 
   - id: checkout_methods_shipping
     category: unambiguous
-    prompt: "Which delivery options does a buyer get to choose from at checkout in our main sales channel?"
+    # Names the channel, like its two siblings above. It used to say "our main
+    # sales channel", which is not a channel name — merchant-checkout-methods
+    # requires salesChannelId, so both models correctly went looking for one
+    # (trail: enable(merchant-sales) → tool-search "sales channels" →
+    # entity-search) and were graded wrong for a lookup the prompt forced. That
+    # made the fixture test channel resolution instead of the vocabulary gap
+    # below, which is the thing it exists for.
+    prompt: "Which delivery options does a buyer get to choose from at checkout in the Storefront sales channel?"
     expected_tool: merchant-checkout-methods
     expected_toolset: merchant-sales
     notes: '"Delivery options" rather than "shipping methods" — the shipping half of the same tool.'

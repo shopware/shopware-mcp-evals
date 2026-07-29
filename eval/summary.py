@@ -135,23 +135,36 @@ def render_tiers(rows: list[dict]) -> str:
         "model that graded them, which is why this rate is stricter than the per-suite",
         "rates above — one model missing once is enough to leave a fixture out of it.",
         "",
-        "**Bold** in the last column marks a fixture that failed on *every* model,",
-        "matching the both-fail row of the cross-model table below. That is the",
-        "actionable set. Plain means some models passed it, which is usually the weaker",
-        "model's capability gap rather than a description bug.",
+        "**Bold** in the last column marks a fixture that at least two models graded",
+        "and *all* of them failed — the actionable set, matching the both-fail row of",
+        "the cross-model table below. Plain means either some model passed it (usually",
+        "the weaker one's capability gap) or only one model graded it at all, and a",
+        "single run is not evidence about a description.",
         "",
-        "| Owner | Clean | Rate | Failed on all models | Enforcement | Failing fixtures |",
+        "| Owner | Clean | Rate | Failed on every model | Enforcement | Failing fixtures |",
         "|---|---:|---:|---:|---|---|",
     ]
     for tier in ordered:
         runs_by_id, fails_by_id = graded[tier], failed[tier]
         total = len(runs_by_id)
         # A fixture counts as failing the owner if any run missed it; the
-        # all-models subset is the one worth acting on. Placeholders stand in for
-        # unnamed failures on a legacy row, so they count but cannot be claimed
-        # to have failed everywhere — that needs an id to correlate on.
+        # failed-everywhere subset is the one worth acting on.
+        #
+        # The two-run floor is the point. The Store suite runs a single model, so
+        # without it every store failure satisfied "failed on every model that
+        # graded it" and got bolded as actionable — two of them were, while the
+        # cross-model table right below reported one. That is precisely the
+        # single-run noise the two-model split exists to discount, presented with
+        # the weight of a confirmed finding.
+        #
+        # Placeholders from a legacy row are excluded too: they count towards the
+        # denominator but have no id to correlate across runs.
         failing_ids = sorted(fails_by_id)
-        consistent = {i for i in failing_ids if not i.startswith(ANON) and fails_by_id[i] >= runs_by_id.get(i, 0) > 0}
+        consistent = {
+            i
+            for i in failing_ids
+            if not i.startswith(ANON) and runs_by_id.get(i, 0) >= 2 and fails_by_id[i] >= runs_by_id[i]
+        }
         passed = total - len(failing_ids)
         pct = round(100 * passed / total) if total else 0
         lines.append(

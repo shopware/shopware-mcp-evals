@@ -162,6 +162,39 @@ def test_a_fixture_failing_on_every_model_is_marked_as_the_actionable_one():
     assert "| 0/2 | 0% | 1 |" in out
 
 
+def test_a_fixture_only_one_model_graded_is_not_called_a_confirmed_failure():
+    """The Store suite runs a single model. Without a two-run floor its failures
+    satisfied "failed on every model that graded it" and were bolded as
+    actionable — the By-owner table reported two while the cross-model table
+    right below it reported one, which is the single-run noise the two-model
+    split exists to discount."""
+    rows = [
+        row("admin · primary", "strong", 0.9, 2, by_tier={"core": tier(1, 2, ["a1"], ids=["a1", "a2"])}),
+        row("admin · second", "weak", 0.9, 2, by_tier={"core": tier(1, 2, ["a1"], ids=["a1", "a2"])}),
+        # One model, one fixture, one failure.
+        row(
+            "store · UCP", "strong", 0.9, 1, advisory=True, by_tier={"agentic-commerce": tier(0, 1, ["s1"], ids=["s1"])}
+        ),
+    ]
+
+    out = S.render_tiers(rows)
+
+    assert "**`a1`**" in out, "graded twice and failed twice is a confirmed finding"
+    assert "`s1`" in out and "**`s1`**" not in out, "graded once is not evidence about a description"
+    assert "| agentic-commerce | 0/1 | 0% | — |" in out, "and it must not be counted in the column"
+
+
+def test_a_fixture_that_two_models_graded_and_one_passed_is_not_bolded():
+    rows = [
+        row("a", "strong", 0.5, 1, by_tier={"core": tier(1, 1, [], ids=["x"])}),
+        row("b", "weak", 0.5, 1, by_tier={"core": tier(0, 1, ["x"], ids=["x"])}),
+    ]
+
+    out = S.render_tiers(rows)
+
+    assert "`x`" in out and "**`x`**" not in out
+
+
 def test_bolded_failures_survive_truncation():
     """With a cap of six, an owner with many capability-gap misses could
     otherwise hide its only actionable fixture."""
