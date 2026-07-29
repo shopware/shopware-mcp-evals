@@ -7,7 +7,7 @@
   "server_instructions": "This MCP server exposes Shopware e-commerce platform capabilities.\nUse entity tools to search, read, and manage shop data.\nThe advertised tool list is not the full catalogue. If no advertised tool matches the requested action, call shopware-tool-search first instead of assuming the action is unsupported; use shopware-toolsets-list and shopware-toolset-enable to make a matched tool callable if your client cannot invoke it inline.\nAll operations respect the authenticated user's ACL permissions.\n",
   "tools": [
     {
-      "description": "Get the top-selling products by quantity in a date range. Excludes cancelled orders. Returns product name, number, total quantity sold, order count, and total revenue. Provide ISO 8601 dates (e.g. \"2025-01-01\"). Returns {success, data: {period, bestsellers: [{productId, productNumber, name, totalQuantity, orderCount, totalRevenue}]}}.",
+      "description": "Ranks individual products by units sold in a date range \u2014 best sellers, top performers, which products shifted the most units. Excludes cancelled orders. Provide ISO 8601 dates (e.g. \"2025-01-01\"). Per-product ranking only, not shop-wide money totals over time \u2014 merchant-revenue-report does that. Returns {success, data: {period, bestsellers: [{productId, productNumber, name, totalQuantity, orderCount, totalRevenue}]}}.",
       "inputSchema": {
         "properties": {
           "from": {
@@ -34,7 +34,7 @@
       "name": "merchant-bestseller-report"
     },
     {
-      "description": "Place an order from an existing cart. Requires a cart token (from merchant-cart-manage \"create\"), a salesChannelId, and a customerId (registered customer). Optionally override the payment and shipping method (use merchant-checkout-methods to list available methods). Defaults to dryRun=true for order preview.",
+      "description": "Turns a cart into a real order \u2014 place the order, complete the purchase, convert cart to order. If you already have a cart token, call this directly; do not re-create the cart. Requires that token plus salesChannelId and a customerId (registered customer). Payment and shipping methods are optional: omit them for the channel defaults, and if you don't already know the method IDs, merchant-checkout-methods will tell you. Defaults to dryRun=true for order preview.",
       "inputSchema": {
         "properties": {
           "customerId": {
@@ -69,7 +69,7 @@
       "name": "merchant-cart-checkout"
     },
     {
-      "description": "Manage a storefront shopping cart. Actions: \"create\" (new cart, returns token), \"add\" (add product by productId), \"remove\" (remove by lineItemId), \"update\" (change quantity by lineItemId), \"get\" (view current cart). Requires salesChannelId (see shopware://sales-channels resource). All actions except \"create\" require the token returned by \"create\". Optionally pass customerId for customer-specific pricing.",
+      "description": "Manage a storefront shopping cart. Actions: \"create\" (new cart, returns token), \"add\" (add product by productId), \"remove\" (remove by lineItemId), \"update\" (change quantity by lineItemId), \"get\" (view current cart). Requires salesChannelId (see shopware://sales-channels resource). All actions except \"create\" require the token returned by \"create\". Optionally pass customerId for customer-specific pricing. Edits line items only \u2014 it never places or converts the cart into an order; merchant-cart-checkout does that.",
       "inputSchema": {
         "properties": {
           "action": {
@@ -111,7 +111,7 @@
       "name": "merchant-cart-manage"
     },
     {
-      "description": "List available payment and shipping methods for a sales channel. Use type \"payment\" for payment methods only, \"shipping\" for shipping methods only, or \"all\" for both. Returns method IDs needed for merchant-cart-checkout.",
+      "description": "Which payment methods and delivery options a sales channel offers at checkout \u2014 including whether customers can pay by a specific method. Use type \"payment\" for payment methods only, \"shipping\" for shipping methods only, or \"all\" for both. Read-only: it returns method names and IDs, it never places an order \u2014 merchant-cart-checkout does that.",
       "inputSchema": {
         "properties": {
           "salesChannelId": {
@@ -130,7 +130,7 @@
       "name": "merchant-checkout-methods"
     },
     {
-      "description": "Look up a customer by email, customer number, or UUID and get profile with order history. Provide at least one identifier. Returns {success, data: {id, email, customerNumber, firstName, lastName, group, orderCount, orderTotalAmount, recentOrders: [...]}}.",
+      "description": "Pull up one customer account by email, customer number, or UUID \u2014 profile plus order history and lifetime order total. Provide at least one identifier. Single customer only: shopware-entity-search handles requests that span more than one customer. Returns {success, data: {id, email, customerNumber, firstName, lastName, group, orderCount, orderTotalAmount, recentOrders: [...]}}.",
       "inputSchema": {
         "properties": {
           "customerId": {
@@ -151,7 +151,7 @@
       "name": "merchant-customer-lookup"
     },
     {
-      "description": "Look up an order by order number or UUID and get a pre-formatted summary with customer info, line items, payment status, and delivery status. Provide either orderNumber (e.g. \"10001\") or orderId (UUID). Returns {success, data: {id, orderNumber, status, amountTotal, customer, lineItems, transactions, deliveries}}.",
+      "description": "The right tool when the user names ONE order and wants everything about it \u2014 customer, line items, payment status, delivery status. Provide either orderNumber (e.g. \"10001\") or orderId (UUID). Single order only: shopware-entity-search handles multi-order queries. Read-only: it never alters the order; shopware-order-state does that. Returns {success, data: {id, orderNumber, status, amountTotal, customer, lineItems, transactions, deliveries}}.",
       "inputSchema": {
         "properties": {
           "orderId": {
@@ -168,7 +168,7 @@
       "name": "merchant-order-summary"
     },
     {
-      "description": "Create a product with human-readable inputs. Automatically resolves tax rate to tax ID, currency ISO code to currency ID, exact category names to category IDs, and builds the nested price structure. Defaults to dryRun=true. Returns the generated payload in dryRun mode, or the created product ID on commit.",
+      "description": "The right tool for adding a brand-new product, article, or item to the catalog. Give it plain values (name, product number, price, tax rate) \u2014 it resolves tax rate to tax ID, currency ISO code to currency ID, exact category names to category IDs, and builds the nested price structure. New products only; for a product that is already in the catalog, shopware-entity-upsert is the raw fallback. Defaults to dryRun=true. Returns the generated payload in dryRun mode, or the created product ID on commit.",
       "inputSchema": {
         "properties": {
           "active": {
@@ -219,7 +219,7 @@
       "name": "merchant-product-create"
     },
     {
-      "description": "Generate a revenue report for a date range. Provide ISO 8601 dates (e.g. \"2025-01-01\"). Excludes cancelled orders. Optional groupBy: day (default), week, month. Use page/limit to paginate the timeline buckets. Returns {success, data: {period, totalRevenue, orderCount, averageOrderValue, timeline: [{date, revenue}]}, _meta: {page, limit, total}}.",
+      "description": "Money totals over a date range \u2014 revenue, turnover, total sales, average order value, period-over-period comparison. Provide ISO 8601 dates (e.g. \"2025-01-01\"). Excludes cancelled orders. Optional groupBy: day (default), week, month. Use page/limit to paginate the timeline buckets. Never a per-product ranking \u2014 merchant-bestseller-report does that. Returns {success, data: {period, totalRevenue, orderCount, averageOrderValue, timeline: [{date, revenue}]}, _meta: {page, limit, total}}.",
       "inputSchema": {
         "properties": {
           "from": {
@@ -370,7 +370,7 @@
       "name": "shopware-entity-schema"
     },
     {
-      "description": "Search and filter Shopware entities \u2014 use this to look up a product by its productNumber or any exact field value, including as the first step in Storefront cart/checkout workflows. For count/sum/average reporting, use shopware-entity-aggregate instead (the _meta.total here is pagination metadata, not a reporting count). Accepts Admin API criteria JSON. Returns {success, data: [...], _meta: {total, page, limit}}. Use shopware-entity-schema first if you need field names.",
+      "description": "Search and filter Shopware entities \u2014 use this to look up a product by its productNumber or any exact field value, including as the first step in Storefront cart/checkout workflows. For count/sum/average reporting, use shopware-entity-aggregate instead (the _meta.total here is pagination metadata, not a reporting count). Accepts Admin API criteria JSON. Returns {success, data: [...], _meta: {total, page, limit}}. If you don't already know the field names, shopware-entity-schema will tell you.",
       "inputSchema": {
         "properties": {
           "criteria": {
@@ -401,7 +401,7 @@
       "name": "shopware-entity-search"
     },
     {
-      "description": "Create or update Shopware entity data. Always use dryRun=true (default) first to validate, then set dryRun=false to persist. Use shopware-entity-schema to understand required fields before building the payload. Returns validation result in dryRun mode, or the written entity data on commit.",
+      "description": "Create or update Shopware entity data. Always use dryRun=true (default) first to validate, then set dryRun=false to persist. If you don't already know the required fields, shopware-entity-schema will tell you. Returns validation result in dryRun mode, or the written entity data on commit.",
       "inputSchema": {
         "properties": {
           "dryRun": {
@@ -624,7 +624,7 @@
       "name": "swag-dev-tools-list-skills"
     },
     {
-      "description": "Read the body of a Shopware Agent Skill by name (as listed by swag-dev-tools-list-skills), e.g. \"shopware-php-code\" or \"shopware-admin-js\". Returns the SKILL.md content \u2014 the authoritative Shopware coding guidance. Load the relevant skill BEFORE generating or editing code so the output follows current conventions. Note: these skills target CORE contribution; core-only rules (BC promises, @internal/@final policy, RELEASE_INFO/UPGRADE, OpenAPI JSON under src/Core) do not apply to extension development.",
+      "description": "Read the body of a Shopware Agent Skill by name, e.g. \"shopware-php-code\" or \"shopware-admin-js\". If you don't already know the skill name, swag-dev-tools-list-skills will tell you. Returns the SKILL.md content \u2014 the authoritative Shopware coding guidance. Load the relevant skill BEFORE generating or editing code so the output follows current conventions. Note: these skills target CORE contribution; core-only rules (BC promises, @internal/@final policy, RELEASE_INFO/UPGRADE, OpenAPI JSON under src/Core) do not apply to extension development.",
       "inputSchema": {
         "properties": {
           "name": {
