@@ -118,3 +118,56 @@ def test_rpc_raises_after_exhausting_retries(monkeypatch):
 
     with pytest.raises(requests.exceptions.HTTPError):
         C._rpc("tools/list", {})
+
+
+# ---------------------------------------------------------------------------
+# Endpoint construction
+# ---------------------------------------------------------------------------
+# ADMIN/STORE are built once at import from the process environment. That is
+# right for the runners — the Store token in particular must stay stable for the
+# whole run or a second endpoint means a second cart — but it left no way to
+# point at a different server, so these factories exist alongside the constants.
+
+
+def test_admin_endpoint_defaults_to_the_process_configuration():
+    assert C.admin_endpoint().url == C.ADMIN.url
+    assert C.admin_endpoint().auth_headers == C.ADMIN.auth_headers
+
+
+def test_endpoint_can_target_another_server_without_touching_the_environment():
+    ep = C.admin_endpoint(access_key="k", secret_access_key="s", base_url="http://other:9000")
+
+    assert ep.url == "http://other:9000/api/_mcp"
+    assert ep.auth_headers["sw-access-key"] == "k"
+    assert ep.auth_headers["sw-secret-access-key"] == "s"
+    # The module-level default is unchanged — no global was mutated.
+    assert C.ADMIN.url != ep.url
+
+
+def test_base_url_trailing_slash_does_not_double_up():
+    assert C.admin_endpoint(base_url="http://x:8000/").url == "http://x:8000/api/_mcp"
+
+
+def test_every_endpoint_carries_the_json_content_type():
+    for ep in (C.admin_endpoint(), C.store_endpoint()):
+        assert ep.auth_headers["Content-Type"] == "application/json"
+
+
+def test_store_endpoints_get_distinct_context_tokens():
+    """Two endpoints mean two carts; that is why the runner reuses one STORE."""
+    a, b = C.store_endpoint(), C.store_endpoint()
+
+    assert a.auth_headers["sw-context-token"] != b.auth_headers["sw-context-token"]
+
+
+def test_store_context_token_can_be_pinned():
+    ep = C.store_endpoint(context_token="fixed-token")
+
+    assert ep.auth_headers["sw-context-token"] == "fixed-token"
+
+
+def test_endpoint_by_name_returns_the_shared_defaults_not_fresh_ones():
+    """A runner that rebuilt its endpoint mid-run would lose the cart it had
+    been filling, so lookup must hand back the same object every time."""
+    assert C.endpoint_by_name("store") is C.STORE
+    assert C.endpoint_by_name("admin") is C.ADMIN

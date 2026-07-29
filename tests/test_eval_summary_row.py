@@ -4,21 +4,10 @@ The row is what eval/summary.py renders the job summary from, so its shape is a
 contract between two files that never run in the same process.
 """
 
-import importlib.util
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[1]
-
-# eval/run.py and functional/run.py are both called `run`. Load this one under a
-# distinct module name so importing it cannot shadow the functional runner in
-# sys.modules (see tests/test_eval_concurrency.py).
-_spec = importlib.util.spec_from_file_location("eval_run", ROOT / "eval" / "run.py")
-E = importlib.util.module_from_spec(_spec)
-sys.modules["eval_run"] = E
-_spec.loader.exec_module(E)
+from eval import runner as E
 
 
 def args(summary_row=None, suite_label=None, advisory=False, endpoint="admin"):
@@ -58,8 +47,18 @@ def test_row_carries_everything_the_summary_table_needs(tmp_path, capsys):
         "gate": "PASS",
         "advisory": False,
         # Errored fixtures are excluded here as they are from the rate, so the
-        # per-tier numbers stay comparable with it.
-        "by_tier": {"core": {"passed": 83, "total": 83, "failed_ids": [], "rate": 1.0}},
+        # per-tier numbers stay comparable with it. `ids` lists every graded
+        # fixture so eval/summary.py can union rather than add when the same
+        # fixture set is graded by more than one suite.
+        "by_tier": {
+            "core": {
+                "passed": 83,
+                "total": 83,
+                "ids": [f"p{i}" for i in range(83)],
+                "failed_ids": [],
+                "rate": 1.0,
+            }
+        },
     }
     # The parent dir does not exist in CI until the first run writes into it.
     assert json.loads(path.read_text()) == row
@@ -75,7 +74,13 @@ def test_row_splits_by_owning_repository(capsys):
     row = E.write_summary_row("openai", "gpt-4o", None, mixed, 0.67, False, args())
     capsys.readouterr()
 
-    assert row["by_tier"]["dev-tools"] == {"passed": 0, "total": 1, "failed_ids": ["d1"], "rate": 0.0}
+    assert row["by_tier"]["dev-tools"] == {
+        "passed": 0,
+        "total": 1,
+        "ids": ["d1"],
+        "failed_ids": ["d1"],
+        "rate": 0.0,
+    }
     assert row["by_tier"]["core"]["rate"] == 1.0
     assert list(row["by_tier"]) == ["core", "dev-tools", "merchant-tools"]
 

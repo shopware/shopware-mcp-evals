@@ -82,12 +82,20 @@ def breakdown(results: list[dict]) -> dict[str, dict]:
     Callers pass an already-filtered list (scored, non-errored) — this only
     groups, so the same exclusions that apply to the overall rate apply here
     and the numbers stay comparable.
+
+    `ids` carries every fixture this tier graded, not just the failures, because
+    the consumer that merges several runs needs it. `eval/summary.py` sums these
+    buckets across the admin primary, the second validator and the Store suite;
+    with counts alone it could only add `total`, which double-counts the two
+    admin runs over one fixture set and reports dev-tools out of 42 when there
+    are 21 dev-tools fixtures. The id lists let it union instead of add.
     """
     out: dict[str, dict] = {}
     for r in results or []:
         tier = tier_of(r.get("expected_tool", ""))
-        bucket = out.setdefault(tier, {"passed": 0, "total": 0, "failed_ids": []})
+        bucket = out.setdefault(tier, {"passed": 0, "total": 0, "ids": [], "failed_ids": []})
         bucket["total"] += 1
+        bucket["ids"].append(r.get("id"))
         if r.get("passed"):
             bucket["passed"] += 1
         else:

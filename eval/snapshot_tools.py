@@ -15,7 +15,7 @@ surfaces default-surface changes, toolset membership changes, and
 description/schema churn directly.
 
 Usage:
-    python eval/snapshot_tools.py --output tool-history/latest.json
+    python -m eval.snapshot_tools --output tool-history/latest.json
 """
 
 import argparse
@@ -23,10 +23,7 @@ import json
 import sys
 from pathlib import Path
 
-# mcp_client lives at the repo root (shared by the eval and functional layers).
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from mcp_client import (  # noqa: E402
+from mcp_client import (
     BASE,
     SW_ACCESS_KEY,
     SW_BASE_URL,

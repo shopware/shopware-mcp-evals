@@ -11,7 +11,7 @@ brief for coding agents.
 ## Conventions
 
 - **No shell scripts for test logic.** Both layers are Python; the functional
-  runner (`functional/run.py`) reuses `mcp_client.py`. Don't add `.sh` runners —
+  runner (`functional/runner.py`) reuses `mcp_client.py`. Don't add `.sh` runners —
   extend the Python runner or add a helper module. The only shell that belongs
   here is small CI glue under `functional/ci/*.sh`, which is shellcheck-linted.
 - **Add unit tests for new logic.** New functional / eval / client behavior gets
@@ -33,7 +33,7 @@ brief for coding agents.
   skip it with `run_store=false`. If `agentic-commerce` fails to resolve against
   the pinned Shopware ref, the store steps skip with a warning rather than
   taking down the admin evals.
-- **One job summary, rendered once.** Each `eval/run.py` invocation writes a
+- **One job summary, rendered once.** Each `eval/runner.py` invocation writes a
   JSON verdict row (`--summary-row`, `--suite-label`, `--advisory`) and the
   final `eval/summary.py` step renders every row, plus the cross-model
   comparison, into `GITHUB_STEP_SUMMARY`. Don't append markdown to the step
@@ -72,6 +72,7 @@ brief for coding agents.
 ```bash
 cp .env.example .env   # fill in credentials
 pip install -r eval/requirements.txt
+pip install -e . --no-deps   # makes `from mcp_client import ...` resolve anywhere
 # or use the included venv: source .venv/bin/activate
 ```
 
@@ -79,27 +80,27 @@ pip install -r eval/requirements.txt
 
 ```bash
 # Layer 1 — functional: v2 discovery mechanics + per-tool dryRun-safe calls
-python functional/run.py
-python functional/run.py --skip-media-upload
-python functional/run.py --skip-dev-tools
+python -m functional.runner
+python -m functional.runner --skip-media-upload
+python -m functional.runner --skip-dev-tools
 
 # Layer 2 — LLM eval. Each fixture runs in baseline mode (full catalogue,
 # single shot) and discovery mode (default surface + agentic meta-tool loop).
-.venv/bin/python3 eval/run.py                          # both modes, Anthropic
-.venv/bin/python3 eval/run.py --provider openai        # OpenAI
-.venv/bin/python3 eval/run.py --provider github        # GitHub Models (free, needs GITHUB_TOKEN)
-.venv/bin/python3 eval/run.py --modes discovery --max-steps 8
-.venv/bin/python3 eval/run.py --category disambiguation
-.venv/bin/python3 eval/run.py --id disambig_count_vs_search
-.venv/bin/python3 eval/run.py --no-system-prompt       # ad-hoc, skip system prompt
-.venv/bin/python3 eval/run.py --output results/x.json  # custom report path
+.venv/bin/python3 -m eval.runner                          # both modes, Anthropic
+.venv/bin/python3 -m eval.runner --provider openai        # OpenAI
+.venv/bin/python3 -m eval.runner --provider github        # GitHub Models (free, needs GITHUB_TOKEN)
+.venv/bin/python3 -m eval.runner --modes discovery --max-steps 8
+.venv/bin/python3 -m eval.runner --category disambiguation
+.venv/bin/python3 -m eval.runner --id disambig_count_vs_search
+.venv/bin/python3 -m eval.runner --no-system-prompt       # ad-hoc, skip system prompt
+.venv/bin/python3 -m eval.runner --output results/x.json  # custom report path
 
 # Snapshot the full catalogue for drift detection
 .venv/bin/python3 eval/snapshot_tools.py --output tool-history/latest.json
 
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
-python functional/run.py --endpoint store
-.venv/bin/python3 eval/run.py --endpoint store --modes discovery
+python -m functional.runner --endpoint store
+.venv/bin/python3 -m eval.runner --endpoint store --modes discovery
 
 # Unit tests (offline, no server) — reporting, runner logic, throttle retry
 .venv/bin/python3 -m pytest tests -q
@@ -129,11 +130,11 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | File | Purpose |
 |---|---|
 | `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
-| `functional/run.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
+| `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness + JSON report writer |
 | `eval/fixtures_store.yaml` | Store API / UCP buyer-journey fixtures |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
-| `eval/run.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |
+| `eval/runner.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |
@@ -168,7 +169,7 @@ When an LLM eval fixture fails:
 2. Edit the `#[McpTool(description: '...')]`, `#[McpToolGroup('...')]`, or
    `meta: ['deferred' => ...]` PHP attribute in the Shopware repo.
 3. Restart the Shopware server.
-4. Re-run `eval/run.py --id <fixture-id>` to verify improvement.
+4. Re-run `eval/runner.py --id <fixture-id>` to verify improvement.
 
 ## Adding fixtures
 

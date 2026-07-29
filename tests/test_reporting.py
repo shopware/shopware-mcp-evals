@@ -2,7 +2,7 @@
 
 import json
 
-from reporting import Reporter
+from functional.reporting import Reporter
 
 
 def test_counts_and_exit_code():

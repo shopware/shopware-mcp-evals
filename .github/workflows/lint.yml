@@ -30,16 +30,24 @@ jobs:
       # Unpinned, every ruff release landed in CI unreviewed, so a new lint rule
       # could fail this gate without anyone touching the repo.
       - name: Install dev dependencies
-        run: pip install -r requirements-dev.txt
+        run: |
+          pip install -r requirements-dev.txt
+          # Editable install so `python -m eval.runner` and the tests can
+          # import mcp_client/ownership without a sys.path prelude.
+          # --no-deps: the requirements file above is the single source of
+          # truth for versions; pyproject.toml declares none.
+          pip install -e . --no-deps
 
       - name: Ruff (lint)
-        run: ruff check eval functional mcp_client.py tests
+        run: ruff check .
 
       - name: Ruff (format check)
-        run: ruff format --check eval functional mcp_client.py tests
+        run: ruff format --check .
 
       - name: Pytest (unit tests)
-        run: pytest tests -q
+        # --cov reports where the gaps are; no threshold is enforced, so a
+        # coverage dip is information rather than a red build.
+        run: pytest tests -q --cov
 
       - name: ShellCheck (shell lint)
         run: |

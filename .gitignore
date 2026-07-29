@@ -6,13 +6,18 @@
 pyrightconfig.json
 .basedpyright/
 results/*.json
-# Per-run job-summary rows (eval/run.py --summary-row); `results/*.json` above
+# Per-run job-summary rows (eval/runner.py --summary-row); `results/*.json` above
 # only covers the top level.
 results/rows/
 __pycache__/
 *.pyc
 .venv/
 .ruff_cache/
+.pytest_cache/
+# Build/coverage artifacts from `pip install -e .` and `pytest --cov`.
+*.egg-info/
+.coverage
+.coverage.*
 
 # tool-history is tracked deliberately (audit trail of MCP descriptions)
 !tool-history/

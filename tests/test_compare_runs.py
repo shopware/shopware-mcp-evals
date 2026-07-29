@@ -1,18 +1,11 @@
 """Unit tests for the cross-model report comparison."""
 
-import importlib.util
 import json
 import sys
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-
-_spec = importlib.util.spec_from_file_location("eval_compare_runs", ROOT / "eval" / "compare_runs.py")
-C = importlib.util.module_from_spec(_spec)
-sys.modules["eval_compare_runs"] = C
-_spec.loader.exec_module(C)
+from eval import compare_runs as C
 
 
 def report(model, results, errors=()):
@@ -188,16 +181,56 @@ def test_both_fail_detail_records_what_each_model_picked():
 
     detail = C.compare(a, b)["both_fail_detail"]
 
-    assert detail == [
-        {
-            "id": "f1",
-            "expected_tool": "wanted",
-            "primary_selected": "sibling",
-            "second_selected": None,
-            "primary_reason": "wrong_tool",
-            "second_reason": "no_tool_call",
-        }
-    ]
+    expected = {
+        "id": "f1",
+        "expected_tool": "wanted",
+        "primary_selected": "sibling",
+        "second_selected": None,
+        "primary_reason": "wrong_tool",
+        "second_reason": "no_tool_call",
+    }
+
+    assert len(detail) == 1
+    # Subset, not equality: the record also carries the prompt, descriptions and
+    # trail, which the detail-block tests below cover.
+    assert {k: detail[0].get(k) for k in expected} == expected
+
+
+def test_both_fail_detail_carries_the_material_needed_to_rewrite_the_description():
+    """The confusion pair names which two descriptions overlap; it does not show
+    them. Fetching them by hand from the run artifact is the step that stopped
+    anyone acting on these rows, so the prompt, both descriptions and the
+    discovery trail travel with the finding."""
+    a = report("strong", [("f1", False, "wanted", False)])
+    b = report("weak", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {
+        "selected_tool": "sibling",
+        "fail_reason": "wrong_tool",
+        "prompt": "Read me the entity-definition skill.",
+        "expected_toolset": "dev-skills",
+        "meta_calls": [
+            {"tool": "shopware-toolsets-list", "input": {}},
+            {"tool": "shopware-toolset-enable", "input": {"toolset": "dev-skills"}},
+        ],
+    }
+    b["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+
+    d = C.compare(a, b, {"wanted": "Reads one skill body.", "sibling": "Lists the skills."})["both_fail_detail"][0]
+
+    assert d["prompt"] == "Read me the entity-definition skill."
+    assert d["expected_toolset"] == "dev-skills"
+    assert d["descriptions"] == {"wanted": "Reads one skill body.", "sibling": "Lists the skills."}
+    assert d["primary_trail"] == "shopware-toolsets-list → shopware-toolset-enable(dev-skills)"
+    # No meta calls on the second run: it never tried to discover anything, which
+    # is a different failure from picking the wrong tool after discovering well.
+    assert d["second_trail"] == "went straight to a tool — no discovery calls"
+
+
+def test_detail_omits_descriptions_when_no_catalogue_is_available():
+    """The snapshot is optional — a comparison run without it still renders."""
+    a = report("strong", [("f1", False, "wanted", False)])
+
+    assert C.compare(a, a)["both_fail_detail"][0]["descriptions"] == {}
 
 
 def test_both_fail_detail_degrades_when_fields_are_absent():
@@ -222,6 +255,60 @@ def test_actionable_table_shows_both_picks_and_hides_wrong_tool():
     assert "`sibling_b`" in out
     # Redundant with the two picked columns, so it is not printed.
     assert "wrong_tool" not in out
+
+
+def test_detail_block_renders_the_prompt_both_descriptions_and_the_trail():
+    """The table names the confusion pair; this block is what you rewrite
+    against, so it must carry the prompt and both descriptions in full."""
+    a = report("strong", [("f1", False, "wanted", False)])
+    b = report("weak", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {
+        "selected_tool": "sibling",
+        "fail_reason": "wrong_tool",
+        "prompt": "Read me the entity-definition skill.",
+        "category": "unambiguous",
+        "meta_calls": [{"tool": "shopware-toolset-enable", "input": {"toolset": "dev-skills"}}],
+    }
+    b["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+    catalogue = {"wanted": "Reads one skill body by name.", "sibling": "Lists every available skill."}
+
+    out = C.render_detail(C.compare(a, b, catalogue), "strong", "weak")
+
+    assert "Read me the entity-definition skill." in out
+    assert "Reads one skill body by name." in out
+    assert "Lists every available skill." in out
+    assert "(expected)" in out and "(picked instead)" in out
+    assert "shopware-toolset-enable(dev-skills)" in out
+    # Collapsed, so a handful of full descriptions cannot bury the tables above.
+    assert out.startswith("<details>") and "</details>" in out
+
+
+def test_detail_block_does_not_repeat_a_description_both_models_picked():
+    """Both models usually reach for the same wrong tool; printing its
+    description twice doubles the block for no gain."""
+    a = report("strong", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+
+    out = C.render_detail(C.compare(a, a, {"wanted": "W.", "sibling": "Overlapping text."}))
+
+    assert out.count("Overlapping text.") == 1
+
+
+def test_detail_block_is_empty_when_nothing_both_failed():
+    a = report("strong", [("f1", True, "wanted", False)])
+
+    assert C.render_detail(C.compare(a, a)) == ""
+
+
+def test_detail_block_says_so_when_a_description_is_missing_from_the_snapshot():
+    """A tool added since the snapshot, or a snapshot that never got written —
+    better to name the gap than to render a blank quote."""
+    a = report("strong", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+
+    out = C.render_detail(C.compare(a, a, {}))
+
+    assert "description not in the catalogue snapshot" in out
 
 
 def test_actionable_table_keeps_reasons_the_columns_cannot_show():

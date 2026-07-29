@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render the GitHub Actions job summary for a whole eval run.
 
-The workflow runs `eval/run.py` three times — admin primary, admin second
+The workflow runs `eval/runner.py` three times — admin primary, admin second
 validator, Store/UCP advisory — in three separate processes, with the
 cross-model comparison step in between. Each one used to append its own
 markdown table to GITHUB_STEP_SUMMARY, which produced:
@@ -19,25 +19,23 @@ this module renders everything once, at the end of the job. Ordering comes
 from the row filenames, which the workflow numbers.
 
 Usage:
-    python eval/summary.py --rows results/rows --comparison results/eval-comparison.json
+    python -m eval.summary --rows results/rows --comparison results/eval-comparison.json
 """
 
 import argparse
+import collections
 import json
 import os
 import sys
 from pathlib import Path
 
-# ownership.py is at the repo root; compare_runs.py is the sibling. The root
-# goes first, but eval/ is *appended* rather than inserted: eval/run.py and
-# functional/run.py are both called `run`, and putting eval/ ahead of
-# functional/ makes `import run` resolve to the wrong one.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-sys.path.append(str(Path(__file__).resolve().parent))
+from eval.compare_runs import render_actionable, render_detail, render_split, render_unmatched
+from ownership import TIER_ORDER
 
-from compare_runs import render_actionable, render_split, render_unmatched  # noqa: E402
-
-from ownership import TIER_ORDER  # noqa: E402
+# Prefix for synthetic fixture ids, used only when a summary row predates the
+# `ids` field. Chosen because a real fixture id is a YAML identifier and can
+# never start with it, so `startswith` is a safe test for "not a real fixture".
+ANON = "?"
 
 
 def load_rows(rows_dir: Path) -> list[dict]:
@@ -92,19 +90,39 @@ def render_tiers(rows: list[dict]) -> str:
     worth the same: core ships to every merchant, the plugins are optional.
     This is the table that says which one moved.
     """
-    merged: dict[str, dict] = {}
-    for r in rows:
+    # Counted per fixture, not per fixture-and-run. The admin primary and the
+    # second validator grade the same 90 admin fixtures, so summing `total`
+    # across rows doubled every admin denominator — dev-tools read 36/42 for 21
+    # fixtures — and a fixture both models missed was listed twice in the
+    # failing cell. Worse, that weighting is backwards: a both-model failure
+    # counted twice against the rate while a single-model one counted once,
+    # inflating exactly the capability-gap misses the cross-model table exists
+    # to discount.
+    graded: dict[str, collections.Counter] = {}
+    failed: dict[str, collections.Counter] = {}
+    advisory: dict[str, bool] = {}
+    for index, r in enumerate(rows):
         for tier, b in (r.get("by_tier") or {}).items():
-            m = merged.setdefault(tier, {"passed": 0, "total": 0, "failed_ids": [], "advisory": True})
-            m["passed"] += b.get("passed", 0)
-            m["total"] += b.get("total", 0)
-            m["failed_ids"] += b.get("failed_ids") or []
+            ids = b.get("ids")
+            fails = b.get("failed_ids") or []
+            if ids is None:
+                # A row written before `ids` existed, so nothing can dedupe: fall
+                # back to the old summed behaviour by giving every slot a
+                # row-unique placeholder. `passed`/`total` drive the split rather
+                # than `failed_ids`, which older rows could under-populate — using
+                # the id list alone would report such a row as entirely clean.
+                total, fails = b.get("total", 0), list(fails)
+                anonymous = max(0, (total - b.get("passed", 0)) - len(fails))
+                fails += [f"{ANON}fail·{tier}#{index}#{n}" for n in range(anonymous)]
+                ids = fails + [f"{ANON}pass·{tier}#{index}#{n}" for n in range(max(0, total - len(fails)))]
+            graded.setdefault(tier, collections.Counter()).update(ids)
+            failed.setdefault(tier, collections.Counter()).update(fails)
             # Advisory only if every suite that contributed to this tier was.
-            m["advisory"] = m["advisory"] and bool(r.get("advisory"))
-    if not merged:
+            advisory[tier] = advisory.get(tier, True) and bool(r.get("advisory"))
+    if not graded:
         return ""
 
-    ordered = [t for t in TIER_ORDER if t in merged] + [t for t in merged if t not in TIER_ORDER]
+    ordered = [t for t in TIER_ORDER if t in graded] + [t for t in graded if t not in TIER_ORDER]
     lines = [
         "### By owner",
         "",
@@ -112,15 +130,33 @@ def render_tiers(rows: list[dict]) -> str:
         "are optional. Core is held to its own denominator so a regression there",
         "cannot be averaged away by clean plugin numbers.",
         "",
-        "| Owner | Passed | Rate | Enforcement | Failing fixtures |",
-        "|---|---|---:|---|---|",
+        "Counted per fixture across every suite, so a fixture graded by both admin",
+        "runs counts once rather than twice. **Clean** is fixtures that passed on every",
+        "model that graded them, which is why this rate is stricter than the per-suite",
+        "rates above — one model missing once is enough to leave a fixture out of it.",
+        "",
+        "**Bold** in the last column marks a fixture that failed on *every* model,",
+        "matching the both-fail row of the cross-model table below. That is the",
+        "actionable set. Plain means some models passed it, which is usually the weaker",
+        "model's capability gap rather than a description bug.",
+        "",
+        "| Owner | Clean | Rate | Failed on all models | Enforcement | Failing fixtures |",
+        "|---|---:|---:|---:|---|---|",
     ]
     for tier in ordered:
-        m = merged[tier]
-        pct = round(100 * m["passed"] / m["total"]) if m["total"] else 0
+        runs_by_id, fails_by_id = graded[tier], failed[tier]
+        total = len(runs_by_id)
+        # A fixture counts as failing the owner if any run missed it; the
+        # all-models subset is the one worth acting on. Placeholders stand in for
+        # unnamed failures on a legacy row, so they count but cannot be claimed
+        # to have failed everywhere — that needs an id to correlate on.
+        failing_ids = sorted(fails_by_id)
+        consistent = {i for i in failing_ids if not i.startswith(ANON) and fails_by_id[i] >= runs_by_id.get(i, 0) > 0}
+        passed = total - len(failing_ids)
+        pct = round(100 * passed / total) if total else 0
         lines.append(
-            f"| {tier} | {m['passed']}/{m['total']} | {pct}% | {_enforcement(tier, m['advisory'])} | "
-            f"{_failing(m['failed_ids'])} |"
+            f"| {tier} | {passed}/{total} | {pct}% | {len(consistent) or '—'} | "
+            f"{_enforcement(tier, advisory[tier])} | {_failing(failing_ids, consistent)} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -140,11 +176,31 @@ def _enforcement(tier: str, advisory: bool) -> str:
     return "suite rate"
 
 
-def _failing(ids: list) -> str:
-    if not ids:
-        return "—"
-    shown = ", ".join(f"`{i}`" for i in ids[:6])
-    return shown + (f" (+{len(ids) - 6} more)" if len(ids) > 6 else "")
+def _failing(ids: list, consistent: set | None = None) -> str:
+    """Failing fixture ids, the all-models ones bolded.
+
+    Truncation puts the bolded ids first: with a cap of six, an owner with eight
+    failures could otherwise hide its only actionable one behind five
+    capability-gap misses.
+
+    Placeholder ids from a legacy row have no fixture name to print, so they are
+    reported as a count rather than rendered — printing `?fail·core#0#2` would
+    read as a fixture that does not exist.
+    """
+    named = sorted(i for i in ids if not i.startswith(ANON))
+    anonymous = len(ids) - len(named)
+    if not named:
+        return f"{anonymous} unnamed (older run)" if anonymous else "—"
+
+    consistent = consistent or set()
+    ordered = sorted(named, key=lambda i: (i not in consistent, i))
+    shown = ", ".join(f"**`{i}`**" if i in consistent else f"`{i}`" for i in ordered[:6])
+    extra = []
+    if len(ordered) > 6:
+        extra.append(f"+{len(ordered) - 6} more")
+    if anonymous:
+        extra.append(f"+{anonymous} unnamed")
+    return shown + (f" ({', '.join(extra)})" if extra else "")
 
 
 def render_comparison(cmp_: dict | None) -> str:
@@ -174,6 +230,7 @@ def render_comparison(cmp_: dict | None) -> str:
             "",
             render_split(cmp_),
             render_actionable(cmp_, primary, second),
+            render_detail(cmp_, primary, second),
             render_unmatched(cmp_),
         ]
     )

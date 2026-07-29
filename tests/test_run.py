@@ -4,8 +4,8 @@ admin/store flows driven through a stateful fake MCP server."""
 import json
 from types import SimpleNamespace
 
-import run as R
-from reporting import Reporter
+from functional import runner as R
+from functional.reporting import Reporter
 
 ADMIN = R.endpoint_by_name("admin")
 STORE = R.endpoint_by_name("store")

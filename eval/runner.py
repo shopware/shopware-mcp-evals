@@ -20,11 +20,11 @@ to find the right tool, which discovery path does it take, and what does
 discovery cost in tokens and steps?
 
 Usage:
-    python eval/run.py                                  # both modes, Anthropic
-    python eval/run.py --provider openai --model gpt-5.4-mini
-    python eval/run.py --modes discovery --max-steps 8
-    python eval/run.py --category disambiguation
-    python eval/run.py --id disambig_count_vs_search
+    python -m eval.runner                                  # both modes, Anthropic
+    python -m eval.runner --provider openai --model gpt-5.4-mini
+    python -m eval.runner --modes discovery --max-steps 8
+    python -m eval.runner --category disambiguation
+    python -m eval.runner --id disambig_count_vs_search
 """
 
 import argparse
@@ -38,13 +38,27 @@ from pathlib import Path
 
 import yaml
 
-# mcp_client and ownership live at the repo root (shared by the eval and
-# functional layers). Do NOT add eval/ to sys.path here: eval/run.py and
-# functional/run.py are both called `run`, and putting eval/ first makes
-# `import run` resolve to the wrong one (it has broken tests/test_run.py twice).
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from mcp_client import (  # noqa: E402
+from eval.report import (
+    BOLD,
+    DIM,
+    RED,
+    RESET,
+    _render,
+    print_comparison,
+    print_discovery_block,
+    print_single_mode,
+    print_tier_block,
+)
+from eval.scoring import (
+    count_rate_limited,
+    discovery_summary,
+    executed,
+    gate_verdict,
+    is_correct,
+    scored,
+    total_tokens,
+)
+from mcp_client import (
     ADMIN,
     BASE,
     META_TOOLS,
@@ -61,7 +75,7 @@ from mcp_client import (  # noqa: E402
     mcp_result_text,
     mcp_tools_list_all,
 )
-from ownership import CORE, OPTIONAL, breakdown, core_rate, owner_of  # noqa: E402
+from ownership import CORE, breakdown, owner_of
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -188,14 +202,6 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
 # ---------------------------------------------------------------------------
 # Baseline mode — single shot against the full catalogue (v1 behaviour)
 # ---------------------------------------------------------------------------
-
-
-def is_correct(selected_tool: str | None, fixture: dict) -> bool:
-    """A selection is correct if it is the expected tool or any tool listed in
-    the fixture's optional `acceptable_tools` (for genuinely multi-valid prompts)."""
-    if selected_tool is None:
-        return False
-    return selected_tool == fixture["expected_tool"] or selected_tool in fixture.get("acceptable_tools", [])
 
 
 def run_fixture_baseline(
@@ -416,294 +422,6 @@ def run_fixture_discovery(
 # Reporting
 # ---------------------------------------------------------------------------
 
-RESET = "\033[0m"
-RED = "\033[0;31m"
-GREEN = "\033[0;32m"
-YELLOW = "\033[1;33m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-CYAN = "\033[0;36m"
-
-
-def pct_color(pct: int) -> str:
-    return GREEN if pct >= 80 else (YELLOW if pct >= 50 else RED)
-
-
-def scored(results: list[dict]) -> list[dict]:
-    """Results that count toward pass/fail — skipped fixtures are excluded."""
-    return [r for r in results if not r.get("skipped")]
-
-
-def executed(results: list[dict]) -> list[dict]:
-    """Scored results that actually reached the model.
-
-    A transport error — the server answering 500, or throttling with 429 — is
-    missing data, not a wrong answer, so it must not be averaged in as a
-    failure. One local run read as 53% when 18 of its 21 "failures" were the
-    server erroring; the rate over fixtures that ran was 89%. Errors are held
-    against the run separately, via the error budget in the gate.
-    """
-    return [r for r in scored(results) if not r.get("error")]
-
-
-def score(results: list[dict]) -> dict:
-    """Return per-tool and per-category pass counts (skipped fixtures excluded)."""
-    tools: dict[str, dict] = {}
-    cats: dict[str, dict] = {}
-    for r in scored(results):
-        t = r["expected_tool"]
-        c = r["category"]
-        tools.setdefault(t, {"pass": 0, "total": 0})
-        cats.setdefault(c, {"pass": 0, "total": 0})
-        tools[t]["total"] += 1
-        cats[c]["total"] += 1
-        if r["passed"]:
-            tools[t]["pass"] += 1
-            cats[c]["pass"] += 1
-    return {"tools": tools, "cats": cats}
-
-
-def total_tokens(results: list[dict]) -> dict:
-    agg = {"input": 0, "output": 0}
-    for r in results:
-        t = r.get("tokens") or {}
-        agg["input"] += t.get("input", 0)
-        agg["output"] += t.get("output", 0)
-    return agg
-
-
-def print_comparison(baseline: list[dict], discovery: list[dict]):
-    s_base = score(baseline)
-    s_disc = score(discovery)
-
-    total = len(scored(baseline))
-    p_base = sum(1 for r in scored(baseline) if r["passed"])
-    p_disc = sum(1 for r in scored(discovery) if r["passed"])
-    skipped = sum(1 for r in discovery if r.get("skipped"))
-
-    print(f"\n{BOLD}{'=' * 78}{RESET}")
-    print(f"{BOLD}Comparison: baseline (full catalogue)  vs  discovery (default surface){RESET}")
-    print(f"{'=' * 78}")
-    skip_note = f"  ({skipped} skipped — tool not on this instance)" if skipped else ""
-    print(
-        f"  Overall: {GREEN}{p_base}/{total}{RESET} baseline  →  {GREEN}{p_disc}/{total}{RESET} discovery  "
-        f"(Δ {_delta(p_base, p_disc, total)}){DIM}{skip_note}{RESET}"
-    )
-
-    # By category
-    all_cats = sorted(set(s_base["cats"]) | set(s_disc["cats"]))
-    print(f"\n{BOLD}By category:{RESET}")
-    print(f"  {'Category':<22} {'Baseline':>12}  {'Discovery':>12}  {'Effect'}")
-    print(f"  {'-' * 22} {'-' * 12}  {'-' * 12}  {'-' * 20}")
-    for cat in all_cats:
-        cb = s_base["cats"].get(cat, {"pass": 0, "total": 0})
-        cd = s_disc["cats"].get(cat, {"pass": 0, "total": 0})
-        pct_b = round(100 * cb["pass"] / cb["total"]) if cb["total"] else 0
-        pct_d = round(100 * cd["pass"] / cd["total"]) if cd["total"] else 0
-        print(
-            f"  {cat:<22} {pct_color(pct_b)}{cb['pass']}/{cb['total']} ({pct_b}%){RESET:>4}  "
-            f"{pct_color(pct_d)}{cd['pass']}/{cd['total']} ({pct_d}%){RESET:>4}  "
-            f"{_arrow(pct_b, pct_d)}"
-        )
-
-    # Per tool
-    all_tools = sorted(set(s_base["tools"]) | set(s_disc["tools"]))
-    print(f"\n{BOLD}Per-tool accuracy:{RESET}")
-    print(f"  {'Tool':<42} {'Baseline':>10}  {'Discovery':>10}  {'Effect'}")
-    print(f"  {'-' * 42} {'-' * 10}  {'-' * 10}  {'-' * 20}")
-    for tool in all_tools:
-        tb = s_base["tools"].get(tool, {"pass": 0, "total": 0})
-        td = s_disc["tools"].get(tool, {"pass": 0, "total": 0})
-        pct_b = round(100 * tb["pass"] / tb["total"]) if tb["total"] else 0
-        pct_d = round(100 * td["pass"] / td["total"]) if td["total"] else 0
-        flag = f"  {RED}⚠{RESET}" if pct_d < 80 else ""
-        print(
-            f"  {tool:<42} {pct_color(pct_b)}{tb['pass']}/{tb['total']} ({pct_b}%){RESET:>4}  "
-            f"{pct_color(pct_d)}{td['pass']}/{td['total']} ({pct_d}%){RESET:>4}  "
-            f"{_arrow(pct_b, pct_d)}{flag}"
-        )
-
-
-def gate_verdict(results, min_pass_rate, min_core_pass_rate, max_error_rate) -> dict:
-    """Decide whether a run passes, and on which of the three independent axes.
-
-    Kept pure and separate from main() so the policy is testable without a
-    server. The three failure modes are deliberately not folded together:
-
-    * quality  — the overall rate fell below threshold;
-    * core     — core specifically fell below threshold, on its own denominator;
-    * validity — too many fixtures never reached the model, so the run is
-                 missing data rather than reporting a bad model. Folding errors
-                 into the rate is how an 89% run once got read as 53%.
-
-    Core needs its own axis because the aggregate spans four repositories: with
-    90 admin fixtures and a single 90% gate, nine core misses still read PASS as
-    long as merchant-tools and dev-tools are clean — backwards, since the plugin
-    numbers are the ones we can afford to lose.
-
-    `min_core_pass_rate=None` means "same bar as the overall rate". That is a
-    deliberate default: the win here is core getting its own denominator, and
-    raising the bar is a decision to make once the per-tier rates have been
-    observed, not an aspiration invented up front.
-    """
-    graded = scored(results)
-    gating = executed(results)
-    errored = len(graded) - len(gating)
-    error_rate = errored / len(graded) if graded else 0.0
-
-    passed = sum(1 for r in gating if r["passed"])
-    rate = passed / len(gating) if gating else 1.0
-
-    core_passed, core_total, core_pct = core_rate(gating)
-    min_core = min_core_pass_rate if min_core_pass_rate is not None else min_pass_rate
-
-    quality_ok = rate >= min_pass_rate
-    core_ok = core_pct >= min_core
-    run_valid = error_rate <= max_error_rate
-    return {
-        "graded": graded,
-        "gating": gating,
-        "errored": errored,
-        "error_rate": error_rate,
-        "passed": passed,
-        "rate": rate,
-        "core_passed": core_passed,
-        "core_total": core_total,
-        "core_rate": core_pct,
-        "min_core": min_core,
-        "quality_ok": quality_ok,
-        "core_ok": core_ok,
-        "run_valid": run_valid,
-        "ok": quality_ok and core_ok and run_valid,
-    }
-
-
-def print_tier_block(gating: list[dict]) -> None:
-    """Per-owning-repo rates, so a bad number points at a repository.
-
-    'admin at 92%' does not say whether the misses were in core, in the
-    dev-tools bundle, or in an optional plugin — and those are not the same
-    finding.
-    """
-    tiers = breakdown(gating)
-    if len(tiers) < 2:
-        return
-    print(f"\n{BOLD}By owner:{RESET}")
-    for tier, b in tiers.items():
-        pct = round(100 * b["rate"])
-        note = f"  {DIM}(optional plugin){RESET}" if tier in OPTIONAL else ""
-        print(f"  {tier:<20} {pct_color(pct)}{b['passed']}/{b['total']} ({pct}%){RESET}{note}")
-
-
-def discovery_summary(discovery: list[dict]) -> dict:
-    graded = scored(discovery)
-    n = len(graded)
-    passed = sum(1 for r in graded if r["passed"])
-    steps = [r["steps"] for r in graded]
-    paths: dict[str, int] = {}
-    for r in graded:
-        paths[r["discovery_path"]] = paths.get(r["discovery_path"], 0) + 1
-    search_used = [r for r in graded if r["search_hit"] is not None]
-    search_hits = sum(1 for r in search_used if r["search_hit"])
-    toolset_graded = [r for r in graded if r["enabled_correct_toolset"] is not None]
-    toolset_correct = sum(1 for r in toolset_graded if r["enabled_correct_toolset"])
-    return {
-        "fixtures": n,
-        "skipped": sum(1 for r in discovery if r.get("skipped")),
-        "passed": passed,
-        "avg_steps": round(sum(steps) / n, 2) if n else 0,
-        "max_steps_hit": sum(1 for r in graded if r.get("fail_reason") == "step_cap"),
-        "path_distribution": paths,
-        "search_used": len(search_used),
-        "search_hit_rate": round(search_hits / len(search_used), 2) if search_used else None,
-        "toolset_enable_graded": len(toolset_graded),
-        "toolset_enable_correct": toolset_correct,
-        "tokens": total_tokens(graded),
-    }
-
-
-def print_discovery_block(discovery: list[dict], baseline: list[dict] | None):
-    s = discovery_summary(discovery)
-    print(f"\n{BOLD}Discovery behaviour:{RESET}")
-    print(f"  Avg steps to tool selection: {s['avg_steps']}  (step-cap hit: {s['max_steps_hit']}/{s['fixtures']})")
-    dist = "  ".join(f"{k}={v}" for k, v in sorted(s["path_distribution"].items()))
-    print(f"  Discovery path: {dist}")
-    if s["search_hit_rate"] is not None:
-        print(
-            f"  tool-search used in {s['search_used']} fixtures; "
-            f"expected tool in results: {round(s['search_hit_rate'] * 100)}%"
-        )
-    if s["toolset_enable_graded"]:
-        print(
-            f"  toolset-enable graded in {s['toolset_enable_graded']} fixtures; "
-            f"correct toolset: {s['toolset_enable_correct']}/{s['toolset_enable_graded']}"
-        )
-    d_tok = s["tokens"]
-    print(f"  Tokens (discovery): {d_tok['input']:,} in / {d_tok['output']:,} out")
-    if baseline:
-        b_tok = total_tokens(baseline)
-        print(f"  Tokens (baseline):  {b_tok['input']:,} in / {b_tok['output']:,} out")
-        if b_tok["input"]:
-            ratio = round(d_tok["input"] / b_tok["input"], 2)
-            print(f"  Input-token ratio discovery/baseline: {ratio}x")
-
-    skipped = [r for r in discovery if r.get("skipped")]
-    if skipped:
-        names = ", ".join(r["id"] for r in skipped)
-        print(f"  {DIM}Skipped (expected tool not registered on this instance): {names}{RESET}")
-
-    failed = [r for r in scored(discovery) if not r["passed"]]
-    if failed:
-        print(f"\n{BOLD}{RED}Failing in discovery mode:{RESET}")
-        for r in failed:
-            print(f"\n  [{r['id']}] {r['category']}  ({r.get('fail_reason')})")
-            print(f"  {DIM}Prompt:{RESET}   {r['prompt'][:80]}")
-            print(f"  {DIM}Expected:{RESET} {GREEN}{r['expected_tool']}{RESET}")
-            print(f"  {DIM}Got:{RESET}      {RED}{r['selected_tool']}{RESET}")
-            if r["meta_calls"]:
-                trail = " → ".join(
-                    f"{m['tool']}({json.dumps(m['input'], ensure_ascii=False)[:40]})" for m in r["meta_calls"]
-                )
-                print(f"  {DIM}Trail:{RESET}    {trail}")
-            if r.get("notes"):
-                print(f"  {DIM}Notes:{RESET}    {r['notes'][:120]}")
-    print(f"\n{'=' * 78}\n")
-
-
-def print_single_mode(results: list[dict], mode: str):
-    s = score(results)
-    total = len(scored(results))
-    passed = sum(1 for r in scored(results) if r["passed"])
-    skipped = sum(1 for r in results if r.get("skipped"))
-    print(f"\n{BOLD}{'=' * 78}{RESET}")
-    print(f"{BOLD}Results: {mode} mode{RESET}")
-    print(f"{'=' * 78}")
-    pct = round(100 * passed / total) if total else 0
-    skip_note = f"  ({skipped} skipped — tool not on this instance)" if skipped else ""
-    print(f"  Overall: {pct_color(pct)}{passed}/{total} ({pct}%){RESET}{DIM}{skip_note}{RESET}")
-    print(f"\n{BOLD}By category:{RESET}")
-    for cat, c in sorted(s["cats"].items()):
-        pct = round(100 * c["pass"] / c["total"]) if c["total"] else 0
-        print(f"  {cat:<22} {pct_color(pct)}{c['pass']}/{c['total']} ({pct}%){RESET}")
-
-
-def _delta(before: int, after: int, total: int) -> str:
-    diff = after - before
-    if diff > 0:
-        return f"{GREEN}+{diff}{RESET}"
-    if diff < 0:
-        return f"{RED}{diff}{RESET}"
-    return f"{DIM}0{RESET}"
-
-
-def _arrow(pct_before: int, pct_after: int) -> str:
-    diff = pct_after - pct_before
-    if diff > 0:
-        return f"{GREEN}↑ +{diff}pp{RESET}"
-    if diff < 0:
-        return f"{RED}↓ {diff}pp{RESET}"
-    return f"{DIM}={RESET}"
-
 
 # ---------------------------------------------------------------------------
 # Main
@@ -728,23 +446,6 @@ PROVIDER_DEFAULTS = {
     # problems that are specific to one vendor's function-calling behaviour.
     "github": "mistral-ai/mistral-medium-2505",
 }
-
-
-def count_rate_limited(results: list[dict] | None) -> int:
-    """Fixtures whose error looks like provider throttling.
-
-    Worth separating from ordinary failures: a throttled fixture says nothing
-    about tool-description quality, it just means we outran the quota. This is
-    the number that decides whether a free-tier validator is viable at our
-    fixture count.
-    """
-    # GitHub Models answers a throttled request with HTTP 403 and an
-    # anti-scraping notice rather than a 429, so matching only on 429/"rate
-    # limit" undercounts it — half the fixtures show up as a bare "Error code:
-    # 403". A 403 here is throttling, not authorization: a bad credential fails
-    # every fixture identically at 401 before any work happens.
-    needles = ("429", "403", "rate limit", "rate_limit", "too many requests", "quota", "scraping")
-    return sum(1 for r in results or [] if any(n in str(r.get("error", "")).lower() for n in needles))
 
 
 def write_summary_row(provider, model, baseline, discovery, rate, ok, args) -> dict:
@@ -860,26 +561,13 @@ def run_fixtures_concurrently(fixtures: list[dict], worker, workers: int) -> lis
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(worker, fixture): index for index, fixture in enumerate(fixtures)}
         for future in as_completed(futures):
-            index = futures[future]
-            results[index] = future.result()
+            # Bound to a local before indexing back into `results`, whose element
+            # type is `dict | None` until every slot is filled.
+            result = future.result()
+            results[futures[future]] = result
             completed += 1
-            print(f"  {DIM}[{completed:02d}/{len(fixtures):02d}]{RESET} {results[index]['_line']}")
+            print(f"  {DIM}[{completed:02d}/{len(fixtures):02d}]{RESET} {result['_line']}")
     return [r for r in results if r is not None]
-
-
-def _render(result: dict) -> str:
-    """One-line progress summary for a finished fixture."""
-    if result.get("skipped"):
-        return f"{YELLOW}SKIP{RESET}  {result['id']}  ({result['expected_tool']} not registered)"
-    if result.get("error"):
-        return f"{RED}ERROR{RESET} {result['id']}: {result['error']}"
-    status = f"{GREEN}PASS{RESET}" if result["passed"] else f"{RED}FAIL{RESET}"
-    line = f"{status}  {result['id']}  selected={result['selected_tool'] or '(none)'}"
-    if result["mode"] == "discovery":
-        line += f"  steps={result['steps']}  path={result['discovery_path']}"
-        if result.get("attempts", 1) > 1:
-            line += f"  (attempts={result['attempts']})"
-    return f"{line}  {result.get('latency_s', 0)}s"
 
 
 def run_baseline_pass(provider, client, fixtures, model, system_prompt, available_tools, endpoint=ADMIN, workers=1):
@@ -949,7 +637,15 @@ def run_discovery_pass(
     return run_fixtures_concurrently(fixtures, worker, workers)
 
 
-def main():
+class ConfigError(Exception):
+    """A usage/configuration problem: bad mode, missing credential, no fixtures.
+
+    Raised rather than calling sys.exit so each step below can be unit-tested
+    without catching SystemExit. main() turns it into the exit code.
+    """
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner (v2 discovery)")
     parser.add_argument(
         "--provider",
@@ -1041,20 +737,36 @@ def main():
         action="store_true",
         help="Mark this run as non-gating in the job summary (e.g. the Store/UCP suite, which is continue-on-error)",
     )
-    args = parser.parse_args()
+    return parser
 
-    provider = args.provider
-    model = args.model or os.environ.get("EVAL_MODEL") or PROVIDER_DEFAULTS[provider]
-    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
-    for m in modes:
-        if m not in ("baseline", "discovery"):
-            print(f"ERROR: unknown mode '{m}'", file=sys.stderr)
-            sys.exit(1)
 
-    endpoint = endpoint_by_name(args.endpoint)
+def parse_modes(spec: str) -> list[str]:
+    modes = [m.strip() for m in spec.split(",") if m.strip()]
+    unknown = [m for m in modes if m not in ("baseline", "discovery")]
+    if unknown:
+        raise ConfigError(f"unknown mode(s): {', '.join(unknown)}")
+    if not modes:
+        raise ConfigError("no modes selected")
+    return modes
 
+
+def resolve_model(provider: str, requested: str | None) -> str:
+    """CLI flag wins, then EVAL_MODEL, then the provider default.
+
+    PROVIDER_DEFAULTS is what CI resolves the gating model to, so changing that
+    constant changes which model gates.
+    """
+    return requested or os.environ.get("EVAL_MODEL") or PROVIDER_DEFAULTS[provider]
+
+
+def require_credentials(provider: str, endpoint_name: str) -> tuple[str, str]:
+    """Check the server and provider credentials this run needs.
+
+    Returns the (name, value) of the provider credential, because build_client
+    needs the value and the `github` provider's differs from OpenAI's.
+    """
     required = [("SW_BASE_URL", SW_BASE_URL)]
-    if args.endpoint == "store":
+    if endpoint_name == "store":
         required.append(("SW_SC_ACCESS_KEY", SW_SC_ACCESS_KEY))
     else:
         required += [("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
@@ -1064,70 +776,178 @@ def main():
         "github": ("GITHUB_TOKEN", GITHUB_TOKEN),
     }[provider]
     required.append(credential)
-    for var, val in required:
-        if not val:
-            print(f"ERROR: {var} is not set.", file=sys.stderr)
-            sys.exit(1)
+    missing = [var for var, val in required if not val]
+    if missing:
+        raise ConfigError(f"{', '.join(missing)} is not set.")
+    return credential
 
+
+def build_client(provider: str, credential: tuple[str, str]):
+    """The provider SDK client. Imported lazily so a run with one provider does
+    not require the other's package to be installed."""
     if provider == "anthropic":
-        import anthropic as _anthropic
+        import anthropic
 
-        client = _anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    else:
-        from openai import OpenAI
+        return anthropic.Anthropic(api_key=credential[1])
+    from openai import OpenAI
 
-        # GitHub Models speaks the OpenAI wire format, so the same adapter and
-        # turn function work — only the base URL and credential differ.
-        client = OpenAI(
-            api_key=credential[1],
-            base_url=GITHUB_MODELS_BASE_URL if provider == "github" else None,
+    # GitHub Models speaks the OpenAI wire format, so the same adapter and turn
+    # function work — only the base URL and credential differ.
+    return OpenAI(
+        api_key=credential[1],
+        base_url=GITHUB_MODELS_BASE_URL if provider == "github" else None,
+    )
+
+
+def fixtures_path_for(endpoint_name: str, override: str | None) -> Path:
+    if override:
+        return Path(override)
+    return Path(__file__).parent / ("fixtures_store.yaml" if endpoint_name == "store" else "fixtures.yaml")
+
+
+def load_fixtures(path: Path, category: str | None = None, fixture_id: str | None = None) -> list[dict]:
+    fixtures = yaml.safe_load(path.read_text())["fixtures"]
+    if category:
+        fixtures = [f for f in fixtures if f.get("category") == category]
+    if fixture_id:
+        fixtures = [f for f in fixtures if f["id"] == fixture_id]
+    if not fixtures:
+        raise ConfigError("No fixtures matched the filter.")
+    return fixtures
+
+
+def fetch_system_prompt(endpoint, enabled: bool = True) -> str | None:
+    """The server's own instructions plus its context prompts, as the model sees
+    them. Disabled by --no-system-prompt for ad-hoc debugging."""
+    if not enabled:
+        print("System prompt: disabled (--no-system-prompt)")
+        return None
+    session_id, server_instructions = mcp_init(endpoint=endpoint)
+    prompt = mcp_fetch_system_prompt(session_id, server_instructions, endpoint=endpoint)
+    sections = [line for line in prompt.split("\n") if line.startswith("# ")]
+    print(f"System prompt: {len(sections)} sections, {len(prompt)} chars")
+    return prompt
+
+
+def probe_catalogue(endpoint) -> set[str]:
+    """Every tool registered on this instance, with all toolsets enabled.
+
+    Fixtures whose expected tool is absent (a plugin bundle that isn't installed)
+    are skipped rather than scored as failures.
+    """
+    session_id, _ = mcp_init(endpoint=endpoint)
+    enable_all_toolsets(session_id, endpoint=endpoint)
+    return {t["name"] for t in mcp_tools_list_all(session_id, endpoint=endpoint)}
+
+
+def build_report(
+    provider: str,
+    model: str,
+    fixtures: list[dict],
+    baseline: list[dict] | None,
+    discovery: list[dict] | None,
+    system_prompt_enabled: bool,
+    max_steps: int,
+) -> dict:
+    """The JSON report. Pure: no writing, so its shape can be asserted directly."""
+    report = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "server": SW_BASE_URL,
+        "provider": provider,
+        "model": model,
+        "modes": {},
+        "fixtures": len(fixtures),
+        "system_prompt": system_prompt_enabled,
+        "max_steps": max_steps,
+    }
+    if baseline is not None:
+        report["modes"]["baseline"] = {
+            "passed": sum(1 for r in scored(baseline) if r["passed"]),
+            "failed": sum(1 for r in scored(baseline) if not r["passed"]),
+            "skipped": sum(1 for r in baseline if r.get("skipped")),
+            "tokens": total_tokens(scored(baseline)),
+            "results": baseline,
+        }
+    if discovery is not None:
+        report["modes"]["discovery"] = {
+            "passed": sum(1 for r in scored(discovery) if r["passed"]),
+            "failed": sum(1 for r in scored(discovery) if not r["passed"]),
+            "skipped": sum(1 for r in discovery if r.get("skipped")),
+            "results": discovery,
+        }
+        report["discovery_summary"] = discovery_summary(discovery)
+    # Per-owning-repo rates over the gating mode, so the report answers "which
+    # codebase regressed" without re-deriving attribution downstream. Discovery
+    # is the mode that gates; baseline only carries attribution when it ran
+    # alone. `or []` covers neither having run — parse_modes rejects an empty
+    # mode list, so that is unreachable via the CLI, but an empty table is the
+    # honest answer rather than a crash for a direct caller.
+    gating = discovery if discovery is not None else baseline
+    report["by_tier"] = breakdown(executed(gating or []))
+    return report
+
+
+def print_gate(verdict: dict, args) -> None:
+    """The gate block. Reads only the verdict dict, so gate_verdict stays the
+    single place the pass/fail decision is made."""
+    gating, graded = verdict["gating"], verdict["graded"]
+    print(
+        f"\nGate: {verdict['passed']}/{len(gating)} = {round(verdict['rate'] * 100)}% "
+        f"(threshold {round(args.min_pass_rate * 100)}%) → {'PASS' if verdict['quality_ok'] else 'FAIL'}"
+    )
+    print_tier_block(gating)
+    if verdict["core_total"]:
+        print(
+            f"  Core gate: {verdict['core_passed']}/{verdict['core_total']} = "
+            f"{round(verdict['core_rate'] * 100)}% (threshold {round(verdict['min_core'] * 100)}%) → "
+            f"{'PASS' if verdict['core_ok'] else 'FAIL'}"
         )
+    if verdict["errored"]:
+        print(
+            f"  {verdict['errored']}/{len(graded)} fixtures never reached the model "
+            f"({round(verdict['error_rate'] * 100)}%, budget {round(args.max_error_rate * 100)}%) → "
+            f"{'within budget' if verdict['run_valid'] else 'RUN INVALID'}"
+        )
+    if not verdict["quality_ok"]:
+        print(f"  below threshold; failing: {', '.join(r['id'] for r in gating if not r['passed'])}")
+    if not verdict["core_ok"]:
+        core_failed = [r["id"] for r in gating if not r["passed"] and owner_of(r.get("expected_tool", "")) == CORE]
+        print(f"  {RED}core below threshold{RESET}; failing: {', '.join(core_failed)}")
+    if not verdict["run_valid"]:
+        print("  too many fixtures errored to trust this run — fix the server/provider, then re-run.")
 
-    default_fixtures = "fixtures_store.yaml" if args.endpoint == "store" else "fixtures.yaml"
-    fixtures_path = Path(args.fixtures) if args.fixtures else Path(__file__).parent / default_fixtures
-    all_fixtures = yaml.safe_load(fixtures_path.read_text())["fixtures"]
-    if args.category:
-        all_fixtures = [f for f in all_fixtures if f.get("category") == args.category]
-    if args.id:
-        all_fixtures = [f for f in all_fixtures if f["id"] == args.id]
-    if not all_fixtures:
-        print("No fixtures matched the filter.", file=sys.stderr)
-        sys.exit(1)
+
+def run_suite(args) -> int:
+    """One eval run end to end. Returns the process exit code."""
+    provider = args.provider
+    model = resolve_model(provider, args.model)
+    modes = parse_modes(args.modes)
+    endpoint = endpoint_by_name(args.endpoint)
+    credential = require_credentials(provider, args.endpoint)
+    client = build_client(provider, credential)
+    fixtures = load_fixtures(fixtures_path_for(args.endpoint, args.fixtures), args.category, args.id)
 
     print(f"{BOLD}Shopware MCP LLM Eval (v2 discovery){RESET}")
     print(f"Server:   {SW_BASE_URL}  ({endpoint.name} endpoint)")
     print(f"Provider: {provider}")
     print(f"Model:    {model}")
     print(f"Modes:    {', '.join(modes)}")
-    print(f"Fixtures: {len(all_fixtures)}")
+    print(f"Fixtures: {len(fixtures)}")
 
     print("\nInitializing MCP session for system prompt...")
-    session_id, server_instructions = mcp_init(endpoint=endpoint)
-    if args.no_system_prompt:
-        system_prompt = None
-        print("System prompt: disabled (--no-system-prompt)")
-    else:
-        system_prompt = mcp_fetch_system_prompt(session_id, server_instructions, endpoint=endpoint)
-        prompt_names = [line for line in system_prompt.split("\n") if line.startswith("# ")]
-        print(f"System prompt: {len(prompt_names)} sections, {len(system_prompt)} chars")
+    system_prompt = fetch_system_prompt(endpoint, enabled=not args.no_system_prompt)
 
-    # The full catalogue on this instance. Fixtures whose expected tool is not
-    # registered (e.g. a plugin bundle that isn't installed) are skipped, not
-    # scored as failures.
-    probe_sid, _ = mcp_init(endpoint=endpoint)
-    enable_all_toolsets(probe_sid, endpoint=endpoint)
-    available_tools = {t["name"] for t in mcp_tools_list_all(probe_sid, endpoint=endpoint)}
-    absent = sorted({f["expected_tool"] for f in all_fixtures} - available_tools)
+    available_tools = probe_catalogue(endpoint)
+    absent = sorted({f["expected_tool"] for f in fixtures} - available_tools)
     if absent:
         print(f"Catalogue: {len(available_tools)} tools; will skip fixtures for absent: {', '.join(absent)}")
 
-    results_baseline = None
-    results_discovery = None
+    results_baseline = results_discovery = None
     if "baseline" in modes:
         results_baseline = run_baseline_pass(
             provider,
             client,
-            all_fixtures,
+            fixtures,
             model,
             system_prompt,
             available_tools,
@@ -1138,7 +958,7 @@ def main():
         results_discovery = run_discovery_pass(
             provider,
             client,
-            all_fixtures,
+            fixtures,
             model,
             system_prompt,
             args.max_steps,
@@ -1162,88 +982,51 @@ def main():
         print_single_mode(results_baseline, "baseline")
 
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    output_path = args.output or str(BASE / "results" / f"eval-{provider}-{ts}.json")
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    report = {
-        "timestamp": datetime.now(UTC).isoformat(),
-        "server": SW_BASE_URL,
-        "provider": provider,
-        "model": model,
-        "modes": {},
-        "fixtures": len(all_fixtures),
-        "system_prompt": not args.no_system_prompt,
-        "max_steps": args.max_steps,
-    }
-    if results_baseline is not None:
-        report["modes"]["baseline"] = {
-            "passed": sum(1 for r in scored(results_baseline) if r["passed"]),
-            "failed": sum(1 for r in scored(results_baseline) if not r["passed"]),
-            "skipped": sum(1 for r in results_baseline if r.get("skipped")),
-            "tokens": total_tokens(scored(results_baseline)),
-            "results": results_baseline,
-        }
-    if results_discovery is not None:
-        report["modes"]["discovery"] = {
-            "passed": sum(1 for r in scored(results_discovery) if r["passed"]),
-            "failed": sum(1 for r in scored(results_discovery) if not r["passed"]),
-            "skipped": sum(1 for r in results_discovery if r.get("skipped")),
-            "results": results_discovery,
-        }
-        report["discovery_summary"] = discovery_summary(results_discovery)
-    # Per-owning-repo rates over the gating mode, so the report answers "which
-    # codebase regressed" without re-deriving attribution downstream.
-    report["by_tier"] = breakdown(executed(results_discovery if results_discovery is not None else results_baseline))
-    Path(output_path).write_text(json.dumps(report, indent=2))
+    output_path = Path(args.output or BASE / "results" / f"eval-{provider}-{ts}.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(
+            build_report(
+                provider,
+                model,
+                fixtures,
+                results_baseline,
+                results_discovery,
+                not args.no_system_prompt,
+                args.max_steps,
+            ),
+            indent=2,
+        )
+    )
     print(f"Report saved: {output_path}")
 
-    # Gate: discovery mode is the v2 target behaviour; baseline is the
-    # comparison reference and stays advisory when both run. Skipped fixtures
-    # (tool absent on this instance) do not gate.
+    # Gate: discovery mode is the v2 target behaviour; baseline is the comparison
+    # reference and stays advisory when both run. Skipped fixtures (tool absent on
+    # this instance) do not gate.
     #
     # The LLM eval is a quality signal against a nondeterministic model, so it
     # gates on a pass-rate threshold rather than a strict 100% — a couple of
-    # borderline/flaky fixtures shouldn't flip CI red, but a real regression
-    # (the rate collapsing) still fails. Each failed discovery fixture is also
-    # retried once (see run_discovery_pass). Set --min-pass-rate 1.0 for strict.
-    v = gate_verdict(
+    # borderline fixtures shouldn't flip CI red, but a real regression (the rate
+    # collapsing) still fails. Each failed discovery fixture is also retried once
+    # (see run_discovery_pass). Set --min-pass-rate 1.0 for strict.
+    verdict = gate_verdict(
         results_discovery if results_discovery is not None else results_baseline,
         min_pass_rate=args.min_pass_rate,
         min_core_pass_rate=args.min_core_pass_rate,
         max_error_rate=args.max_error_rate,
     )
-    graded, gating = v["graded"], v["gating"]
-    errored, error_rate, passed, rate = v["errored"], v["error_rate"], v["passed"], v["rate"]
-    core_passed, core_total, core_pct = v["core_passed"], v["core_total"], v["core_rate"]
-    min_core, core_ok = v["min_core"], v["core_ok"]
-    quality_ok, run_valid, ok = v["quality_ok"], v["run_valid"], v["ok"]
+    print_gate(verdict, args)
+    write_summary_row(provider, model, results_baseline, results_discovery, verdict["rate"], verdict["ok"], args)
+    return 0 if verdict["ok"] else 1
 
-    print(
-        f"\nGate: {passed}/{len(gating)} = {round(rate * 100)}% "
-        f"(threshold {round(args.min_pass_rate * 100)}%) → {'PASS' if quality_ok else 'FAIL'}"
-    )
-    print_tier_block(gating)
-    if core_total:
-        print(
-            f"  Core gate: {core_passed}/{core_total} = {round(core_pct * 100)}% "
-            f"(threshold {round(min_core * 100)}%) → {'PASS' if core_ok else 'FAIL'}"
-        )
-    if errored:
-        print(
-            f"  {errored}/{len(graded)} fixtures never reached the model ({round(error_rate * 100)}%, "
-            f"budget {round(args.max_error_rate * 100)}%) → {'within budget' if run_valid else 'RUN INVALID'}"
-        )
-    if not quality_ok:
-        failed_ids = [r["id"] for r in gating if not r["passed"]]
-        print(f"  below threshold; failing: {', '.join(failed_ids)}")
-    if not core_ok:
-        core_failed = [r["id"] for r in gating if not r["passed"] and owner_of(r.get("expected_tool", "")) == CORE]
-        print(f"  {RED}core below threshold{RESET}; failing: {', '.join(core_failed)}")
-    if not run_valid:
-        print("  too many fixtures errored to trust this run — fix the server/provider, then re-run.")
 
-    write_summary_row(provider, model, results_baseline, results_discovery, rate, ok, args)
-    sys.exit(0 if ok else 1)
+def main() -> int:
+    try:
+        return run_suite(build_parser().parse_args())
+    except ConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -14,8 +14,8 @@ Requires (admin): SW_BASE_URL, SW_ACCESS_KEY, SW_SECRET_ACCESS_KEY
 Requires (store): SW_BASE_URL, SW_SC_ACCESS_KEY
 
 Usage:
-  python functional/run.py [--endpoint admin] [--skip-media-upload] [--skip-dev-tools]
-  python functional/run.py --endpoint store
+  python -m functional.runner [--endpoint admin] [--skip-media-upload] [--skip-dev-tools]
+  python -m functional.runner --endpoint store
 
 Exits non-zero if any check fails.
 """
@@ -26,15 +26,12 @@ import argparse
 import json
 import sys
 from datetime import datetime
-from pathlib import Path
 
 import requests
 
-# mcp_client lives at the repo root (shared by the eval and functional layers);
-# reporting lives alongside this script.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from mcp_client import (  # noqa: E402
+from functional.checks import CORE_CHECKS, DEV_CHECKS, MERCHANT_CHECKS, ToolCheck
+from functional.reporting import Reporter
+from mcp_client import (
     BASE,
     META_TOOLS,
     SW_ACCESS_KEY,
@@ -51,7 +48,6 @@ from mcp_client import (  # noqa: E402
     mcp_tools_list_all,
     mcp_toolsets_list,
 )
-from reporting import Reporter  # noqa: E402
 
 # A phantom UUID that cannot exist — used for dryRun delete assertions.
 ZERO_UUID = "00000000-0000-0000-0000-000000000000"
@@ -479,267 +475,93 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: st
         )
 
 
+def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[ToolCheck, ...], ctx: dict) -> None:
+    """Run a table of checks, skipping any whose prerequisites are missing."""
+    for check in checks:
+        reason = check.blocked_by(ctx)
+        if reason:
+            rep.skip(check.skip_label(reason))
+        else:
+            assert_tool(rep, session, endpoint, check.tool, check.args(ctx), check.label(ctx))
+
+
+def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -> dict:
+    """The live ids the check payloads need.
+
+    Every one is optional: an empty shop yields no product to read and no sales
+    channel to price against, and the affected checks skip rather than fail.
+    """
+    return {
+        "product_id": _first_field(session, endpoint, "product"),
+        "order_id": _first_field(session, endpoint, "order"),
+        "customer_email": _first_field(session, endpoint, "customer", field="email"),
+        "customer_id": _first_field(session, endpoint, "customer"),
+        "sales_channel_id": _first_field(
+            session,
+            endpoint,
+            "sales_channel",
+            extra={
+                "criteria": json.dumps({"filter": [{"type": "equals", "field": "typeId", "value": STOREFRONT_TYPE_ID}]})
+            },
+        ),
+        # Inverted so the check table can treat it like any other prerequisite.
+        "media_upload_enabled": not args.skip_media_upload,
+    }
+
+
+def first_skill_name(session: str, endpoint: Endpoint) -> str:
+    """A real skill name for load-skill, taken from list-skills.
+
+    The payload has been both `{"skills": [...]}` and a bare list, and its items
+    both dicts and strings, so all four shapes are tolerated.
+    """
+    data = _payload(mcp_call(session, "swag-dev-tools-list-skills", {}, endpoint=endpoint)).get("data", {})
+    skills = data.get("skills", data) if isinstance(data, dict) else data
+    if isinstance(skills, list) and skills:
+        first = skills[0]
+        return first.get("name", "") if isinstance(first, dict) else str(first)
+    return ""
+
+
+def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str) -> str:
+    """A cart for merchant-cart-checkout to check out.
+
+    This creates one *in addition to* the cart the merchant-cart-manage check
+    creates: that check has to make its own call to be a real assertion, and
+    reusing this token would make the two indistinguishable on failure.
+    """
+    if not sales_channel_id:
+        return ""
+    payload = _payload(
+        mcp_call(
+            session,
+            "merchant-cart-manage",
+            {"salesChannelId": sales_channel_id, "action": "create"},
+            endpoint=endpoint,
+        )
+    )
+    return payload.get("data", {}).get("token", "")
+
+
 def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argparse.Namespace) -> None:
     """Per-tool assertions on a session with NO toolsets enabled — each call to
     a deferred tool doubles as a direct-callability assertion."""
-    product_id = _first_field(session, endpoint, "product")
-    order_id = _first_field(session, endpoint, "order")
-    customer_email = _first_field(session, endpoint, "customer", field="email")
-    sales_channel_id = _first_field(
-        session,
-        endpoint,
-        "sales_channel",
-        extra={
-            "criteria": json.dumps({"filter": [{"type": "equals", "field": "typeId", "value": STOREFRONT_TYPE_ID}]})
-        },
-    )
+    ctx = gather_context(session, endpoint, args)
 
-    # --- Core tools ---
     rep.section("Core tools")
-    assert_tool(
-        rep, session, endpoint, "shopware-entity-schema", {"entity": "product"}, "shopware-entity-schema (product)"
-    )
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "shopware-entity-search",
-        {"entity": "product", "limit": 1},
-        "shopware-entity-search (product, limit 1)",
-    )
-    if product_id:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "shopware-entity-read",
-            {"entity": "product", "id": product_id},
-            "shopware-entity-read (product by ID)",
-        )
-    else:
-        rep.skip("shopware-entity-read (no product found)")
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "shopware-entity-aggregate",
-        {"entity": "product", "aggregations": json.dumps([{"name": "total", "type": "count", "field": "id"}])},
-        "shopware-entity-aggregate (count products)",
-    )
-    if product_id:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "shopware-entity-upsert",
-            {"entity": "product", "payload": json.dumps({"id": product_id, "stock": 1}), "dryRun": True},
-            "shopware-entity-upsert (dryRun)",
-        )
-    else:
-        rep.skip("shopware-entity-upsert (no product found)")
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "shopware-entity-delete",
-        {"entity": "product", "ids": json.dumps([ZERO_UUID]), "dryRun": True},
-        "shopware-entity-delete (dryRun)",
-    )
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "shopware-system-config-read",
-        {"key": "core.basicInformation"},
-        "shopware-system-config-read",
-    )
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "shopware-system-config-write",
-        {"key": "core.basicInformation.shopName", "value": json.dumps("Test"), "dryRun": True},
-        "shopware-system-config-write (dryRun)",
-    )
-    if order_id:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "shopware-order-state",
-            {"orderId": order_id, "dryRun": True},
-            "shopware-order-state (dryRun)",
-        )
-    else:
-        rep.skip("shopware-order-state (no order found)")
-    if args.skip_media_upload:
-        rep.skip("shopware-media-upload (--skip-media-upload)")
-    else:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "shopware-media-upload",
-            {"url": "https://assets.shopware.com/media/shopware_signet_blue.svg", "fileName": "mcp-test-logo"},
-            "shopware-media-upload",
-        )
-    if sales_channel_id:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "shopware-theme-config",
-            {"salesChannelId": sales_channel_id, "action": "get"},
-            "shopware-theme-config (get)",
-        )
-    else:
-        rep.skip("shopware-theme-config (no storefront sales channel found)")
+    run_checks(rep, session, endpoint, CORE_CHECKS, ctx)
 
-    # --- Merchant tools ---
     rep.section("Merchant tools")
-    if customer_email:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "merchant-customer-lookup",
-            {"email": customer_email},
-            "merchant-customer-lookup (by email)",
-        )
-    else:
-        rep.skip("merchant-customer-lookup (no customer found)")
-    if order_id:
-        assert_tool(
-            rep, session, endpoint, "merchant-order-summary", {"orderId": order_id}, "merchant-order-summary (by ID)"
-        )
-    else:
-        rep.skip("merchant-order-summary (no order found)")
-    if sales_channel_id:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "merchant-checkout-methods",
-            {"salesChannelId": sales_channel_id},
-            "merchant-checkout-methods",
-        )
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "merchant-storefront-search",
-            {"salesChannelId": sales_channel_id, "term": "shirt"},
-            "merchant-storefront-search (term: shirt)",
-        )
-        cart_token = (
-            _payload(
-                mcp_call(
-                    session,
-                    "merchant-cart-manage",
-                    {"salesChannelId": sales_channel_id, "action": "create"},
-                    endpoint=endpoint,
-                )
-            )
-            .get("data", {})
-            .get("token", "")
-        )
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "merchant-cart-manage",
-            {"salesChannelId": sales_channel_id, "action": "create"},
-            "merchant-cart-manage (create)",
-        )
-        customer_id = _first_field(session, endpoint, "customer")
-        if cart_token and customer_id:
-            assert_tool(
-                rep,
-                session,
-                endpoint,
-                "merchant-cart-checkout",
-                {"salesChannelId": sales_channel_id, "token": cart_token, "customerId": customer_id, "dryRun": True},
-                "merchant-cart-checkout (dryRun)",
-            )
-        else:
-            rep.skip("merchant-cart-checkout (could not get cart token or customer ID)")
-    else:
-        rep.skip("merchant-checkout-methods (no storefront sales channel)")
-        rep.skip("merchant-storefront-search (no storefront sales channel)")
-        rep.skip("merchant-cart-manage (no storefront sales channel)")
-        rep.skip("merchant-cart-checkout (no storefront sales channel)")
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "merchant-product-create",
-        {"name": "MCP Test Product", "productNumber": "MCP-TEST-001", "grossPrice": 9.99, "dryRun": True},
-        "merchant-product-create (dryRun)",
-    )
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "merchant-bestseller-report",
-        {"from": "2025-01-01", "to": "2025-12-31", "limit": 5},
-        "merchant-bestseller-report",
-    )
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "merchant-revenue-report",
-        {"from": "2025-01-01", "to": "2025-12-31", "groupBy": "month"},
-        "merchant-revenue-report (groupBy month)",
-    )
+    ctx["cart_token"] = create_cart_token(session, endpoint, ctx["sales_channel_id"])
+    run_checks(rep, session, endpoint, MERCHANT_CHECKS, ctx)
 
-    # --- Dev tools ---
     rep.section("Dev tools")
     if args.skip_dev_tools:
         rep.skip("dev tools (--skip-dev-tools)")
         return
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "swag-dev-tools-log-search",
-        {"query": "error", "limit": 5},
-        "swag-dev-tools-log-search (query: error)",
-    )
-    assert_tool(
-        rep, session, endpoint, "swag-dev-tools-log-stream", {"limit": 10}, "swag-dev-tools-log-stream (last 10)"
-    )
-    assert_tool(rep, session, endpoint, "swag-dev-tools-list-extensions", {}, "swag-dev-tools-list-extensions")
-    assert_tool(rep, session, endpoint, "swag-dev-tools-list-skills", {}, "swag-dev-tools-list-skills")
-    # scaffold with no args lists the available types — non-destructive.
-    assert_tool(rep, session, endpoint, "swag-dev-tools-scaffold", {}, "swag-dev-tools-scaffold (list types)")
-    # notifications: wait=false so it never opens an SSE stream in tests.
-    assert_tool(
-        rep,
-        session,
-        endpoint,
-        "swag-dev-tools-notifications",
-        {"wait": False, "limit": 5},
-        "swag-dev-tools-notifications (poll)",
-    )
-    # load-skill needs a real skill name — pull the first one from list-skills.
-    data = _payload(mcp_call(session, "swag-dev-tools-list-skills", {}, endpoint=endpoint)).get("data", {})
-    skills = data.get("skills", data) if isinstance(data, dict) else data
-    skill_name = ""
-    if isinstance(skills, list) and skills:
-        first = skills[0]
-        skill_name = first.get("name", "") if isinstance(first, dict) else str(first)
-    if skill_name:
-        assert_tool(
-            rep,
-            session,
-            endpoint,
-            "swag-dev-tools-load-skill",
-            {"name": skill_name},
-            f"swag-dev-tools-load-skill ({skill_name})",
-        )
-    else:
-        rep.skip("swag-dev-tools-load-skill (no skills found)")
+    # Needs the tool it is named after to have run, so it cannot be part of ctx.
+    ctx["skill_name"] = first_skill_name(session, endpoint)
+    run_checks(rep, session, endpoint, DEV_CHECKS, ctx)
 
 
 def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, session: str) -> None:

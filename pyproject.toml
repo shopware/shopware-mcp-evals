@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shopware-mcp-evals"
+version = "0.1.0"
+description = "Two-layer test suite for the Shopware MCP server"
+requires-python = ">=3.14"
+
+# Deliberately empty. The pinned/ranged dependency sets live in
+# eval/requirements.txt (runtime) and requirements-dev.txt (tooling), and the
+# asymmetry between them is a documented decision. Repeating those constraints
+# here would give them two sources of truth that drift silently, so CI installs
+# the requirements files and then adds this package with `--no-deps`.
+dependencies = []
+
+# An editable install is what makes `import mcp_client` work from anywhere
+# without a sys.path prelude. Before this existed every entry point opened with
+# `sys.path.insert(...)` plus `# noqa: E402` on each following import — 22 lines
+# of workaround across the repo — and the two modules both named `run` resolved
+# by search-path order, which put eval/run.py in front of functional/run.py for
+# anything that guessed wrong. They are `runner.py` under their own packages now.
+[tool.setuptools]
+py-modules = ["mcp_client", "ownership"]
+
+[tool.setuptools.packages.find]
+include = ["eval*", "functional*"]
+exclude = ["functional.ci*", "tests*", "results*", "tool-history*"]
+
+# Fixture YAML sits next to the runner that reads it.
+[tool.setuptools.package-data]
+eval = ["*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Import the installed package rather than fiddling with sys.path per test file.
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["eval", "functional", "mcp_client", "ownership"]
+
+[tool.coverage.report]
+# The `if __name__` guards and the provider SDK branches cannot be reached
+# without a live key, and counting them just adds permanent noise to the number.
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = true

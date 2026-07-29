@@ -3,7 +3,7 @@
 # Same discovery model as admin: only the three meta-tools are advertised by
 # default; the UCP buyer-journey tools are deferred in the `shopware` toolset
 # and shopware-store-api-context in the `store-api` toolset. Run with:
-#   python eval/run.py --endpoint store
+#   python -m eval.runner --endpoint store
 #
 # Fields are identical to fixtures.yaml (see its header), and the same coverage
 # rule applies: at least 3 prompts per tool, differing in kind rather than

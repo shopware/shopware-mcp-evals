@@ -8,4 +8,5 @@
 # ruff is pre-1.0 and ships lint rules in minor releases, so it takes ==.
 # Bumping either is a deliberate PR, the same way shopware.sha is.
 pytest>=8,<10
+pytest-cov>=6,<8
 ruff==0.16.0

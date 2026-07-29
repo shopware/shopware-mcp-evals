@@ -320,7 +320,13 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Install Python deps
-        run: pip install -r eval/requirements.txt
+        run: |
+          pip install -r eval/requirements.txt
+          # Editable install so `python -m eval.runner` and the tests can
+          # import mcp_client/ownership without a sys.path prelude.
+          # --no-deps: the requirements file above is the single source of
+          # truth for versions; pyproject.toml declares none.
+          pip install -e . --no-deps
 
       - name: Snapshot MCP tool descriptions
         env:
@@ -329,7 +335,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
         run: |
           mkdir -p tool-history
-          python eval/snapshot_tools.py --output tool-history/latest.json
+          python -m eval.snapshot_tools --output tool-history/latest.json
           cp tool-history/latest.json "tool-history/$(date -u +%Y-%m-%dT%H-%M-%SZ).json"
 
       # If the snapshot differs from the committed baseline, descriptions have
@@ -370,7 +376,7 @@ jobs:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_ACCESS_KEY: ${{ steps.integration.outputs.access_key }}
           SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
-        run: python functional/run.py --endpoint admin
+        run: python -m functional.runner --endpoint admin
 
       - name: Run LLM eval
         id: eval
@@ -390,7 +396,7 @@ jobs:
           # Fixed path so the cross-model comparison step can find it.
           # --summary-row feeds the consolidated job summary rendered at the end
           # of the job; the numeric prefix fixes the row's position in its table.
-          python eval/run.py "${args[@]}" \
+          python -m eval.runner "${args[@]}" \
             --output "results/eval-primary.json" \
             --summary-row "results/rows/1-admin-primary.json" \
             --suite-label "admin · primary"
@@ -439,7 +445,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.integration.outputs.secret_key }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          python eval/run.py --provider openai --model gpt-4o-mini \
+          python -m eval.runner --provider openai --model gpt-4o-mini \
             --output "results/eval-second-validator.json" \
             --summary-row "results/rows/2-admin-second.json" \
             --suite-label "admin · second validator"
@@ -467,7 +473,7 @@ jobs:
               | tee -a "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
-          python eval/compare_runs.py "${primary}" "${second}" \
+          python -m eval.compare_runs "${primary}" "${second}" \
             --min-pass-rate 0.9 \
             --gate both \
             --output "results/eval-comparison.json"
@@ -495,7 +501,7 @@ jobs:
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
-        run: python functional/run.py --endpoint store
+        run: python -m functional.runner --endpoint store
 
       - name: Run Store API LLM eval (advisory)
         if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
@@ -514,7 +520,7 @@ jobs:
           # --advisory: this step is continue-on-error, so its row must not be
           # read as a gating verdict. Without the suite label it rendered as a
           # third, unexplained openai/gpt-4o result.
-          python eval/run.py --endpoint store --modes discovery "${args[@]}" \
+          python -m eval.runner --endpoint store --modes discovery "${args[@]}" \
             --summary-row "results/rows/3-store.json" \
             --suite-label "store · UCP" \
             --advisory
@@ -536,7 +542,7 @@ jobs:
       - name: Write job summary
         if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
         run: |
-          python eval/summary.py \
+          python -m eval.summary \
             --rows "results/rows" \
             --comparison "results/eval-comparison.json"
 

@@ -6,20 +6,15 @@ a server-side tool that matches no prefix would silently fall into
 fail the unit tests instead — same drift alarm as tests/test_fixtures.py.
 """
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+import ownership as OWN
 
-_spec = importlib.util.spec_from_file_location("eval_ownership", ROOT / "ownership.py")
-OWN = importlib.util.module_from_spec(_spec)
-sys.modules["eval_ownership"] = OWN
-_spec.loader.exec_module(OWN)
+ROOT = Path(__file__).resolve().parents[1]
 
 SNAPSHOT_TOOLS = sorted(t["name"] for t in json.loads((ROOT / "tool-history" / "latest.json").read_text())["tools"])
 FIXTURE_TOOLS = sorted(
@@ -88,9 +83,21 @@ def test_breakdown_groups_and_rates_per_tier():
 
     b = OWN.breakdown(results)
 
-    assert b["core"] == {"passed": 1, "total": 2, "failed_ids": ["b"], "rate": 0.5}
+    assert b["core"] == {"passed": 1, "total": 2, "ids": ["a", "b"], "failed_ids": ["b"], "rate": 0.5}
     assert b["dev-tools"]["rate"] == 1.0
     assert b[OWN.DISCOVERY]["total"] == 1
+
+
+def test_breakdown_lists_every_graded_id_not_just_the_failures():
+    """eval/summary.py merges these buckets across three suites, two of which
+    grade the same fixture set. Without the full id list it can only add
+    `total`, which double-counts those fixtures."""
+    results = [
+        {"id": "a", "expected_tool": "shopware-entity-read", "passed": True},
+        {"id": "b", "expected_tool": "shopware-entity-read", "passed": False},
+    ]
+
+    assert OWN.breakdown(results)["core"]["ids"] == ["a", "b"]
 
 
 def test_breakdown_orders_most_critical_first():

@@ -53,36 +53,58 @@ The output drives improvements to the `#[McpTool(description: '…')]` and
 ├── README.md
 ├── AGENTS.md              # short brief for coding agents
 ├── .env.example           # required credentials and optional overrides
+├── pyproject.toml         # package metadata; `pip install -e .` makes the imports work
 ├── shopware.sha           # pinned Shopware commit for reproducible CI runs
 ├── mcp_client.py          # shared MCP HTTP helpers (admin + store endpoints)
+├── ownership.py           # tool name → owning repository, and what a failure there costs
 ├── functional/
-│   ├── run.py             # Layer 1: v2 discovery mechanics + per-tool dryRun calls (--endpoint admin|store)
+│   ├── runner.py          # Layer 1: v2 discovery mechanics + per-tool dryRun calls (--endpoint admin|store)
+│   ├── checks.py          # the per-tool assertion table (payloads, labels, prerequisites)
 │   ├── reporting.py       # pass/fail/skip harness + JSON report writer
 │   └── ci/                # reusable shell helpers used by the workflow (shellcheck-linted)
 ├── eval/
-│   ├── run.py             # Layer 2: baseline vs discovery LLM eval (--endpoint admin|store)
+│   ├── runner.py          # Layer 2: baseline vs discovery LLM eval (--endpoint admin|store)
+│   ├── scoring.py         # results → counts, rates and the gate verdict (pure)
+│   ├── report.py          # terminal rendering of a run (pure of scoring)
+│   ├── compare_runs.py    # primary vs second validator; the both-fail set to act on
+│   ├── summary.py         # one GitHub job summary for every run in the job
 │   ├── snapshot_tools.py  # full-catalogue snapshot for drift detection
 │   ├── fixtures.yaml      # admin natural-language prompts + expected tool
 │   ├── fixtures_store.yaml # Store API / UCP prompts + expected tool
 │   └── requirements.txt   # anthropic, openai, requests, pyyaml
 ├── tests/                 # pytest unit tests (reporting, runner logic, throttle retry)
-├── ruff.toml              # Python lint config (eval + functional + mcp_client + tests)
-├── requirements-dev.txt   # eval deps + pytest
+├── ruff.toml              # Python lint config
+├── requirements-dev.txt   # eval deps + pytest + pytest-cov + ruff
 ├── tool-history/          # committed snapshot baseline (latest.json)
 └── results/               # JSON reports, gitignored
 ```
 
-Unit tests (offline, no server needed) cover the reporting harness, the runner's
-verdict logic and full admin/store flows (driven through a fake MCP server), and
-the client's HTTP 429 retry:
+The repo is an installable package, which is what lets every module import every
+other one by name (`from mcp_client import ...`) from anywhere, and lets the tests
+import their subject directly. Install it once, in editable mode:
 
 ```bash
 pip install -r requirements-dev.txt
+pip install -e . --no-deps
+```
+
+`--no-deps` because `eval/requirements.txt` and `requirements-dev.txt` are the
+single source of truth for versions; `pyproject.toml` declares none.
+
+Unit tests (offline, no server needed) cover the reporting harness, the runner's
+verdict logic and full admin/store flows (driven through a fake MCP server), and
+the client's HTTP 429 retry. `--cov` shows where the gaps are; no threshold is
+enforced:
+
+```bash
+pip install -r requirements-dev.txt
+pip install -e . --no-deps
 pytest tests -q
+pytest tests -q --cov   # where the gaps are
 ```
 
 **Conventions:** both test layers are Python — don't add `.sh` runners (extend
-`functional/run.py` or `mcp_client.py`; the only shell here is CI glue under
+`functional/runner.py` or `mcp_client.py`; the only shell here is CI glue under
 `functional/ci/`). New functional/eval/client logic ships with a pytest test
 under `tests/`. `ruff`, `pytest`, and `shellcheck` run on every push.
 
@@ -135,16 +157,16 @@ to a deferred tool doubles as a direct-callability assertion. Mutating tools
 all run with `dryRun=true`.
 
 ```bash
-python functional/run.py
+python -m functional.runner
 
 # skip the media-upload test (the only tool without a dryRun mode)
-python functional/run.py --skip-media-upload
+python -m functional.runner --skip-media-upload
 
 # skip the SwagMcpDevTools assertions (instance without the dev-tools bundle)
-python functional/run.py --skip-dev-tools
+python -m functional.runner --skip-dev-tools
 
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
-python functional/run.py --endpoint store
+python -m functional.runner --endpoint store
 ```
 
 Pass / fail / skip per check is printed to stdout. A JSON report is saved to
@@ -167,14 +189,14 @@ tool call of any kind is graded.
 
 ```bash
 # Both modes, Anthropic (default), claude-sonnet-4-6
-python eval/run.py
+python -m eval.runner
 
 # OpenAI — gpt-5.4-mini is the CI primary and the openai default
-python eval/run.py --provider openai --model gpt-5.4-mini
+python -m eval.runner --provider openai --model gpt-5.4-mini
 
 # Second validator in CI — an older-generation model on the same fixtures. A
 # fixture both models miss points at the tool description; one both pass is noise.
-python eval/run.py --provider openai --model gpt-4o-mini
+python -m eval.runner --provider openai --model gpt-4o-mini
 
 # GitHub Models is also supported (free, OpenAI-compatible, auth via GITHUB_TOKEN
 # with `models: read`, and its catalogue carries non-OpenAI publishers for genuine
@@ -185,23 +207,23 @@ python eval/run.py --provider openai --model gpt-4o-mini
 # requests" rather
 # than 429. Lowering concurrency does not help against a per-day quota. Fine for
 # small local runs:
-python eval/run.py --provider github --id disambig_count_vs_search
-python eval/run.py --provider github --category meta
+python -m eval.runner --provider github --id disambig_count_vs_search
+python -m eval.runner --provider github --category meta
 
 # Discovery mode only, higher step cap
-python eval/run.py --modes discovery --max-steps 8
+python -m eval.runner --modes discovery --max-steps 8
 
 # Run only one category (unambiguous | disambiguation | chain | meta | discovery)
-python eval/run.py --category disambiguation
+python -m eval.runner --category disambiguation
 
 # Run a single fixture by ID
-python eval/run.py --id disambig_count_vs_search
+python -m eval.runner --id disambig_count_vs_search
 
 # Without the MCP system prompt (ad-hoc debugging)
-python eval/run.py --no-system-prompt
+python -m eval.runner --no-system-prompt
 
 # Custom report path (default: results/eval-<provider>-<timestamp>.json)
-python eval/run.py --output results/my-run.json
+python -m eval.runner --output results/my-run.json
 ```
 
 ### Gate policy
@@ -242,7 +264,7 @@ fails. Use `--min-pass-rate 1.0` for strict all-must-pass.
 
 ### The CI job summary
 
-`mcp-evals.yml` runs `eval/run.py` three times — admin primary, admin second
+`mcp-evals.yml` runs `eval/runner.py` three times — admin primary, admin second
 validator, Store/UCP advisory — in three separate processes. Each writes a JSON
 verdict row (`--summary-row`, labelled with `--suite-label`) instead of markdown,
 and a final `eval/summary.py` step renders them as **one** suite-labelled table
@@ -362,8 +384,8 @@ admin but authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`) plu
 a context token. Run it with:
 
 ```bash
-python functional/run.py --endpoint store               # Layer 1 (discovery mechanics + context)
-python eval/run.py --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
+python -m functional.runner --endpoint store               # Layer 1 (discovery mechanics + context)
+python -m eval.runner --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
 ```
 
 The `shopware-ucp-*` tools come from the **`shopware/agentic-commerce`** plugin
@@ -403,7 +425,7 @@ When a fixture fails the LLM eval:
    `#[McpToolGroup('…')]` / `meta: ['deferred' => …]` — attribute on the
    relevant PHP handler in the Shopware repo.
 3. Restart the Shopware server (the tool list is read at startup).
-4. Re-run `python eval/run.py --id <fixture-id>` to verify the fix.
+4. Re-run `python -m eval.runner --id <fixture-id>` to verify the fix.
 5. Re-run the full eval to confirm no regressions in other fixtures.
 
 ## CI: pinned Shopware ref + drift detection
@@ -474,7 +496,7 @@ trail. `git log -p tool-history/latest.json` pairs each eval pass/fail flip
 with the upstream description edit that caused it. Generate one locally with:
 
 ```bash
-python eval/snapshot_tools.py --output tool-history/latest.json
+python -m eval.snapshot_tools --output tool-history/latest.json
 ```
 
 ## Auth

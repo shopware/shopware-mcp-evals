@@ -1,16 +1,9 @@
 """Unit tests for the consolidated job-summary renderer."""
 
-import importlib.util
 import json
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-
-_spec = importlib.util.spec_from_file_location("eval_summary", ROOT / "eval" / "summary.py")
-S = importlib.util.module_from_spec(_spec)
-sys.modules["eval_summary"] = S
-_spec.loader.exec_module(S)
+from eval import summary as S
 
 
 def row(suite, model, rate, graded, gate="PASS", advisory=False, **extra):
@@ -113,8 +106,13 @@ def test_unreadable_row_is_skipped_not_fatal(tmp_path):
     assert len(rows) == 1
 
 
-def tier(passed, total, failed_ids=()):
-    return {"passed": passed, "total": total, "failed_ids": list(failed_ids), "rate": passed / total}
+def tier(passed, total, failed_ids=(), ids=None):
+    """A by_tier bucket. `ids` defaults to None to exercise the legacy path —
+    rows written before breakdown() emitted the full id list."""
+    bucket = {"passed": passed, "total": total, "failed_ids": list(failed_ids), "rate": passed / total}
+    if ids is not None:
+        bucket["ids"] = list(ids)
+    return bucket
 
 
 def test_tier_table_sums_the_same_owner_across_suites():
@@ -130,13 +128,62 @@ def test_tier_table_sums_the_same_owner_across_suites():
     assert "| dev-tools | 20/21 |" in out
 
 
+def test_a_fixture_graded_by_two_suites_counts_once():
+    """The admin primary and the second validator grade the same fixture set.
+    Summing `total` reported dev-tools out of 42 when there are 21 dev-tools
+    fixtures, and listed a both-model failure twice in the failing cell."""
+    dev = tier(1, 3, ["d1", "d2"], ids=["d1", "d2", "d3"])
+    rows = [
+        row("admin · primary", "gpt-5.4-mini", 0.9, 3, by_tier={"dev-tools": dev}),
+        row("admin · second", "gpt-4o-mini", 0.9, 3, by_tier={"dev-tools": dev}),
+    ]
+
+    out = S.render_tiers(rows)
+
+    assert "| dev-tools | 1/3 |" in out, "denominator must be 3 fixtures, not 6 fixture-runs"
+    assert out.count("`d1`") == 1, "a fixture failing on both models is still one fixture"
+
+
+def test_a_fixture_failing_on_every_model_is_marked_as_the_actionable_one():
+    """This is the column that reconciles By-owner with the cross-model table:
+    without it, a reader works through capability-gap misses that no description
+    change can fix."""
+    rows = [
+        # d1 fails in both runs; d2 only in the first.
+        row("a", "strong", 0.5, 2, by_tier={"dev-tools": tier(0, 2, ["d1", "d2"], ids=["d1", "d2"])}),
+        row("b", "weak", 0.5, 2, by_tier={"dev-tools": tier(1, 2, ["d1"], ids=["d1", "d2"])}),
+    ]
+
+    out = S.render_tiers(rows)
+
+    assert "**`d1`**" in out
+    assert "`d2`" in out and "**`d2`**" not in out
+    # One of the two failures failed everywhere.
+    assert "| 0/2 | 0% | 1 |" in out
+
+
+def test_bolded_failures_survive_truncation():
+    """With a cap of six, an owner with many capability-gap misses could
+    otherwise hide its only actionable fixture."""
+    many = [f"z{i}" for i in range(8)]
+    rows = [
+        row("a", "strong", 0.1, 9, by_tier={"core": tier(0, 9, [*many, "actionable"], ids=[*many, "actionable"])}),
+        row("b", "weak", 0.1, 9, by_tier={"core": tier(8, 9, ["actionable"], ids=[*many, "actionable"])}),
+    ]
+
+    out = S.render_tiers(rows)
+
+    assert "**`actionable`**" in out
+    assert "more)" in out, "the rest should still be summarised as a count"
+
+
 def test_tier_table_says_core_gates_and_plugins_only_count_towards_the_suite():
     rows = [row("admin · primary", "gpt-4o", 0.9, 90, by_tier={"core": tier(40, 42), "merchant-tools": tier(27, 27)})]
 
     out = S.render_tiers(rows)
 
     assert "**core gate**" in out
-    assert "| merchant-tools | 27/27 | 100% | suite rate |" in out
+    assert "| merchant-tools | 27/27 | 100% | — | suite rate | — |" in out
 
 
 def test_tier_from_an_advisory_suite_only_is_marked_advisory():
@@ -144,7 +191,13 @@ def test_tier_from_an_advisory_suite_only_is_marked_advisory():
     nothing — saying 'suite rate' there would overstate them."""
     rows = [row("store · UCP", "gpt-4o", 0.9, 42, advisory=True, by_tier={"agentic-commerce": tier(35, 39)})]
 
-    assert "| agentic-commerce | 35/39 | 90% | advisory |" in S.render_tiers(rows)
+    out = S.render_tiers(rows)
+
+    assert "| agentic-commerce | 35/39 | 90% |" in out
+    assert "advisory" in out
+    # This row carries no `ids`, so the four failures have no fixture name to
+    # print. They must still count against the denominator.
+    assert "4 unnamed (older run)" in out
 
 
 def test_core_stays_gating_even_when_an_advisory_suite_also_contributes_to_it():

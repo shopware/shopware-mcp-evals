@@ -3,21 +3,10 @@
 These cover the ordering/limits contract only — no LLM or MCP calls.
 """
 
-import importlib.util
-import sys
 import threading
 import time
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-
-# eval/run.py and functional/run.py are both called `run`. Load this one under a
-# distinct module name so importing it cannot shadow the functional runner in
-# sys.modules (which silently broke tests/test_run.py once already).
-_spec = importlib.util.spec_from_file_location("eval_run", ROOT / "eval" / "run.py")
-E = importlib.util.module_from_spec(_spec)
-sys.modules["eval_run"] = E
-_spec.loader.exec_module(E)
+from eval import runner as E
 
 FIXTURES = [{"id": f"f{i}", "expected_tool": "t", "prompt": "p", "category": "c"} for i in range(12)]
 

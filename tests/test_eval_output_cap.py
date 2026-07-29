@@ -7,21 +7,11 @@ endpoints (the `github` provider serves Mistral, which only knows the old
 name), so the parameter is probed per model rather than hardcoded.
 """
 
-import importlib.util
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-
-# eval/run.py and functional/run.py are both called `run`; load under a distinct
-# name so this cannot shadow the functional runner (see test_eval_concurrency).
-_spec = importlib.util.spec_from_file_location("eval_run", ROOT / "eval" / "run.py")
-E = importlib.util.module_from_spec(_spec)
-sys.modules["eval_run"] = E
-_spec.loader.exec_module(E)
+from eval import runner as E
 
 
 class FakeCompletions:

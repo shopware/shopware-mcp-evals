@@ -70,34 +70,62 @@ SW_SC_ACCESS_KEY = os.environ.get("SW_SC_ACCESS_KEY", "")
 
 
 class Endpoint:
-    """An MCP HTTP endpoint: its URL plus the base auth headers to send."""
+    """An MCP HTTP endpoint: its URL plus the base auth headers to send.
 
-    def __init__(self, name: str, path: str, auth_headers: dict):
+    `base_url` is a parameter rather than a read of the module-level
+    SW_BASE_URL so an endpoint can be built for a server this process was not
+    configured for — a test against a local fake, or two instances in one run.
+    It defaults to the configured value, which is what every real caller wants.
+    """
+
+    def __init__(self, name: str, path: str, auth_headers: dict, base_url: str | None = None):
         self.name = name
-        self.url = f"{SW_BASE_URL}{path}"
+        self.url = f"{(base_url or SW_BASE_URL).rstrip('/')}{path}"
         self.auth_headers = {"Content-Type": "application/json", **auth_headers}
 
 
-ADMIN = Endpoint(
-    "admin",
-    "/api/_mcp",
-    {
-        "sw-access-key": SW_ACCESS_KEY,
-        "sw-secret-access-key": SW_SECRET_ACCESS_KEY,
-    },
-)
+def admin_endpoint(
+    access_key: str | None = None, secret_access_key: str | None = None, base_url: str | None = None
+) -> Endpoint:
+    """Build an admin endpoint, defaulting to the process configuration."""
+    return Endpoint(
+        "admin",
+        "/api/_mcp",
+        {
+            "sw-access-key": access_key if access_key is not None else SW_ACCESS_KEY,
+            "sw-secret-access-key": secret_access_key if secret_access_key is not None else SW_SECRET_ACCESS_KEY,
+        },
+        base_url,
+    )
 
-# The store endpoint carries a fixed context token for the whole run so
-# cart/checkout state persists across calls (the server would otherwise issue a
-# fresh one each request).
-STORE = Endpoint(
-    "store",
-    "/store-api/_mcp",
-    {
-        "sw-access-key": SW_SC_ACCESS_KEY,
-        "sw-context-token": secrets.token_hex(16),
-    },
-)
+
+def store_endpoint(
+    access_key: str | None = None, context_token: str | None = None, base_url: str | None = None
+) -> Endpoint:
+    """Build a Store API endpoint, defaulting to the process configuration.
+
+    The context token is generated per endpoint rather than per request so
+    cart/checkout state persists across calls — the server would otherwise issue
+    a fresh one each time. Pass one explicitly to resume a known cart, or to keep
+    a test deterministic.
+    """
+    return Endpoint(
+        "store",
+        "/store-api/_mcp",
+        {
+            "sw-access-key": access_key if access_key is not None else SW_SC_ACCESS_KEY,
+            "sw-context-token": context_token or secrets.token_hex(16),
+        },
+        base_url,
+    )
+
+
+# The process-wide defaults every entry point uses. Built here rather than lazily
+# because the Store token must be stable for the lifetime of the run: two
+# `store_endpoint()` calls produce two carts, and a runner that rebuilt its
+# endpoint mid-run would silently lose the one it had been filling.
+ADMIN = admin_endpoint()
+STORE = store_endpoint()
 
 # Backwards-compatible admin aliases (referenced by older call sites).
 MCP_URL = ADMIN.url
