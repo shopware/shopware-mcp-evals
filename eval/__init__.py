@@ -1,1 +1,1 @@
-"""Layer 2: the LLM eval — baseline vs discovery tool selection."""
+"""Layer 2: the LLM eval — tool selection through the deferred discovery surface."""

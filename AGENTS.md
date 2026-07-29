@@ -84,12 +84,16 @@ python -m functional.runner
 python -m functional.runner --skip-media-upload
 python -m functional.runner --skip-dev-tools
 
-# Layer 2 — LLM eval. Each fixture runs in baseline mode (full catalogue,
-# single shot) and discovery mode (default surface + agentic meta-tool loop).
-.venv/bin/python3 -m eval.runner                          # both modes, Anthropic
+# Layer 2 — LLM eval. Discovery mode only: default surface + agentic meta-tool
+# loop. There was a `baseline` mode (full catalogue, single shot); it was removed
+# because it graded the first call without exempting the discovery meta-tools it
+# had put in the catalogue, so 40 of its 42 failures were the model correctly
+# calling shopware-toolsets-list. `--modes baseline` now errors with that reason.
+.venv/bin/python3 -m eval.runner                          # Anthropic
 .venv/bin/python3 -m eval.runner --provider openai        # OpenAI
 .venv/bin/python3 -m eval.runner --provider github        # GitHub Models (free, needs GITHUB_TOKEN)
-.venv/bin/python3 -m eval.runner --modes discovery --max-steps 8
+.venv/bin/python3 -m eval.runner --max-steps 8
+.venv/bin/python3 -m eval.runner --discovery-concurrency 12  # 4 by default; CI disables the MCP rate limiter and uses 12
 .venv/bin/python3 -m eval.runner --category disambiguation
 .venv/bin/python3 -m eval.runner --id disambig_count_vs_search
 .venv/bin/python3 -m eval.runner --no-system-prompt       # ad-hoc, skip system prompt
@@ -100,17 +104,19 @@ python -m functional.runner --skip-dev-tools
 
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
 python -m functional.runner --endpoint store
-.venv/bin/python3 -m eval.runner --endpoint store --modes discovery
+.venv/bin/python3 -m eval.runner --endpoint store
 
 # Unit tests (offline, no server) — reporting, runner logic, throttle retry
 .venv/bin/python3 -m pytest tests -q
 .venv/bin/python3 -m pytest tests -q --cov   # enforces the 80% branch-coverage floor
 ```
 
-**Gate: both models must reach 90%** in discovery mode — the primary and the
-second validator each gate themselves, and `compare_runs.py --gate both` is the
-consolidated verdict. Baseline is advisory when both modes run. Failed discovery
-fixtures are retried once.
+**Gate: the primary must reach 90%, the second validator 85%.** Each gates
+itself, and `compare_runs.py --gate both --min-pass-rate 0.9
+--min-pass-rate-second 0.85` is the consolidated verdict. The weaker model gets
+slack on purpose: its worth is the intersection with the primary, and at a shared
+90% it flapped (89% on one commit, 90% on the next, nothing changed in between).
+Failed fixtures are retried once, so a reported failure is two lost attempts.
 
 The rate is over fixtures that **ran**. Skipped ones (expected tool not
 registered) never gate. Errored ones (server 500, throttling 429) are excluded

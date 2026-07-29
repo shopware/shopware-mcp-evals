@@ -2,22 +2,25 @@
 """
 Shopware MCP LLM Eval Runner (MCP Server v2: dynamic tool discovery)
 
-Runs each fixture in up to two modes per provider:
+Runs each fixture in discovery mode: only the default advertised surface is
+passed to the model, and the runner executes discovery meta-tool calls
+(shopware-tool-search, shopware-toolsets-list, shopware-toolset-enable) for real
+against the server, feeding results back in an agentic loop. The first NON-meta
+tool call is terminal and graded against expected_tool. Meta steps are free but
+counted.
 
-  baseline   All toolsets enabled, the full catalogue passed flat to the LLM
-             in a single request. Grades the FIRST tool call. This is the v1
-             behaviour and the comparison reference.
+This is the only mode, because it is the only one the server can be in: every
+tool outside the `discovery` group is deferred, so a fresh session never sees
+the full catalogue.
 
-  discovery  Only the default advertised surface is passed. The runner
-             executes discovery meta-tool calls (shopware-tool-search,
-             shopware-toolsets-list, shopware-toolset-enable) for real
-             against the server and feeds results back in an agentic loop.
-             The first NON-meta tool call is terminal and graded against
-             expected_tool. Meta steps are free but counted.
-
-The comparison answers: does dynamic discovery make it harder for the model
-to find the right tool, which discovery path does it take, and what does
-discovery cost in tokens and steps?
+There used to be a `baseline` mode that enabled all toolsets and graded the
+first call of a single request, as a v1 comparison reference. It was removed: it
+kept the discovery meta-tools in the catalogue it handed the model but graded the
+first call without exempting them, so a model that followed the server's own
+instructions and called shopware-toolsets-list was scored as picking the wrong
+tool. 40 of its 42 failures on the primary model were that artifact, which made
+its per-tool "effect" column read as evidence for progressive disclosure when it
+was measuring the grading difference between the two modes.
 
 Usage:
     python -m eval.runner                                  # both modes, Anthropic
@@ -44,7 +47,6 @@ from eval.report import (
     RED,
     RESET,
     _render,
-    print_comparison,
     print_discovery_block,
     print_single_mode,
     print_tier_block,
@@ -56,7 +58,6 @@ from eval.scoring import (
     gate_verdict,
     is_correct,
     scored,
-    total_tokens,
 )
 from mcp_client import (
     ADMIN,
@@ -196,47 +197,6 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
             "input": response.usage.prompt_tokens,
             "output": response.usage.completion_tokens,
         },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Baseline mode — single shot against the full catalogue (v1 behaviour)
-# ---------------------------------------------------------------------------
-
-
-def run_fixture_baseline(
-    provider: str, client, tools: list[dict], fixture: dict, model: str, system_prompt: str | None
-) -> dict:
-    prompt = fixture["prompt"]
-    messages = []
-    if provider == "openai" and system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    messages.append({"role": "user", "content": prompt})
-
-    turn_fn = anthropic_turn if provider == "anthropic" else openai_turn
-    t0 = time.time()
-    turn = turn_fn(client, model, system_prompt if provider == "anthropic" else None, messages, tools)
-    latency = round(time.time() - t0, 2)
-
-    selected_tool, selected_input = None, {}
-    if turn["tool_calls"]:
-        selected_tool = turn["tool_calls"][0]["name"]
-        selected_input = turn["tool_calls"][0]["input"]
-
-    return {
-        "id": fixture["id"],
-        "category": fixture.get("category", ""),
-        "mode": "baseline",
-        "prompt": prompt,
-        "expected_tool": fixture["expected_tool"],
-        "selected_tool": selected_tool,
-        "selected_input": selected_input,
-        "passed": is_correct(selected_tool, fixture),
-        "steps": 1,
-        "latency_s": latency,
-        "stop_reason": turn["stop_reason"],
-        "tokens": turn["tokens"],
-        "notes": fixture.get("notes", ""),
     }
 
 
@@ -448,7 +408,7 @@ PROVIDER_DEFAULTS = {
 }
 
 
-def write_summary_row(provider, model, baseline, discovery, rate, ok, args) -> dict:
+def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
     """Record this run's verdict as a JSON row for the consolidated job summary.
 
     Reading a run's outcome from the log alone doesn't work: the tail is
@@ -466,8 +426,10 @@ def write_summary_row(provider, model, baseline, discovery, rate, ok, args) -> d
 
     Returns the row (for tests); writes it only when --summary-row is set.
     """
-    graded = discovery if discovery is not None else baseline
-    throttled = count_rate_limited(baseline) + count_rate_limited(discovery)
+    # `or []` throughout: a caller with no results at all must still get a row,
+    # because the row is how the job summary learns the suite ran.
+    graded = discovery or []
+    throttled = count_rate_limited(graded)
     row = {
         "suite": args.suite_label or args.endpoint,
         "provider": provider,
@@ -570,29 +532,6 @@ def run_fixtures_concurrently(fixtures: list[dict], worker, workers: int) -> lis
     return [r for r in results if r is not None]
 
 
-def run_baseline_pass(provider, client, fixtures, model, system_prompt, available_tools, endpoint=ADMIN, workers=1):
-    print(f"\n{BOLD}── Mode: baseline (full catalogue, single shot) ──{RESET}\n")
-    session_id, _ = mcp_init(endpoint=endpoint)
-    enable_all_toolsets(session_id, endpoint=endpoint)
-    mcp_tools = mcp_tools_list_all(session_id, endpoint=endpoint)
-    tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
-    tools = tools_fn(mcp_tools)
-    print(f"  Catalogue: {len(mcp_tools)} tools (all toolsets enabled), concurrency={workers}\n")
-
-    def worker(fixture: dict) -> dict:
-        if fixture["expected_tool"] not in available_tools:
-            result = skipped_result(fixture, "baseline")
-        else:
-            try:
-                result = run_fixture_baseline(provider, client, tools, fixture, model, system_prompt)
-            except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
-                result = error_result(fixture, "baseline", exc)
-        result["_line"] = _render(result)
-        return result
-
-    return run_fixtures_concurrently(fixtures, worker, workers)
-
-
 def run_discovery_pass(
     provider,
     client,
@@ -654,9 +593,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="anthropic | openai | github (GitHub Models: free, OpenAI-compatible, auth via GITHUB_TOKEN)",
     )
     parser.add_argument("--model", default=None)
-    parser.add_argument(
-        "--modes", default="baseline,discovery", help="Comma-separated: baseline, discovery (default: both)"
-    )
+    # Kept as a flag rather than deleted so existing invocations and the docs'
+    # `--modes discovery` keep working; `discovery` is now the only legal value.
+    parser.add_argument("--modes", default="discovery", help="Only 'discovery' is supported (baseline was removed)")
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -667,19 +606,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-system-prompt", action="store_true", help="Skip the MCP server system prompt (ad-hoc debugging)"
     )
     # Fixtures are independent and almost entirely LLM-API-bound, so running them
-    # concurrently cuts wall-clock roughly linearly. Discovery is kept lower
-    # because each step also hits the MCP endpoint, which throttles (HTTP 429).
-    parser.add_argument(
-        "--concurrency",
-        type=int,
-        default=int(os.environ.get("EVAL_CONCURRENCY", "8")),
-        help="Parallel fixtures in baseline mode (default 8; 1 = sequential)",
-    )
+    # concurrently cuts wall-clock roughly linearly. This used to be capped at 4
+    # because each discovery step also hits the MCP endpoint, which answered 429
+    # once CI inherited the production mcp_admin_api limits; the workflow now
+    # disables that limiter on its throwaway instance, so the cap is the model
+    # provider's own rate limit and the server's worker pool instead.
     parser.add_argument(
         "--discovery-concurrency",
         type=int,
         default=int(os.environ.get("EVAL_DISCOVERY_CONCURRENCY", "4")),
-        help="Parallel fixtures in discovery mode (default 4; lower, it also calls MCP)",
+        help=(
+            "Parallel fixtures (default 4, which is what an instance with the MCP rate limiter "
+            "still on can take; CI disables that limiter and sets EVAL_DISCOVERY_CONCURRENCY=12)"
+        ),
     )
     parser.add_argument(
         "--min-pass-rate",
@@ -742,7 +681,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_modes(spec: str) -> list[str]:
     modes = [m.strip() for m in spec.split(",") if m.strip()]
-    unknown = [m for m in modes if m not in ("baseline", "discovery")]
+    if "baseline" in modes:
+        raise ConfigError(
+            "baseline mode was removed: it graded the first call without exempting the discovery "
+            "meta-tools it had put in the catalogue, so following the server's own instructions "
+            "scored as the wrong tool. Use --modes discovery."
+        )
+    unknown = [m for m in modes if m != "discovery"]
     if unknown:
         raise ConfigError(f"unknown mode(s): {', '.join(unknown)}")
     if not modes:
@@ -844,7 +789,6 @@ def build_report(
     provider: str,
     model: str,
     fixtures: list[dict],
-    baseline: list[dict] | None,
     discovery: list[dict] | None,
     system_prompt_enabled: bool,
     max_steps: int,
@@ -860,14 +804,6 @@ def build_report(
         "system_prompt": system_prompt_enabled,
         "max_steps": max_steps,
     }
-    if baseline is not None:
-        report["modes"]["baseline"] = {
-            "passed": sum(1 for r in scored(baseline) if r["passed"]),
-            "failed": sum(1 for r in scored(baseline) if not r["passed"]),
-            "skipped": sum(1 for r in baseline if r.get("skipped")),
-            "tokens": total_tokens(scored(baseline)),
-            "results": baseline,
-        }
     if discovery is not None:
         report["modes"]["discovery"] = {
             "passed": sum(1 for r in scored(discovery) if r["passed"]),
@@ -876,14 +812,12 @@ def build_report(
             "results": discovery,
         }
         report["discovery_summary"] = discovery_summary(discovery)
-    # Per-owning-repo rates over the gating mode, so the report answers "which
-    # codebase regressed" without re-deriving attribution downstream. Discovery
-    # is the mode that gates; baseline only carries attribution when it ran
-    # alone. `or []` covers neither having run — parse_modes rejects an empty
-    # mode list, so that is unreachable via the CLI, but an empty table is the
-    # honest answer rather than a crash for a direct caller.
-    gating = discovery if discovery is not None else baseline
-    report["by_tier"] = breakdown(executed(gating or []))
+    # Per-owning-repo rates, so the report answers "which codebase regressed"
+    # without re-deriving attribution downstream. `or []` covers discovery not
+    # having run — parse_modes rejects an empty mode list, so that is unreachable
+    # via the CLI, but an empty table is the honest answer rather than a crash for
+    # a direct caller.
+    report["by_tier"] = breakdown(executed(discovery or []))
     return report
 
 
@@ -942,18 +876,7 @@ def run_suite(args) -> int:
     if absent:
         print(f"Catalogue: {len(available_tools)} tools; will skip fixtures for absent: {', '.join(absent)}")
 
-    results_baseline = results_discovery = None
-    if "baseline" in modes:
-        results_baseline = run_baseline_pass(
-            provider,
-            client,
-            fixtures,
-            model,
-            system_prompt,
-            available_tools,
-            endpoint=endpoint,
-            workers=args.concurrency,
-        )
+    results_discovery = None
     if "discovery" in modes:
         results_discovery = run_discovery_pass(
             provider,
@@ -968,18 +891,12 @@ def run_suite(args) -> int:
         )
 
     # `_line` is progress-display scaffolding, not part of the report contract.
-    for bucket in (results_baseline, results_discovery):
-        for result in bucket or []:
-            result.pop("_line", None)
+    for result in results_discovery or []:
+        result.pop("_line", None)
 
-    if results_baseline and results_discovery:
-        print_comparison(results_baseline, results_discovery)
-        print_discovery_block(results_discovery, results_baseline)
-    elif results_discovery:
+    if results_discovery:
         print_single_mode(results_discovery, "discovery")
-        print_discovery_block(results_discovery, None)
-    elif results_baseline:
-        print_single_mode(results_baseline, "baseline")
+        print_discovery_block(results_discovery)
 
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     output_path = Path(args.output or BASE / "results" / f"eval-{provider}-{ts}.json")
@@ -990,7 +907,6 @@ def run_suite(args) -> int:
                 provider,
                 model,
                 fixtures,
-                results_baseline,
                 results_discovery,
                 not args.no_system_prompt,
                 args.max_steps,
@@ -1000,23 +916,21 @@ def run_suite(args) -> int:
     )
     print(f"Report saved: {output_path}")
 
-    # Gate: discovery mode is the v2 target behaviour; baseline is the comparison
-    # reference and stays advisory when both run. Skipped fixtures (tool absent on
-    # this instance) do not gate.
+    # Gate: skipped fixtures (tool absent on this instance) do not gate.
     #
     # The LLM eval is a quality signal against a nondeterministic model, so it
     # gates on a pass-rate threshold rather than a strict 100% — a couple of
     # borderline fixtures shouldn't flip CI red, but a real regression (the rate
-    # collapsing) still fails. Each failed discovery fixture is also retried once
-    # (see run_discovery_pass). Set --min-pass-rate 1.0 for strict.
+    # collapsing) still fails. Each failed fixture is also retried once (see
+    # run_discovery_pass). Set --min-pass-rate 1.0 for strict.
     verdict = gate_verdict(
-        results_discovery if results_discovery is not None else results_baseline,
+        results_discovery,
         min_pass_rate=args.min_pass_rate,
         min_core_pass_rate=args.min_core_pass_rate,
         max_error_rate=args.max_error_rate,
     )
     print_gate(verdict, args)
-    write_summary_row(provider, model, results_baseline, results_discovery, verdict["rate"], verdict["ok"], args)
+    write_summary_row(provider, model, results_discovery, verdict["rate"], verdict["ok"], args)
     return 0 if verdict["ok"] else 1
 
 

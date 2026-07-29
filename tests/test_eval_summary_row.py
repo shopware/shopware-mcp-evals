@@ -28,7 +28,6 @@ def test_row_carries_everything_the_summary_table_needs(tmp_path, capsys):
     row = E.write_summary_row(
         "openai",
         "gpt-4o",
-        None,
         results(83, n_errored=2),
         0.92,
         True,
@@ -71,7 +70,7 @@ def test_row_splits_by_owning_repository(capsys):
         {"id": "m1", "passed": True, "expected_tool": "merchant-order-summary"},
     ]
 
-    row = E.write_summary_row("openai", "gpt-4o", None, mixed, 0.67, False, args())
+    row = E.write_summary_row("openai", "gpt-4o", mixed, 0.67, False, args())
     capsys.readouterr()
 
     assert row["by_tier"]["dev-tools"] == {
@@ -86,28 +85,28 @@ def test_row_splits_by_owning_repository(capsys):
 
 
 def test_failing_gate_is_recorded_as_fail(tmp_path, capsys):
-    row = E.write_summary_row("openai", "gpt-4o", None, results(1), 0.5, False, args())
+    row = E.write_summary_row("openai", "gpt-4o", results(1), 0.5, False, args())
     capsys.readouterr()
 
     assert row["gate"] == "FAIL"
 
 
 def test_advisory_flag_reaches_the_row(capsys):
-    row = E.write_summary_row("openai", "gpt-4o", None, results(1), 1.0, True, args(advisory=True))
+    row = E.write_summary_row("openai", "gpt-4o", results(1), 1.0, True, args(advisory=True))
     capsys.readouterr()
 
     assert row["advisory"] is True
 
 
 def test_suite_defaults_to_the_endpoint_when_unlabelled(capsys):
-    row = E.write_summary_row("openai", "gpt-4o", None, results(1), 1.0, True, args(endpoint="store"))
+    row = E.write_summary_row("openai", "gpt-4o", results(1), 1.0, True, args(endpoint="store"))
     capsys.readouterr()
 
     assert row["suite"] == "store"
 
 
 def test_no_file_is_written_without_summary_row(tmp_path, capsys):
-    E.write_summary_row("openai", "gpt-4o", None, results(1), 1.0, True, args())
+    E.write_summary_row("openai", "gpt-4o", results(1), 1.0, True, args())
 
     assert list(tmp_path.iterdir()) == []
     # Still on stdout: the job summary only renders at the end of the job, so a
@@ -115,16 +114,18 @@ def test_no_file_is_written_without_summary_row(tmp_path, capsys):
     assert "Summary row:" in capsys.readouterr().out
 
 
-def test_baseline_is_used_when_discovery_did_not_run(capsys):
-    row = E.write_summary_row("openai", "gpt-4o", results(5), None, 1.0, True, args())
+def test_a_run_with_no_results_still_produces_a_row(capsys):
+    """A row is how the job summary learns a suite ran at all, so it must survive
+    an empty result set rather than raising on len(None)."""
+    row = E.write_summary_row("openai", "gpt-4o", None, 0.0, False, args())
     capsys.readouterr()
 
-    assert row["graded"] == 5
+    assert row["graded"] == 0 and row["gate"] == "FAIL"
 
 
-def test_throttled_fixtures_are_counted_across_both_modes(capsys):
+def test_throttled_fixtures_are_counted(capsys):
     throttled = [{"id": "t1", "passed": False, "error": "Error code: 429 rate limit"}]
-    row = E.write_summary_row("openai", "gpt-4o", throttled, throttled, 0.0, False, args())
+    row = E.write_summary_row("openai", "gpt-4o", throttled, 0.0, False, args())
 
-    assert row["throttled"] == 2
+    assert row["throttled"] == 1
     assert "hit provider rate limits" in capsys.readouterr().out

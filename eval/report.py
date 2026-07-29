@@ -10,7 +10,7 @@ live progress feed; the scoring they render lives in eval/scoring.py.
 
 import json
 
-from eval.scoring import discovery_summary, score, scored, total_tokens
+from eval.scoring import discovery_summary, score, scored
 from ownership import OPTIONAL, breakdown
 
 RESET = "\033[0m"
@@ -24,24 +24,6 @@ CYAN = "\033[0;36m"
 
 def pct_color(pct: int) -> str:
     return GREEN if pct >= 80 else (YELLOW if pct >= 50 else RED)
-
-
-def _delta(before: int, after: int, total: int) -> str:
-    diff = after - before
-    if diff > 0:
-        return f"{GREEN}+{diff}{RESET}"
-    if diff < 0:
-        return f"{RED}{diff}{RESET}"
-    return f"{DIM}0{RESET}"
-
-
-def _arrow(pct_before: int, pct_after: int) -> str:
-    diff = pct_after - pct_before
-    if diff > 0:
-        return f"{GREEN}↑ +{diff}pp{RESET}"
-    if diff < 0:
-        return f"{RED}↓ {diff}pp{RESET}"
-    return f"{DIM}={RESET}"
 
 
 def _render(result: dict) -> str:
@@ -75,60 +57,20 @@ def print_single_mode(results: list[dict], mode: str):
         pct = round(100 * c["pass"] / c["total"]) if c["total"] else 0
         print(f"  {cat:<22} {pct_color(pct)}{c['pass']}/{c['total']} ({pct}%){RESET}")
 
-
-def print_comparison(baseline: list[dict], discovery: list[dict]):
-    s_base = score(baseline)
-    s_disc = score(discovery)
-
-    total = len(scored(baseline))
-    p_base = sum(1 for r in scored(baseline) if r["passed"])
-    p_disc = sum(1 for r in scored(discovery) if r["passed"])
-    skipped = sum(1 for r in discovery if r.get("skipped"))
-
-    print(f"\n{BOLD}{'=' * 78}{RESET}")
-    print(f"{BOLD}Comparison: baseline (full catalogue)  vs  discovery (default surface){RESET}")
-    print(f"{'=' * 78}")
-    skip_note = f"  ({skipped} skipped — tool not on this instance)" if skipped else ""
-    print(
-        f"  Overall: {GREEN}{p_base}/{total}{RESET} baseline  →  {GREEN}{p_disc}/{total}{RESET} discovery  "
-        f"(Δ {_delta(p_base, p_disc, total)}){DIM}{skip_note}{RESET}"
-    )
-
-    # By category
-    all_cats = sorted(set(s_base["cats"]) | set(s_disc["cats"]))
-    print(f"\n{BOLD}By category:{RESET}")
-    print(f"  {'Category':<22} {'Baseline':>12}  {'Discovery':>12}  {'Effect'}")
-    print(f"  {'-' * 22} {'-' * 12}  {'-' * 12}  {'-' * 20}")
-    for cat in all_cats:
-        cb = s_base["cats"].get(cat, {"pass": 0, "total": 0})
-        cd = s_disc["cats"].get(cat, {"pass": 0, "total": 0})
-        pct_b = round(100 * cb["pass"] / cb["total"]) if cb["total"] else 0
-        pct_d = round(100 * cd["pass"] / cd["total"]) if cd["total"] else 0
-        print(
-            f"  {cat:<22} {pct_color(pct_b)}{cb['pass']}/{cb['total']} ({pct_b}%){RESET:>4}  "
-            f"{pct_color(pct_d)}{cd['pass']}/{cd['total']} ({pct_d}%){RESET:>4}  "
-            f"{_arrow(pct_b, pct_d)}"
-        )
-
-    # Per tool
-    all_tools = sorted(set(s_base["tools"]) | set(s_disc["tools"]))
+    # Per-tool accuracy. This used to be the three-column baseline/discovery/effect
+    # table; dropping baseline mode left the one column that meant anything. It is
+    # the reason to read this report at all: a tool below 80% is flagged, and the
+    # "Failing" block further down names what got picked instead.
     print(f"\n{BOLD}Per-tool accuracy:{RESET}")
-    print(f"  {'Tool':<42} {'Baseline':>10}  {'Discovery':>10}  {'Effect'}")
-    print(f"  {'-' * 42} {'-' * 10}  {'-' * 10}  {'-' * 20}")
-    for tool in all_tools:
-        tb = s_base["tools"].get(tool, {"pass": 0, "total": 0})
-        td = s_disc["tools"].get(tool, {"pass": 0, "total": 0})
-        pct_b = round(100 * tb["pass"] / tb["total"]) if tb["total"] else 0
-        pct_d = round(100 * td["pass"] / td["total"]) if td["total"] else 0
-        flag = f"  {RED}⚠{RESET}" if pct_d < 80 else ""
-        print(
-            f"  {tool:<42} {pct_color(pct_b)}{tb['pass']}/{tb['total']} ({pct_b}%){RESET:>4}  "
-            f"{pct_color(pct_d)}{td['pass']}/{td['total']} ({pct_d}%){RESET:>4}  "
-            f"{_arrow(pct_b, pct_d)}{flag}"
-        )
+    print(f"  {'Tool':<42} {'Passed':>10}")
+    print(f"  {'-' * 42} {'-' * 10}")
+    for tool, t in sorted(s["tools"].items()):
+        pct = round(100 * t["pass"] / t["total"]) if t["total"] else 0
+        flag = f"  {RED}⚠{RESET}" if pct < 80 else ""
+        print(f"  {tool:<42} {pct_color(pct)}{t['pass']}/{t['total']} ({pct}%){RESET}{flag}")
 
 
-def print_discovery_block(discovery: list[dict], baseline: list[dict] | None):
+def print_discovery_block(discovery: list[dict]):
     s = discovery_summary(discovery)
     print(f"\n{BOLD}Discovery behaviour:{RESET}")
     print(f"  Avg steps to tool selection: {s['avg_steps']}  (step-cap hit: {s['max_steps_hit']}/{s['fixtures']})")
@@ -145,13 +87,7 @@ def print_discovery_block(discovery: list[dict], baseline: list[dict] | None):
             f"correct toolset: {s['toolset_enable_correct']}/{s['toolset_enable_graded']}"
         )
     d_tok = s["tokens"]
-    print(f"  Tokens (discovery): {d_tok['input']:,} in / {d_tok['output']:,} out")
-    if baseline:
-        b_tok = total_tokens(baseline)
-        print(f"  Tokens (baseline):  {b_tok['input']:,} in / {b_tok['output']:,} out")
-        if b_tok["input"]:
-            ratio = round(d_tok["input"] / b_tok["input"], 2)
-            print(f"  Input-token ratio discovery/baseline: {ratio}x")
+    print(f"  Tokens: {d_tok['input']:,} in / {d_tok['output']:,} out")
 
     skipped = [r for r in discovery if r.get("skipped")]
     if skipped:

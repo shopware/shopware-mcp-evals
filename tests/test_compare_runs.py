@@ -114,7 +114,10 @@ def test_unmatched_fixtures_are_flagged():
 
 
 def test_missing_discovery_mode_yields_empty_index():
-    assert C.discovery_index({"modes": {"baseline": {"results": [{"id": "f1", "passed": True}]}}}) == {}
+    """A report without a discovery mode compares to nothing rather than crashing,
+    e.g. one written by a run that died during setup."""
+    assert C.discovery_index({"modes": {}}) == {}
+    assert C.discovery_index({"modes": {"other": {"results": [{"id": "f1", "passed": True}]}}}) == {}
     assert C.pass_rate({}) == (0, 0, 0.0)
 
 
@@ -133,7 +136,7 @@ def test_render_lists_worst_tool_first():
         ("primary", True, False, 0),  # weak model below threshold is tolerated
         ("primary", False, True, 1),
         ("both", True, True, 0),
-        ("both", True, False, 1),  # this is the "both over 90%" mode
+        ("both", True, False, 1),  # this is the "both clear their threshold" mode
     ],
 )
 def test_gate_modes(tmp_path, monkeypatch, capsys, gate, strong_pass, weak_pass, expected):
@@ -146,6 +149,82 @@ def test_gate_modes(tmp_path, monkeypatch, capsys, gate, strong_pass, weak_pass,
     monkeypatch.setattr(sys, "argv", ["compare_runs.py", str(a), str(b), "--gate", gate])
 
     assert C.main() == expected
+    capsys.readouterr()
+
+
+def _two_reports(tmp_path, strong_rate: float, weak_rate: float):
+    """Reports whose pass rates are `rate`, built from 20 fixtures so a threshold
+    of 0.85 and one of 0.9 can be told apart."""
+
+    def rows(rate):
+        passes = round(rate * 20)
+        return [(f"f{i}", i < passes, "t1", False) for i in range(20)]
+
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    a.write_text(json.dumps(report("strong", rows(strong_rate))))
+    b.write_text(json.dumps(report("weak", rows(weak_rate))))
+    return a, b
+
+
+def test_the_second_validator_gets_its_own_lower_threshold(tmp_path, monkeypatch, capsys):
+    """The weak model flapped at a shared 90%, so it gates at 85%. 0.85 has to pass
+    on the second while the same rate would fail on the primary."""
+    a, b = _two_reports(tmp_path, strong_rate=0.9, weak_rate=0.85)
+
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_runs.py",
+            str(a),
+            str(b),
+            "--gate",
+            "both",
+            "--min-pass-rate",
+            "0.9",
+            "--min-pass-rate-second",
+            "0.85",
+        ],
+    )
+
+    assert C.main() == 0
+    out = capsys.readouterr().out
+    assert ">= 90%" in out and ">= 85%" in out, "each row is rendered against its own threshold"
+
+
+def test_the_primary_is_still_held_to_its_own_threshold(tmp_path, monkeypatch, capsys):
+    """Slack for the second validator must not leak into the primary."""
+    a, b = _two_reports(tmp_path, strong_rate=0.85, weak_rate=0.85)
+
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "compare_runs.py",
+            str(a),
+            str(b),
+            "--gate",
+            "both",
+            "--min-pass-rate",
+            "0.9",
+            "--min-pass-rate-second",
+            "0.85",
+        ],
+    )
+
+    assert C.main() == 1
+    capsys.readouterr()
+
+
+def test_the_second_threshold_defaults_to_the_primary_one(tmp_path, monkeypatch, capsys):
+    a, b = _two_reports(tmp_path, strong_rate=0.9, weak_rate=0.85)
+
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(sys, "argv", ["compare_runs.py", str(a), str(b), "--gate", "both", "--min-pass-rate", "0.9"])
+
+    assert C.main() == 1, "without an explicit second threshold both are held to 90%"
     capsys.readouterr()
 
 

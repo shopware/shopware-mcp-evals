@@ -5,9 +5,8 @@ codes are stripped before asserting — what matters is the numbers and which
 lines appear, not the escape sequences.
 
 Rendering is low-consequence line by line, but not free of arithmetic:
-print_comparison computes six percentages and two deltas per row, and
-print_discovery_block derives a token ratio. A wrong denominator there
-misreports a run without failing anything.
+print_single_mode computes a rate per category and per tool. A wrong denominator
+there misreports a run without failing anything.
 """
 
 import re
@@ -24,9 +23,11 @@ def plain(capsys) -> str:
 
 
 def base(fid, passed=True, tool="shopware-entity-read", category="unambiguous", **over):
+    """A minimal record. Its mode is deliberately not "discovery", so the tests
+    below can show which lines _render adds only for a discovery record."""
     return {
         "id": fid,
-        "mode": "baseline",
+        "mode": "other",
         "passed": passed,
         "expected_tool": tool,
         "selected_tool": tool if passed else "other-tool",
@@ -57,24 +58,11 @@ def disc(fid, passed=True, **over):
 
 
 # ---------------------------------------------------------------------------
-# pct_color / _delta / _arrow
+# pct_color
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("pct,expected", [(100, R.GREEN), (80, R.GREEN), (79, R.YELLOW), (50, R.YELLOW), (49, R.RED)])
 def test_pct_color_thresholds_are_inclusive_at_the_boundary(pct, expected):
     assert R.pct_color(pct) == expected
-
-
-def test_delta_signs_the_change():
-    assert "+3" in R._delta(5, 8, 10)
-    assert "-3" in R._delta(8, 5, 10)
-    assert "0" in R._delta(5, 5, 10)
-
-
-def test_arrow_reports_percentage_points_not_percent():
-    """A move from 50% to 60% is +10pp, not +20%."""
-    assert "+10pp" in R._arrow(50, 60)
-    assert "-10pp" in R._arrow(60, 50)
-    assert "=" in R._arrow(50, 50)
 
 
 # ---------------------------------------------------------------------------
@@ -144,64 +132,45 @@ def test_single_mode_notes_skips_outside_the_denominator(capsys):
 
 
 def test_single_mode_omits_the_skip_note_when_nothing_skipped(capsys):
-    R.print_single_mode([base("a")], "baseline")
+    R.print_single_mode([base("a")], "discovery")
 
     assert "skipped" not in plain(capsys)
 
 
 def test_single_mode_of_an_empty_run_does_not_divide_by_zero(capsys):
-    R.print_single_mode([], "baseline")
+    R.print_single_mode([], "discovery")
 
     assert "Overall: 0/0 (0%)" in plain(capsys)
 
 
-# ---------------------------------------------------------------------------
-# print_comparison
-# ---------------------------------------------------------------------------
-def test_comparison_shows_both_modes_and_the_delta(capsys):
-    baseline = [base("a"), base("b")]
-    discovery = [disc("a"), disc("b", passed=False)]
-
-    R.print_comparison(baseline, discovery)
+def test_single_mode_reports_accuracy_per_tool(capsys):
+    """The per-tool table is what the report is read for: it says which tool the
+    misses were against, not just that the run lost a fixture."""
+    R.print_single_mode([base("a"), base("b", passed=False), base("c", tool="shopware-media-upload")], "discovery")
     out = plain(capsys)
 
-    assert "2/2" in out and "1/2" in out
-    assert "-1" in out, "one fixture lost going from baseline to discovery"
+    assert "Per-tool accuracy:" in out
+    assert "shopware-entity-read" in out and "1/2 (50%)" in out
+    assert "shopware-media-upload" in out and "1/1 (100%)" in out
 
 
-def test_comparison_lists_a_category_present_in_only_one_mode(capsys):
-    """The two modes can grade different sets when one skips; a category must not
-    vanish from the table because it is missing on one side."""
-    R.print_comparison([base("a", category="only_baseline")], [disc("b", category="only_discovery")])
-    out = plain(capsys)
-
-    assert "only_baseline" in out and "only_discovery" in out
-    assert "0/0 (0%)" in out
-
-
-def test_comparison_flags_a_tool_under_eighty_percent_in_discovery(capsys):
-    R.print_comparison([base("a")], [disc("a", passed=False)])
+def test_single_mode_flags_a_tool_below_eighty_percent(capsys):
+    R.print_single_mode([base("a", passed=False)], "discovery")
 
     assert "⚠" in plain(capsys)
 
 
-def test_comparison_does_not_flag_a_tool_at_full_marks(capsys):
-    R.print_comparison([base("a")], [disc("a")])
+def test_single_mode_does_not_flag_a_tool_at_full_marks(capsys):
+    R.print_single_mode([base("a")], "discovery")
 
     assert "⚠" not in plain(capsys)
-
-
-def test_comparison_notes_skips(capsys):
-    R.print_comparison([base("a")], [disc("a"), disc("s", skipped=True)])
-
-    assert "1 skipped" in plain(capsys)
 
 
 # ---------------------------------------------------------------------------
 # print_discovery_block
 # ---------------------------------------------------------------------------
 def test_discovery_block_reports_steps_and_path_distribution(capsys):
-    R.print_discovery_block([disc("a"), disc("b", discovery_path="search")], None)
+    R.print_discovery_block([disc("a"), disc("b", discovery_path="search")])
     out = plain(capsys)
 
     assert "Avg steps to tool selection: 2.0" in out
@@ -209,52 +178,33 @@ def test_discovery_block_reports_steps_and_path_distribution(capsys):
 
 
 def test_discovery_block_reports_search_hit_rate_only_when_search_was_used(capsys):
-    R.print_discovery_block([disc("a")], None)
+    R.print_discovery_block([disc("a")])
     assert "tool-search used" not in plain(capsys)
 
-    R.print_discovery_block([disc("a", search_hit=True), disc("b", search_hit=False)], None)
+    R.print_discovery_block([disc("a", search_hit=True), disc("b", search_hit=False)])
     out = plain(capsys)
     assert "tool-search used in 2 fixtures" in out
     assert "50%" in out
 
 
 def test_discovery_block_reports_toolset_routing_when_graded(capsys):
-    R.print_discovery_block([disc("a"), disc("b", passed=False)], None)
+    R.print_discovery_block([disc("a"), disc("b", passed=False)])
     out = plain(capsys)
 
     assert "toolset-enable graded in 2 fixtures" in out
     assert "correct toolset: 1/2" in out
 
 
-def test_discovery_block_compares_tokens_against_baseline(capsys):
-    """The token ratio is the cost of discovery, and the headline number of the
-    whole comparison."""
-    discovery = [disc("a", tokens={"input": 300, "output": 20})]
-    baseline = [base("a", tokens={"input": 100, "output": 10})]
+def test_discovery_block_totals_the_tokens(capsys):
+    """Token cost is what the run is compared against between commits, so the
+    total has to be summed over the fixtures rather than taken from one."""
+    R.print_discovery_block([disc("a", tokens={"input": 300, "output": 20}), disc("b")])
 
-    R.print_discovery_block(discovery, baseline)
-    out = plain(capsys)
-
-    assert "Tokens (discovery): 300 in / 20 out" in out
-    assert "Tokens (baseline):  100 in / 10 out" in out
-    assert "ratio discovery/baseline: 3.0x" in out
-
-
-def test_discovery_block_omits_the_ratio_when_baseline_used_no_tokens(capsys):
-    """Guards a division by zero on a baseline that errored before any call."""
-    R.print_discovery_block([disc("a")], [base("a", tokens={"input": 0, "output": 0})])
-
-    assert "ratio" not in plain(capsys)
-
-
-def test_discovery_block_omits_baseline_lines_when_it_did_not_run(capsys):
-    R.print_discovery_block([disc("a")], None)
-
-    assert "Tokens (baseline)" not in plain(capsys)
+    assert "Tokens: 400 in / 30 out" in plain(capsys)
 
 
 def test_discovery_block_names_the_skipped_fixtures(capsys):
-    R.print_discovery_block([disc("a"), disc("s1", skipped=True), disc("s2", skipped=True)], None)
+    R.print_discovery_block([disc("a"), disc("s1", skipped=True), disc("s2", skipped=True)])
     out = plain(capsys)
 
     assert "Skipped (expected tool not registered on this instance): s1, s2" in out
@@ -270,7 +220,7 @@ def test_discovery_block_details_each_failure(capsys):
         meta_calls=[{"tool": "shopware-toolsets-list", "input": {}}],
     )
 
-    R.print_discovery_block([failed], None)
+    R.print_discovery_block([failed])
     out = plain(capsys)
 
     assert "Failing in discovery mode:" in out
@@ -283,13 +233,13 @@ def test_discovery_block_details_each_failure(capsys):
 
 
 def test_discovery_block_omits_the_trail_when_there_were_no_meta_calls(capsys):
-    R.print_discovery_block([disc("f1", passed=False, meta_calls=[])], None)
+    R.print_discovery_block([disc("f1", passed=False, meta_calls=[])])
 
     assert "Trail:" not in plain(capsys)
 
 
 def test_discovery_block_says_nothing_about_failures_on_a_clean_run(capsys):
-    R.print_discovery_block([disc("a")], None)
+    R.print_discovery_block([disc("a")])
 
     assert "Failing in discovery mode" not in plain(capsys)
 

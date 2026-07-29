@@ -1,9 +1,13 @@
-"""Baseline mode, the provider adapters, and the per-fixture result records.
+"""The provider adapters, system-prompt routing, and the per-fixture result records.
 
-Baseline is the v1 reference the whole discovery comparison is measured against:
-the full catalogue in one request, grading the first tool call. It reached the
-model on every run but was never covered, because doing so needs a fake provider
-client — which is all these are.
+These need a fake provider client, which is what most of this file is.
+
+This was `test_eval_baseline.py`, covering the removed baseline mode alongside
+these. The provider-specific system-prompt tests now run against
+`run_fixture_discovery` instead, which is the live path and had no direct test of
+its own; the two providers differ there (OpenAI takes the prompt as a message,
+Anthropic as a top-level parameter) and sending it the wrong way silently drops
+it.
 
 The result records matter as much as the flow: `skipped_result` and
 `error_result` are what keep an absent plugin and a server 500 out of the
@@ -51,6 +55,16 @@ def stub_turns(monkeypatch):
     monkeypatch.setattr(E, "openai_turn", fake_turn)
 
 
+@pytest.fixture
+def stub_mcp(monkeypatch):
+    """Discovery opens a session and reads the advertised surface before its first
+    turn, so both have to answer for the fixture to reach the fake client."""
+    monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: ("sid", ""))
+    monkeypatch.setattr(
+        E, "mcp_tools_list_all", lambda _s, endpoint=None: [{"name": TOOL, "description": "d", "inputSchema": {}}]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Provider tool-schema adapters
 # ---------------------------------------------------------------------------
@@ -79,65 +93,63 @@ def test_a_tool_without_a_schema_gets_an_empty_object_not_null(adapter, key):
 
 
 # ---------------------------------------------------------------------------
-# run_fixture_baseline
+# System-prompt routing, which differs per provider
 # ---------------------------------------------------------------------------
-def test_baseline_grades_the_first_tool_call():
-    result = run = E.run_fixture_baseline("openai", FakeClient(), [], fixture(), "m", None)
-
-    assert run["selected_tool"] == TOOL
-    assert result["passed"] is True
-    assert result["mode"] == "baseline" and result["steps"] == 1
-
-
-def test_baseline_marks_a_wrong_tool_as_failed():
-    result = E.run_fixture_baseline("openai", FakeClient("other-tool"), [], fixture(), "m", None)
-
-    assert result["selected_tool"] == "other-tool" and result["passed"] is False
-
-
-def test_baseline_records_no_selection_when_the_model_called_nothing():
-    result = E.run_fixture_baseline("openai", FakeClient(None), [], fixture(), "m", None)
-
-    assert result["selected_tool"] is None and result["selected_input"] == {}
-    assert result["passed"] is False
-    assert result["stop_reason"] == "stop"
-
-
-def test_baseline_accepts_an_alternative_from_acceptable_tools():
-    result = E.run_fixture_baseline("openai", FakeClient("alt"), [], fixture(acceptable_tools=["alt"]), "m", None)
-
-    assert result["passed"] is True
-
-
-def test_openai_carries_the_system_prompt_in_the_messages():
-    """The two providers differ here: OpenAI takes it as a message, Anthropic as
-    a top-level parameter, and sending it the wrong way silently drops it."""
+def test_openai_carries_the_system_prompt_in_the_messages(stub_mcp):
     client = FakeClient()
 
-    E.run_fixture_baseline("openai", client, [], fixture(), "m", "SYSTEM")
+    E.run_fixture_discovery("openai", client, fixture(), "m", "SYSTEM", 6)
 
     assert client.seen[0]["messages"][0] == {"role": "system", "content": "SYSTEM"}
     assert client.seen[0]["system"] is None
 
 
-def test_anthropic_carries_the_system_prompt_as_a_parameter():
+def test_anthropic_carries_the_system_prompt_as_a_parameter(stub_mcp):
     client = FakeClient()
 
-    E.run_fixture_baseline("anthropic", client, [], fixture(), "m", "SYSTEM")
+    E.run_fixture_discovery("anthropic", client, fixture(), "m", "SYSTEM", 6)
 
     assert client.seen[0]["system"] == "SYSTEM"
-    assert [m["role"] for m in client.seen[0]["messages"]] == ["user"]
+    # The agentic loop appends to the same list it handed over, so assert the
+    # invariant rather than the exact contents: Anthropic must get no system
+    # message, because it already has the prompt as a parameter.
+    assert client.seen[0]["messages"][0]["role"] == "user"
+    assert not [m for m in client.seen[0]["messages"] if m["role"] == "system"]
 
 
-def test_baseline_reports_tokens_and_latency():
-    result = E.run_fixture_baseline("openai", FakeClient(tokens=(500, 25)), [], fixture(), "m", None)
+def test_a_fixture_reaching_its_expected_tool_passes(stub_mcp):
+    """The happy path through run_fixture_discovery: the first non-meta call is
+    terminal and graded, and it is not executed."""
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 6)
 
-    assert result["tokens"] == {"input": 500, "output": 25}
+    assert result["selected_tool"] == TOOL and result["passed"] is True
+    assert result["mode"] == "discovery"
+    assert result["tokens"] == {"input": 120, "output": 8}
     assert result["latency_s"] >= 0
 
 
-def test_baseline_carries_the_fixture_note_into_the_record():
-    result = E.run_fixture_baseline("openai", FakeClient(), [], fixture(notes="why this matters"), "m", None)
+def test_a_wrong_tool_is_recorded_with_what_was_picked(stub_mcp):
+    result = E.run_fixture_discovery("openai", FakeClient("other-tool"), fixture(), "m", None, 6)
+
+    assert result["selected_tool"] == "other-tool" and result["passed"] is False
+    assert result["fail_reason"] == "wrong_tool"
+
+
+def test_an_alternative_from_acceptable_tools_is_accepted(stub_mcp):
+    result = E.run_fixture_discovery("openai", FakeClient("alt"), fixture(acceptable_tools=["alt"]), "m", None, 6)
+
+    assert result["passed"] is True
+
+
+def test_no_tool_call_at_all_is_its_own_fail_reason(stub_mcp):
+    result = E.run_fixture_discovery("openai", FakeClient(None), fixture(), "m", None, 6)
+
+    assert result["selected_tool"] is None and result["passed"] is False
+    assert result["fail_reason"] == "no_tool_call"
+
+
+def test_the_fixture_note_is_carried_into_the_record(stub_mcp):
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(notes="why this matters"), "m", None, 6)
 
     assert result["notes"] == "why this matters"
 
@@ -146,7 +158,7 @@ def test_baseline_carries_the_fixture_note_into_the_record():
 # Result records for fixtures that never ran
 # ---------------------------------------------------------------------------
 def test_skipped_result_is_excluded_from_scoring_not_counted_as_a_failure():
-    r = E.skipped_result(fixture(), "baseline")
+    r = E.skipped_result(fixture(), "discovery")
 
     assert r["skipped"] is True and r["passed"] is False
     assert "not registered on this instance" in r["skip_reason"]
@@ -154,7 +166,7 @@ def test_skipped_result_is_excluded_from_scoring_not_counted_as_a_failure():
 
 
 def test_error_result_is_graded_but_not_gating():
-    r = E.error_result(fixture(), "baseline", RuntimeError("500 Server Error"))
+    r = E.error_result(fixture(), "discovery", RuntimeError("500 Server Error"))
 
     assert r["error"] == "500 Server Error" and r["passed"] is False
     assert len(E.scored([r])) == 1, "it counts against the error budget"
@@ -170,65 +182,10 @@ def test_a_discovery_error_record_carries_the_discovery_fields():
     assert r["search_hit"] is None and r["enabled_correct_toolset"] is None
 
 
-def test_a_baseline_error_record_omits_the_discovery_fields():
-    assert "discovery_path" not in E.error_result(fixture(), "baseline", RuntimeError("boom"))
-
-
-# ---------------------------------------------------------------------------
-# run_baseline_pass — skips, errors and concurrency
-# ---------------------------------------------------------------------------
-@pytest.fixture
-def stub_mcp(monkeypatch):
-    monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: ("sid", ""))
-    monkeypatch.setattr(E, "enable_all_toolsets", lambda _s, endpoint=None: [])
-    monkeypatch.setattr(
-        E, "mcp_tools_list_all", lambda _s, endpoint=None: [{"name": TOOL, "description": "d", "inputSchema": {}}]
-    )
-
-
-def test_baseline_pass_runs_every_fixture(stub_mcp, capsys):
-    results = E.run_baseline_pass("openai", FakeClient(), [fixture("a"), fixture("b")], "m", None, {TOOL}, workers=1)
-    capsys.readouterr()
-
-    assert [r["id"] for r in results] == ["a", "b"]
-    assert all(r["passed"] for r in results)
-
-
-def test_baseline_pass_skips_a_fixture_whose_tool_is_absent(stub_mcp, capsys):
-    """An instance without the dev-tools bundle must not fail its fixtures."""
-    results = E.run_baseline_pass(
-        "openai", FakeClient(), [fixture("a"), fixture("d", tool="swag-dev-tools-log-search")], "m", None, {TOOL}
-    )
-    capsys.readouterr()
-
-    assert [r["id"] for r in results if r.get("skipped")] == ["d"]
-
-
-def test_baseline_pass_records_a_raising_fixture_as_an_error_and_keeps_going(stub_mcp, capsys):
-    results = E.run_baseline_pass(
-        "openai", FakeClient(raises=RuntimeError("429 rate limit")), [fixture("a")], "m", None, {TOOL}
-    )
-    capsys.readouterr()
-
-    assert results[0]["error"] == "429 rate limit"
-
-
-def test_baseline_pass_preserves_fixture_order_when_run_concurrently(stub_mcp, capsys):
-    """Results are written back by index, so a fast fixture finishing first must
-    not reorder the report."""
-    fixtures = [fixture(f"f{i}") for i in range(8)]
-
-    results = E.run_baseline_pass("openai", FakeClient(), fixtures, "m", None, {TOOL}, workers=4)
-    capsys.readouterr()
-
-    assert [r["id"] for r in results] == [f"f{i}" for i in range(8)]
-
-
-def test_baseline_pass_attaches_a_progress_line_to_each_result(stub_mcp, capsys):
-    results = E.run_baseline_pass("openai", FakeClient(), [fixture("a")], "m", None, {TOOL})
-    capsys.readouterr()
-
-    assert "_line" in results[0]
+def test_an_error_record_for_another_mode_omits_the_discovery_fields():
+    """Discovery is the only mode the runner has, but the helper stays generic, so
+    a caller passing anything else must not get half-populated discovery keys."""
+    assert "discovery_path" not in E.error_result(fixture(), "other", RuntimeError("boom"))
 
 
 # ---------------------------------------------------------------------------

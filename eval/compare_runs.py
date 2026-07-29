@@ -207,15 +207,19 @@ def _verdict(rate: float, threshold: float) -> str:
     return "PASS" if rate >= threshold else "FAIL"
 
 
-def render_rates(cmp_: dict, threshold: float) -> str:
+def render_rates(cmp_: dict, threshold: float, threshold_second: float | None = None) -> str:
     """Per-model pass rates. Used for standalone/local runs.
 
     The CI job summary does NOT include this: `eval/summary.py` already prints
     one run-overview table covering every suite, and repeating the same two
     rates and verdicts underneath it is what made the old summary read as three
     tables saying the same thing.
+
+    The two models are held to different thresholds, so each row is rendered
+    against its own — see main() for why the second validator's is lower.
     """
     p, s = cmp_["primary"], cmp_["second"]
+    second = threshold if threshold_second is None else threshold_second
     lines = [
         "Rates are over fixtures that actually ran. Transport errors (server 500,",
         "throttling 429) are missing data, not wrong answers, and are counted",
@@ -224,11 +228,11 @@ def render_rates(cmp_: dict, threshold: float) -> str:
         "| Model | Passed | Rate | Errored | vs threshold |",
         "|---|---|---|---|---|",
     ]
-    for role, m in (("primary", p), ("second", s)):
+    for role, m, t in (("primary", p, threshold), ("second", s, second)):
         pct = round(100 * m["rate"])
         lines.append(
             f"| `{m['model']}` ({role}) | {m['passed']}/{m['total']} | {pct}% | {m['errored']} | "
-            f"{_verdict(m['rate'], threshold)} (>= {round(100 * threshold)}%) |"
+            f"{_verdict(m['rate'], t)} (>= {round(100 * t)}%) |"
         )
 
     worst = max(p["errored"], s["errored"])
@@ -395,13 +399,13 @@ def render_unmatched(cmp_: dict) -> str:
     )
 
 
-def render(cmp_: dict, threshold: float) -> str:
+def render(cmp_: dict, threshold: float, threshold_second: float | None = None) -> str:
     """Full standalone report — everything, including the per-model rates."""
     return "\n".join(
         [
             "### Cross-model comparison (discovery mode)",
             "",
-            render_rates(cmp_, threshold),
+            render_rates(cmp_, threshold, threshold_second),
             render_split(cmp_),
             render_actionable(cmp_, cmp_["primary"]["model"], cmp_["second"]["model"]),
             render_detail(cmp_, cmp_["primary"]["model"], cmp_["second"]["model"]),
@@ -415,11 +419,24 @@ def main() -> int:
     parser.add_argument("primary", help="JSON report from the primary model")
     parser.add_argument("second", help="JSON report from the second validator")
     parser.add_argument("--min-pass-rate", type=float, default=0.9)
+    # The second validator is held to a lower bar on purpose. Its value is the
+    # INTERSECTION with the primary — a fixture both models miss points at the tool
+    # description, one only it misses is its own capability gap — and that signal
+    # survives it scoring a few points lower. At a shared 90% it flapped instead:
+    # it scored 89% on one commit and 90% on the next with no change to
+    # descriptions or fixtures in between, so a one-fixture wobble in the weaker
+    # model gated the stronger model's clean run.
+    parser.add_argument(
+        "--min-pass-rate-second",
+        type=float,
+        default=None,
+        help="Threshold for the second validator (defaults to --min-pass-rate)",
+    )
     parser.add_argument(
         "--gate",
         choices=("none", "primary", "both"),
         default="none",
-        help="which rates must clear --min-pass-rate for a zero exit (default: none, report only)",
+        help="which rates must clear their threshold for a zero exit (default: none, report only)",
     )
     parser.add_argument("--output", help="write the comparison JSON here")
     parser.add_argument(
@@ -444,7 +461,8 @@ def main() -> int:
     # Printed to the step log, not to GITHUB_STEP_SUMMARY: `eval/summary.py`
     # renders the job summary once, at the end, from --output below. Appending
     # here as well would put a second copy of these tables in the middle of it.
-    print(render(cmp_, args.min_pass_rate))
+    min_second = args.min_pass_rate if args.min_pass_rate_second is None else args.min_pass_rate_second
+    print(render(cmp_, args.min_pass_rate, min_second))
 
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -452,10 +470,10 @@ def main() -> int:
 
     if args.gate == "none":
         return 0
-    rates = [cmp_["primary"]["rate"]]
+    checks = [(cmp_["primary"]["rate"], args.min_pass_rate)]
     if args.gate == "both":
-        rates.append(cmp_["second"]["rate"])
-    return 0 if all(r >= args.min_pass_rate for r in rates) else 1
+        checks.append((cmp_["second"]["rate"], min_second))
+    return 0 if all(rate >= threshold for rate, threshold in checks) else 1
 
 
 if __name__ == "__main__":

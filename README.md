@@ -36,12 +36,10 @@ This repo addresses all three:
   then calls every tool with a minimal valid payload. Mutating tools use
   `dryRun=true`. Catches transport / schema / handler / discovery regressions.
 - **Layer 2 (LLM eval)**: natural-language prompts are sent to Claude (or
-  GPT-4o). Each fixture runs in two modes: **baseline** (full catalogue passed
-  flat, the v1 situation) and **discovery** (default surface only; the runner
-  executes meta-tool calls for real in an agentic loop). The comparison answers
-  the core question: *does dynamic discovery make it harder for the model to
-  pick the right tool, which discovery path does it take, and what does it cost
-  in steps and tokens?*
+  GPT-4o) in **discovery** mode — the default advertised surface only, with the
+  runner executing meta-tool calls for real in an agentic loop. It answers the
+  core question: *can the model find the right tool through dynamic discovery,
+  which discovery path does it take, and what does it cost in steps and tokens?*
 
 The output drives improvements to the `#[McpTool(description: '…')]` and
 `#[McpToolGroup('…')]` attributes in the Shopware repo.
@@ -63,7 +61,7 @@ The output drives improvements to the `#[McpTool(description: '…')]` and
 │   ├── reporting.py       # pass/fail/skip harness + JSON report writer
 │   └── ci/                # reusable shell helpers used by the workflow (shellcheck-linted)
 ├── eval/
-│   ├── runner.py          # Layer 2: baseline vs discovery LLM eval (--endpoint admin|store)
+│   ├── runner.py          # Layer 2: discovery-mode LLM eval (--endpoint admin|store)
 │   ├── scoring.py         # results → counts, rates and the gate verdict (pure)
 │   ├── report.py          # terminal rendering of a run (pure of scoring)
 │   ├── compare_runs.py    # primary vs second validator; the both-fail set to act on
@@ -183,21 +181,39 @@ Pass / fail / skip per check is printed to stdout. A JSON report is saved to
 
 ## Layer 2: LLM eval
 
-Loads `eval/fixtures.yaml` and runs each fixture in up to two modes:
+Loads `eval/fixtures.yaml` and runs each fixture in **discovery** mode:
 
 | Mode | Tool surface | Loop | Grading |
 |---|---|---|---|
-| `baseline` | full catalogue (all toolsets enabled), passed flat | single shot | first tool call == `expected_tool` |
 | `discovery` | default advertised surface only | agentic, up to `--max-steps` turns; meta-tool calls (`shopware-tool-search`, `shopware-toolsets-list`, `shopware-toolset-enable`) are executed for real against the server and their results fed back; after an enable the tool list is re-fetched (simulating `tools/list_changed`) | first **non-meta** tool call == `expected_tool`; meta steps are free but counted |
 
-The first non-meta tool call is never executed (same no-mutation policy as
-before — grading is on selection). Discovery mode opens a **fresh MCP session
-per fixture** because toolset enablement persists per session. For fixtures in
-the `meta` category (where the meta-tool itself is the right answer), the first
-tool call of any kind is graded.
+The first non-meta tool call is never executed (grading is on selection, so
+nothing mutates). Discovery opens a **fresh MCP session per fixture** because
+toolset enablement persists per session. For fixtures in the `meta` category
+(where the meta-tool itself is the right answer), the first tool call of any kind
+is graded. Each failing fixture is retried once, so a reported failure is two
+lost attempts.
+
+<details>
+<summary>There used to be a second <code>baseline</code> mode. Why it went.</summary>
+
+`baseline` enabled every toolset and graded the first call of a single request,
+as a v1 comparison reference. But it left the discovery meta-tools in the
+catalogue it handed the model, and graded the first call **without** exempting
+them — so a model that followed the server's own `instructions` and called
+`shopware-toolsets-list` was scored as picking the wrong tool. On the last run
+before removal, **40 of its 42 failures on the primary model were that
+artifact**, which made its per-tool `Effect` column read as evidence for
+progressive disclosure when it was really measuring the grading difference
+between the two modes. The remaining two were genuine, and the per-tool table
+that replaced it still surfaces that class.
+
+`--modes baseline` now fails with an explanation rather than silently doing
+something else.
+</details>
 
 ```bash
-# Both modes, Anthropic (default), claude-sonnet-4-6
+# Anthropic (default), claude-sonnet-4-6
 python -m eval.runner
 
 # OpenAI — gpt-5.4-mini is the CI primary and the openai default
@@ -219,8 +235,12 @@ python -m eval.runner --provider openai --model gpt-4o-mini
 python -m eval.runner --provider github --id disambig_count_vs_search
 python -m eval.runner --provider github --category meta
 
-# Discovery mode only, higher step cap
-python -m eval.runner --modes discovery --max-steps 8
+# Higher step cap
+python -m eval.runner --max-steps 8
+
+# More fixtures at once. The default of 4 is what an instance with the MCP rate
+# limiter still enabled can take; CI disables it and uses 12.
+python -m eval.runner --discovery-concurrency 12
 
 # Run only one category (unambiguous | disambiguation | chain | meta | discovery)
 python -m eval.runner --category disambiguation
@@ -237,10 +257,18 @@ python -m eval.runner --output results/my-run.json
 
 ### Gate policy
 
-**Both models must reach 90% in discovery mode.** The primary and the second
-validator each gate themselves, and `eval/compare_runs.py --gate both` is the
-consolidated verdict. Baseline mode is the comparison reference and stays
-advisory.
+**The primary must reach 90%; the second validator 85%.** Each gates itself, and
+`eval/compare_runs.py --gate both --min-pass-rate 0.9 --min-pass-rate-second 0.85`
+is the consolidated verdict.
+
+The thresholds differ because the two models are there for different reasons. The
+second validator's worth is the **intersection** with the primary — a fixture both
+models miss points at the tool description, one only it misses is its own
+capability gap — and that signal survives it scoring a few points lower. At a
+shared 90% it flapped instead: it scored 89% on one commit and 90% on the next
+with no change to descriptions or fixtures in between, and later failed a run at
+88% core while the primary was clean. 85% still catches a collapse, which is what
+the gate is for. Re-measure before swapping either model.
 
 **Core is additionally gated on its own denominator.** The admin suite spans
 four repositories, so one aggregate rate lets a core regression hide behind
@@ -266,10 +294,10 @@ the Shopware container erroring — the rate over fixtures that ran was 89%. A
 run is now failed for a quality regression **or** for being untrustworthy, and
 the output says which.
 
-Because the LLM is nondeterministic, each failed discovery fixture is **retried
-once** (only a double failure counts), and 90% tolerates a couple of borderline
-fixtures so one flaky prompt can't flip CI red — while a real regression still
-fails. Use `--min-pass-rate 1.0` for strict all-must-pass.
+Because the LLM is nondeterministic, each failed fixture is **retried once**
+(only a double failure counts), and the thresholds tolerate a couple of
+borderline fixtures so one flaky prompt can't flip CI red — while a real
+regression still fails. Use `--min-pass-rate 1.0` for strict all-must-pass.
 
 ### The CI job summary
 
@@ -340,9 +368,9 @@ Per fixture (in the JSON report and the console summary):
 | `tokens` | summed input/output tokens across all turns |
 | `fail_reason` | `wrong_tool`, `no_tool_call`, or `step_cap` |
 
-The summary block also reports the input-token ratio discovery/baseline — the
-"cost of discovery" number: how much context the default-surface approach saves
-(or spends in extra turns) against advertising the full catalogue up front.
+The summary block also reports the run's total input/output tokens, which is the
+"cost of discovery" number to watch between commits: extra turns spent finding a
+tool show up here before they show up in the pass rate.
 
 ### Fixture categories
 
@@ -394,7 +422,7 @@ a context token. Run it with:
 
 ```bash
 python -m functional.runner --endpoint store               # Layer 1 (discovery mechanics + context)
-python -m eval.runner --endpoint store --modes discovery   # Layer 2 (UCP tool selection)
+python -m eval.runner --endpoint store   # Layer 2 (UCP tool selection)
 ```
 
 The `shopware-ucp-*` tools come from the **`shopware/agentic-commerce`** plugin
@@ -530,8 +558,8 @@ Both layers write a JSON report to `results/`. Reports are gitignored.
 }
 ```
 
-`results/eval-<provider>-<timestamp>.json` contains a `modes` object with
-`baseline` and/or `discovery` blocks (per-fixture
+`results/eval-<provider>-<timestamp>.json` contains a `modes` object with a
+`discovery` block (per-fixture
 `{id, category, mode, expected_tool, selected_tool, passed, steps, meta_calls,
 discovery_path, search_hit, enabled_correct_toolset, tokens, latency_s, ...}`)
 plus a `discovery_summary` aggregate (pass rate, average steps, path

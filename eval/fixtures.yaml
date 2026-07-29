@@ -11,8 +11,9 @@
 # model can match one phrasing. tests/test_fixtures.py enforces the count.
 #
 # Fields:
-#   expected_tool:    the tool that should be selected (first non-meta tool call
-#                     in discovery mode; first call overall in baseline mode).
+#   expected_tool:    the tool that should be selected. The first NON-meta tool
+#                     call is the graded one; discovery meta-calls on the way to
+#                     it are executed and fed back, not graded.
 #   acceptable_tools: (optional) list of additional tool names that also count
 #                     as correct — for genuinely multi-valid prompts.
 #   expected_toolset: (optional) the toolset containing expected_tool — grades

@@ -23,18 +23,25 @@ def args(**over):
 # ---------------------------------------------------------------------------
 # parse_modes
 # ---------------------------------------------------------------------------
-def test_both_modes_is_the_default():
-    assert E.parse_modes("baseline,discovery") == ["baseline", "discovery"]
+def test_discovery_is_the_only_mode():
+    assert E.parse_modes("discovery") == ["discovery"]
 
 
 def test_whitespace_and_trailing_commas_are_tolerated():
     assert E.parse_modes(" discovery , ") == ["discovery"]
 
 
+def test_baseline_is_rejected_with_an_explanation():
+    """It was a real mode until it turned out to be measuring its own grading, so
+    the error has to say so rather than read as a typo."""
+    with pytest.raises(E.ConfigError, match="baseline mode was removed"):
+        E.parse_modes("baseline,discovery")
+
+
 def test_a_typod_mode_is_rejected_by_name():
     """Silently running zero modes would report a vacuous PASS."""
     with pytest.raises(E.ConfigError, match="discovry"):
-        E.parse_modes("baseline,discovry")
+        E.parse_modes("discovry")
 
 
 def test_an_empty_mode_list_is_rejected():
@@ -174,42 +181,44 @@ def result(fid, passed=True, tool="shopware-entity-read", **over):
     }
 
 
-def test_report_records_only_the_modes_that_ran():
-    only_discovery = E.build_report("openai", "m", [{}], None, [result("a")], True, 6)
+def test_report_records_the_discovery_mode():
+    """The `modes` wrapper outlives baseline's removal on purpose: eval/compare_runs
+    and the committed result artifacts both index report["modes"]["discovery"]."""
+    report = E.build_report("openai", "m", [{}], [result("a")], True, 6)
 
-    assert set(only_discovery["modes"]) == {"discovery"}
-    assert "discovery_summary" in only_discovery
+    assert set(report["modes"]) == {"discovery"}
+    assert "discovery_summary" in report
 
 
 def test_report_counts_passes_failures_and_skips_separately():
     discovery = [result("a"), result("b", passed=False), result("c", passed=False, skipped=True)]
 
-    mode = E.build_report("openai", "m", [{}] * 3, None, discovery, True, 6)["modes"]["discovery"]
+    mode = E.build_report("openai", "m", [{}] * 3, discovery, True, 6)["modes"]["discovery"]
 
     assert (mode["passed"], mode["failed"], mode["skipped"]) == (1, 1, 1)
 
 
-def test_report_attributes_by_tier_over_the_gating_mode():
-    """by_tier drives the job summary's By-owner table, so it must follow the
-    mode that gates — discovery when it ran, baseline otherwise."""
+def test_report_attributes_by_tier():
+    """by_tier drives the job summary's By-owner table, so a failure has to be
+    attributed to the repository that owns the tool."""
     discovery = [result("c1"), result("d1", passed=False, tool="swag-dev-tools-load-skill")]
 
-    report = E.build_report("openai", "m", [{}] * 2, [result("b1")], discovery, True, 6)
+    report = E.build_report("openai", "m", [{}] * 2, discovery, True, 6)
 
     assert report["by_tier"]["dev-tools"]["failed_ids"] == ["d1"]
     assert report["by_tier"]["core"]["passed"] == 1
 
 
-def test_report_falls_back_to_baseline_attribution_when_discovery_did_not_run():
-    report = E.build_report("openai", "m", [{}], [result("b1")], None, True, 6)
+def test_report_of_a_run_with_no_results_is_an_empty_table_not_a_crash():
+    report = E.build_report("openai", "m", [{}], None, True, 6)
 
-    assert report["by_tier"]["core"]["total"] == 1
+    assert report["modes"] == {} and report["by_tier"] == {}
 
 
 def test_report_is_json_serialisable():
     """It is written with json.dumps; a stray non-serialisable value would only
     surface at the very end of a paid run."""
-    report = E.build_report("anthropic", "m", [{}], None, [result("a")], False, 8)
+    report = E.build_report("anthropic", "m", [{}], [result("a")], False, 8)
 
     assert json.loads(json.dumps(report))["system_prompt"] is False
 
