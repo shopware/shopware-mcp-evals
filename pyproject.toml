@@ -39,6 +39,10 @@ addopts = "-q"
 
 [tool.coverage.run]
 source = ["eval", "functional", "mcp_client", "ownership"]
+# Branch coverage, because statement coverage counts an `if` as covered when only
+# one side ever runs — and the untaken side is where the skip reasons, the error
+# budget and the gate thresholds live.
+branch = true
 
 [tool.coverage.report]
 # The `if __name__` guards and the provider SDK branches cannot be reached
@@ -49,3 +53,17 @@ exclude_also = [
 ]
 show_missing = true
 skip_covered = true
+
+# A floor, not a target. Set here rather than as a --cov-fail-under flag in the
+# workflow so a local `pytest --cov` enforces the same number CI does — a
+# threshold you only discover in CI is one you find out about after pushing.
+#
+# The run sits at ~83% branch coverage, so this leaves ~3 points of slack. That
+# is deliberate: the same suite reports a few statements differently on linux
+# than on darwin (the .env load path, a couple of platform branches), and a floor
+# with no slack would fail on that difference alone.
+#
+# Raising it is a decision to make when the number has moved, not an aspiration
+# to encode now. The parts worth covering next are eval/runner.run_fixture_discovery
+# (the agentic loop) and functional/runner's verify_* checks.
+fail_under = 80

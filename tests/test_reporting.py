@@ -56,3 +56,29 @@ def test_color_disabled_emits_no_ansi(capsys):
     rep = Reporter("srv", color=False)
     rep.check_pass("clean")
     assert "\033" not in capsys.readouterr().out
+
+
+def test_banner_section_and_info_print_their_text(capsys):
+    rep = Reporter("admin", color=False)
+
+    rep.banner("Shopware MCP Functional Tests")
+    rep.section("v2: Toolset taxonomy")
+    rep.info("Session: abc")
+    out = capsys.readouterr().out
+
+    assert "Shopware MCP Functional Tests" in out
+    assert "v2: Toolset taxonomy" in out
+    assert "Session: abc" in out
+
+
+def test_summary_reports_all_three_counts_and_the_total(capsys):
+    rep = Reporter("admin", color=False)
+    rep.check_pass("a")
+    rep.check_fail("b", "boom")
+    rep.skip("c")
+
+    rep.summary()
+    out = capsys.readouterr().out
+
+    assert "1 passed" in out and "1 failed" in out and "1 skipped" in out
+    assert "/ 3 total" in out

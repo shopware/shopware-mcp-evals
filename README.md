@@ -91,17 +91,26 @@ pip install -e . --no-deps
 `--no-deps` because `eval/requirements.txt` and `requirements-dev.txt` are the
 single source of truth for versions; `pyproject.toml` declares none.
 
-Unit tests (offline, no server needed) cover the reporting harness, the runner's
-verdict logic and full admin/store flows (driven through a fake MCP server), and
-the client's HTTP 429 retry. `--cov` shows where the gaps are; no threshold is
-enforced:
+Unit tests (offline, no server needed) cover the gate arithmetic, the scoring and
+rendering, the transport (pagination, SSE, throttle retry), the check table, and
+full admin/store flows driven through a fake MCP server.
+
+**Branch coverage is gated at 80%** (`fail_under` in `pyproject.toml`, so a local
+`pytest --cov` enforces the same number CI does). The suite sits at ~83%, and the
+floor deliberately keeps a few points of slack: the same tests report a handful of
+statements differently on linux than on darwin, and a floor with no slack would
+fail on that alone.
 
 ```bash
 pip install -r requirements-dev.txt
 pip install -e . --no-deps
 pytest tests -q
-pytest tests -q --cov   # where the gaps are
+pytest tests -q --cov   # enforces the 80% floor and lists what is uncovered
 ```
+
+Branch coverage rather than statement coverage, because an `if` whose false side
+never runs still counts as a covered statement — and the untaken side is where
+the skip reasons, the error budget and the gate thresholds live.
 
 **Conventions:** both test layers are Python — don't add `.sh` runners (extend
 `functional/runner.py` or `mcp_client.py`; the only shell here is CI glue under

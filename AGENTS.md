@@ -104,6 +104,7 @@ python -m functional.runner --endpoint store
 
 # Unit tests (offline, no server) — reporting, runner logic, throttle retry
 .venv/bin/python3 -m pytest tests -q
+.venv/bin/python3 -m pytest tests -q --cov   # enforces the 80% branch-coverage floor
 ```
 
 **Gate: both models must reach 90%** in discovery mode — the primary and the
@@ -135,6 +136,9 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `eval/fixtures_store.yaml` | Store API / UCP buyer-journey fixtures |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
 | `eval/runner.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |
+| `eval/scoring.py` | Results → counts, rates and the gate verdict. Pure, and what the gate is decided by |
+| `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
+| `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |

@@ -365,3 +365,74 @@ def test_unreadable_report_exits_two(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["compare_runs.py", str(tmp_path / "nope.json"), str(tmp_path / "nope2.json")])
     assert C.main() == 2
     capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
+# Catalogue loading and the remaining render edges
+# ---------------------------------------------------------------------------
+def test_catalogue_maps_tool_name_to_description(tmp_path):
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"tools": [{"name": "a", "description": "A does things."}]}))
+
+    assert C.load_catalogue(str(snap)) == {"a": "A does things."}
+
+
+def test_catalogue_normalises_a_null_description_to_empty():
+    """App tools from a manifest carry none; None would render as the word None."""
+    import pathlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        p = pathlib.Path(d) / "s.json"
+        p.write_text(json.dumps({"tools": [{"name": "a", "description": None}, {"no_name": 1}]}))
+
+        assert C.load_catalogue(str(p)) == {"a": ""}
+
+
+def test_catalogue_is_optional(capsys):
+    assert C.load_catalogue(None) == {}
+
+
+def test_an_unreadable_catalogue_warns_but_does_not_fail_the_comparison(capsys, tmp_path):
+    """The snapshot is a convenience; losing it must not lose the findings."""
+    assert C.load_catalogue(str(tmp_path / "absent.json")) == {}
+    assert "::warning::Could not read tool catalogue" in capsys.readouterr().err
+
+
+def test_note_distinguishes_the_two_models_when_only_one_stalled():
+    assert C._note("step_cap", "wrong_tool") == "primary: step_cap"
+    assert C._note("wrong_tool", "no_tool_call") == "second: no_tool_call"
+    assert C._note("step_cap", "no_tool_call") == "primary: step_cap, second: no_tool_call"
+
+
+def test_detail_block_reports_the_category_and_toolset_when_known():
+    a = report("strong", [("f1", False, "wanted", False)])
+    a["modes"]["discovery"]["results"][0] |= {
+        "selected_tool": "sibling",
+        "fail_reason": "wrong_tool",
+        "category": "disambiguation",
+        "expected_toolset": "dev-skills",
+        "notes": "the index vs one body",
+    }
+
+    out = C.render_detail(C.compare(a, a, {"wanted": "W", "sibling": "S"}))
+
+    assert "category: disambiguation" in out
+    assert "toolset: `dev-skills`" in out
+    assert "Fixture note: the index vs one body" in out
+
+
+def test_unmatched_fixtures_warn_that_the_runs_are_not_comparable():
+    a = report("strong", [("f1", True, "t", False)])
+    b = report("weak", [("f2", True, "t", False)])
+
+    out = C.render_unmatched(C.compare(a, b))
+
+    assert "2 fixture(s) graded in only one run" in out
+    assert "not comparable" in out
+
+
+def test_no_warning_when_both_runs_graded_the_same_set():
+    a = report("strong", [("f1", True, "t", False)])
+
+    assert C.render_unmatched(C.compare(a, a)) == ""
