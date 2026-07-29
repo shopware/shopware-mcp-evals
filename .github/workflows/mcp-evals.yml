@@ -40,6 +40,9 @@ on:
 
 permissions:
   contents: write
+  # The nightly reconciliation PR needs this; contents: write alone can push a
+  # branch but not open a pull request for it.
+  pull-requests: write
 
 concurrency:
   group: mcp-evals-${{ github.ref }}
@@ -353,22 +356,94 @@ jobs:
             else
               echo "drift=true" >> "$GITHUB_OUTPUT"
               echo "::warning::Tool description drift detected vs committed baseline."
+              # `eval.drift` names what moved. The raw diff stays below it, folded,
+              # because 200 lines of JSON is evidence rather than a finding — a
+              # reader needs "these 11 descriptions changed" first.
+              git show HEAD:tool-history/latest.json > /tmp/baseline.json
               {
-                echo "## Tool description drift detected"
+                python -m eval.drift --old /tmp/baseline.json --new tool-history/latest.json \
+                  --heading "Tool description drift detected"
                 echo ""
                 echo "Shopware ref: \`${{ steps.ref.outputs.ref }}\` → \`${{ steps.sw-sha.outputs.sha }}\`"
                 echo ""
                 echo "LLM eval failures will be advisory (non-blocking) for this run."
-                echo "Reconcile by opening a PR that updates \`shopware.sha\`, \`tool-history/latest.json\`, and any affected eval expectations."
+                echo ""
+                echo "<details><summary>Raw snapshot diff</summary>"
                 echo ""
                 echo '```diff'
                 git diff -- tool-history/latest.json | head -200
                 echo '```'
+                echo ""
+                echo "</details>"
               } >> "$GITHUB_STEP_SUMMARY"
             fi
           else
             echo "drift=true" >> "$GITHUB_OUTPUT"
             echo "::warning::No committed baseline (tool-history/latest.json); treating as drift."
+          fi
+
+      # Only the nightly cron opens this. A cron run resolves the ref to trunk, so
+      # its drift IS the upstream movement someone has to reconcile — and printing
+      # instructions into a job summary nobody is watching at 06:00 is how the
+      # baseline went eleven descriptions stale without anyone noticing.
+      #
+      # Dispatch and push runs are excluded on purpose: they resolve to the pinned
+      # sha, so their "drift" is usually a deliberate local change under test, and
+      # a PR for it would be noise.
+      #
+      # Deliberately NOT part of the gate: this is a convenience, so every failure
+      # mode here is swallowed rather than allowed to fail a run whose eval passed.
+      - name: Open a reconciliation PR (nightly only)
+        if: github.event_name == 'schedule' && steps.drift.outputs.drift == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SW_SHA: ${{ steps.sw-sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # One branch per upstream sha: a second nightly on the same trunk commit
+          # updates the existing PR instead of opening another.
+          BRANCH="chore/reconcile-mcp-drift-${SW_SHA:0:12}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          echo "$SW_SHA" > shopware.sha
+          git add shopware.sha tool-history/latest.json
+
+          if git diff --cached --quiet; then
+            echo "Nothing to reconcile after all — no commit, no PR."
+            exit 0
+          fi
+
+          git show "origin/${GITHUB_REF_NAME}:tool-history/latest.json" > /tmp/baseline.json 2>/dev/null || true
+          python -m eval.drift --old /tmp/baseline.json --new tool-history/latest.json \
+            --heading "What moved upstream" > /tmp/body.md
+
+          {
+            echo ""
+            echo "Opened automatically by the nightly eval run against \`trunk\`."
+            echo "Bumps \`shopware.sha\` to \`$SW_SHA\` and refreshes the catalogue baseline together,"
+            echo "so the next run can attribute its own diff instead of re-reporting this one."
+            echo ""
+            echo "**Check before merging:** a tool added here needs fixtures, and a tool removed"
+            echo "means its fixtures will start skipping. Descriptions changing is the ordinary case."
+            echo ""
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >> /tmp/body.md
+
+          git commit -q -m "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
+                        -m "Opened by the nightly eval run. See the PR body for what moved."
+          git push -f origin "$BRANCH"
+
+          if gh pr view "$BRANCH" --json number --jq .number > /dev/null 2>&1; then
+            gh pr edit "$BRANCH" --body-file /tmp/body.md
+            echo "Updated the existing reconciliation PR for $BRANCH."
+          else
+            gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
+              --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
+              --body-file /tmp/body.md
           fi
 
       - name: Run functional tests

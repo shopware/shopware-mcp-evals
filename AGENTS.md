@@ -140,6 +140,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
+| `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |
 | `.env` | Local credentials (not committed) |
