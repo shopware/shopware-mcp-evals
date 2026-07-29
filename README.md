@@ -299,10 +299,26 @@ Because the LLM is nondeterministic, each failed fixture is **retried once**
 borderline fixtures so one flaky prompt can't flip CI red — while a real
 regression still fails. Use `--min-pass-rate 1.0` for strict all-must-pass.
 
+### When it runs
+
+`mcp-evals.yml` runs nightly at 06:00 UTC and on manual `workflow_dispatch`. On a
+pull request it is **opt-in**: the job only runs when the PR carries the
+**`run-evals`** label, because a run installs Shopware and spends real OpenAI
+credit while most changes here are already covered by `lint.yml`. Adding the label
+starts a run, and it re-runs on each subsequent push for as long as the label
+stays. An unlabelled PR shows the job as skipped.
+
+`eval_provider` is a dropdown with one option, `openai`, because that is the only
+provider with a key in this repo. The runner supports `--provider anthropic` and
+the workflow already passes `ANTHROPIC_API_KEY` through, so enabling it is adding
+that secret and one line to the input's `options`.
+
 ### The CI job summary
 
 `mcp-evals.yml` runs `eval/runner.py` three times — admin primary, admin second
-validator, Store/UCP advisory — in three separate processes. Each writes a JSON
+validator, Store/UCP advisory. The two admin arms run **concurrently in one step**
+(they are independent, and sequentially they were two thirds of the job's wall
+clock); the Store arm follows. Each writes a JSON
 verdict row (`--summary-row`, labelled with `--suite-label`) instead of markdown,
 and a final `eval/summary.py` step renders them as **one** suite-labelled table
 followed by the cross-model comparison:

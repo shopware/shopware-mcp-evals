@@ -1,9 +1,16 @@
 name: MCP Evals
 
 on:
-  # TEMPORARY: remove before merging. Lets the workflow run on PR pushes for testing.
+  # Opt-in per PR, via the `run-evals` label. Not every PR: a run installs
+  # Shopware, spends real OpenAI credit, and takes minutes, while most changes
+  # here are fixtures, scoring or docs that lint.yml already covers. The job is
+  # gated on the label (see `if:` below), so an unlabelled PR costs nothing.
+  #
+  # `labeled` starts a run the moment the label goes on; `synchronize` re-runs it
+  # on later pushes for as long as the label stays. Remove the label to stop.
   pull_request:
     branches: [main]
+    types: [opened, reopened, synchronize, labeled]
   schedule:
     # Daily at 06:00 UTC
     - cron: '0 6 * * *'
@@ -13,12 +20,24 @@ on:
         description: 'Shopware ref to evaluate against (branch, tag, or sha). Default: contents of shopware.sha (pinned). Cron uses trunk.'
         required: false
         default: ''
+      # A dropdown, not free text, and openai is the only option because it is the
+      # only provider with a key: the repo secrets are OPENAI_API_KEY and
+      # PLUGINS_PAT. Typing `anthropic` here used to be accepted, then failed ~140s
+      # in on an empty ANTHROPIC_API_KEY, after the whole Shopware install.
+      #
+      # To enable Anthropic: add the ANTHROPIC_API_KEY secret and add 'anthropic'
+      # back to the options below. The runner already supports it (`--provider
+      # anthropic`), and the step still passes the secret through, so nothing else
+      # needs changing.
       eval_provider:
-        description: 'LLM provider for the eval (anthropic | openai)'
+        description: 'LLM provider for the eval'
         required: false
         default: 'openai'
+        type: choice
+        options:
+          - openai
       eval_model:
-        description: 'Override default model for the chosen provider'
+        description: 'Override the default model for the chosen provider (e.g. gpt-4o-mini). Affects the primary arm only; the second validator is pinned to gpt-4o-mini.'
         required: false
         default: ''
       dev_tools_ref:
@@ -53,6 +72,11 @@ jobs:
   # so it keeps running on every PR independently of this heavy eval workflow.
   evals:
     name: Run MCP evals
+    # On a PR this needs the `run-evals` label; schedule and workflow_dispatch are
+    # unconditional. The gate is on the job rather than in the `on:` block because
+    # GitHub cannot filter a trigger by label — so the workflow starts and the job
+    # skips, which costs nothing and leaves a visible "skipped" instead of silence.
+    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

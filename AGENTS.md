@@ -33,6 +33,17 @@ brief for coding agents.
   skip it with `run_store=false`. If `agentic-commerce` fails to resolve against
   the pinned Shopware ref, the store steps skip with a warning rather than
   taking down the admin evals.
+- **The eval workflow is opt-in on PRs.** It runs nightly and on
+  `workflow_dispatch` unconditionally, but on a pull request only when the PR
+  carries the **`run-evals`** label — it costs a Shopware install and real OpenAI
+  credit, and most changes here are covered by `lint.yml`. Add the label to start
+  a run; it then re-runs on each push while the label stays. Unlabelled PRs show
+  the job as skipped rather than not appearing at all.
+- **`openai` is the only working provider.** The repo has `OPENAI_API_KEY` and
+  `PLUGINS_PAT`, no `ANTHROPIC_API_KEY`, so `eval_provider` is a one-option
+  dropdown. The runner itself supports `--provider anthropic` and the workflow
+  already passes the secret through — enabling it is adding the secret plus one
+  line to the input's `options`.
 - **One job summary, rendered once.** Each `eval/runner.py` invocation writes a
   JSON verdict row (`--summary-row`, `--suite-label`, `--advisory`) and the
   final `eval/summary.py` step renders every row, plus the cross-model
