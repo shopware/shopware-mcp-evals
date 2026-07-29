@@ -384,15 +384,22 @@ fixtures:
     expected_tool: swag-dev-tools-load-skill
     expected_toolset: dev-skills
     notes: >
-      Known flaky, and the wording is NOT the cause — do not "fix" it by rewording
-      again. It failed on the primary in three consecutive CI runs (30435728030,
-      30440970535, 30440990965) with an identical trail, always losing to
-      list-skills, both before and after SwagMcpDevTools#9 rewrote both
-      descriptions. A local A/B of this phrasing against "the skill named 'X'"
-      then reversed the result: the reworded variant failed on the primary while
-      this one passed, and three of four observations only passed on the runner's
-      retry. It flips between attempts within a single run, so it is a
-      nondeterministic fixture rather than a description or phrasing bug.
+      A tool description that tells the model to look a value up will make it look
+      the value up. This fixture spent 9 CI runs losing to list-skills because
+      load-skill's own description ended by pointing at it for the name ("(as listed
+      by ...)", later "If you don't already know the skill name, ... will tell you"),
+      and the trail was identical every time: enable dev-skills, then list-skills
+      with empty input. It was 0 passes in 9 runs on the primary, or 18 consecutive
+      lost attempts once the runner's retry is counted, and flaky on the second
+      validator (6 of 9, two only on retry). SwagMcpDevTools#11 removed the pointer
+      and said to call with the name given; both verification runs then went 21/21 on
+      the primary with this fixture passing first try on both models. If it regresses,
+      look for a reintroduced pointer in load-skill before touching anything else.
+      Do not reword the PROMPT to chase it. Three list-skills wordings were measured
+      against it for nothing (the original, #9's negated variant, #10's overlap-free
+      one), and an A/B against "the skill named 'X'" that appeared to help ran on a
+      local instance, which the header above rules out as evidence: the descriptions
+      there had drifted from CI's. The lever was never the wording on this side.
 
   - id: notifications_poll
     category: unambiguous
