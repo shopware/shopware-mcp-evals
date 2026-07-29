@@ -51,13 +51,28 @@
 # sales channel" while merchant-checkout-methods requires a salesChannelId, and
 # both models' trails showed them searching for the channel first.
 #
-# If the lookup IS the behaviour you want to assert, that is a `chain` fixture
-# whose expected_tool is the lookup itself — see
-# checkout_methods_needs_channel_lookup.
+# The obvious next thought is to keep that wording as a `chain` fixture asserting
+# the lookup. That was tried (checkout_methods_needs_channel_lookup) and removed
+# one run later, because there is no single correct first tool: the runner never
+# executes anything, so calling merchant-checkout-methods straight away is a
+# perfectly gradeable selection even though it would fail at runtime without an
+# id. The primary resolved the channel first on one instance and went direct in
+# CI, and the fixture turned that coin flip into a both-fail — i.e. into the
+# "actionable description problem" signal, for a fixture artefact. A prompt with
+# two defensible first moves does not belong in this suite at all; the rule above
+# is the durable form of the lesson.
 #
-# Before rewording any prompt, check the fixture is not simply flaky: run it with
-# --id on both models a few times. `load_skill_entity_definition` looked like a
-# phrasing bug across three CI runs and an A/B disproved it — see its notes.
+# Two habits that would have caught all of this earlier:
+#
+#   Check for flakiness before rewording. `load_skill_entity_definition` looked
+#   like a phrasing bug across three CI runs; an A/B of both wordings on one
+#   instance reversed the result. See its notes.
+#
+#   Verify against CI's descriptions, not a local instance's. The fixture above
+#   was validated locally while this machine's merchant-checkout-methods and
+#   shopware-entity-search descriptions differed from CI's — two of the eleven
+#   that had drifted — so the local pass meant nothing. `python -m eval.drift`
+#   against tool-history/latest.json tells you whether they match.
 
 fixtures:
 
@@ -676,31 +691,6 @@ fixtures:
     notes: >
       Spans two toolsets (dev-extensions then dev-logs), so discovery mode has to
       enable a second toolset mid-run.
-
-  - id: checkout_methods_needs_channel_lookup
-    category: chain
-    prompt: "Which delivery options does a buyer get at checkout in our main sales channel?"
-    expected_tool: shopware-entity-search
-    expected_toolset: entity
-    # No max_steps override: raising it to 8 was tried and does not help.
-    # gpt-4o-mini spends every extra step on another identical
-    # tool-search("sales channels") and never enables the entity toolset, so a
-    # higher cap only made the same failure take 3x as long.
-    notes: >
-      The wording checkout_methods_shipping used to carry, kept as its own fixture
-      rather than discarded. merchant-checkout-methods requires a salesChannelId and
-      "our main sales channel" is not a channel name, so resolving it with
-      entity-search first is the correct move — both models did exactly that and the
-      old fixture scored them wrong for it. Asserting the lookup keeps that
-      behaviour covered while checkout_methods_shipping goes back to testing the
-      vocabulary ("delivery options" for the shipping half of the tool).
-
-      Verified: gpt-5.4-mini passes it, resolving the channel with entity-search.
-      gpt-4o-mini fails it reproducibly, and interestingly not by picking the wrong
-      tool — it loops on tool-search("sales channels") and never enables the entity
-      toolset, even though tool-search already surfaced a callable tool. That is a
-      capability gap the "only primary" bucket is meant to report, and a hint that
-      search results are not an obvious enough affordance to act on.
 
   # -------------------------------------------------------------------------
   # Meta — the discovery meta-tool itself is the correct answer.
