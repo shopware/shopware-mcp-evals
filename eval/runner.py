@@ -35,6 +35,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1259,12 +1260,28 @@ def run_suite(args) -> int:
     return 0 if verdict["ok"] else 1
 
 
+# Exit codes, because the workflow treats them differently. 1 means the run
+# happened and the gate said no, which is what the advisory windows (REBASELINE,
+# catalogue drift) are allowed to downgrade to a warning. CRASH_EXIT means the
+# run did not produce a verdict at all, and no advisory window may swallow that:
+# a green job that actually crashed is worse than a red one.
+CRASH_EXIT = 3
+
+
 def main() -> int:
     try:
         return run_suite(build_parser().parse_args())
     except ConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    except Exception:  # noqa: BLE001 — re-raised as a distinct exit code, traceback intact
+        traceback.print_exc()
+        print(
+            "\nERROR: the run crashed before producing a verdict. This is not a gate "
+            "failure and is not downgraded by any advisory window.",
+            file=sys.stderr,
+        )
+        return CRASH_EXIT
 
 
 if __name__ == "__main__":

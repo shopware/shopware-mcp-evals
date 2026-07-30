@@ -287,3 +287,26 @@ def test_startup_survives_the_real_store_fixtures(monkeypatch, tmp_path, capsys)
     capsys.readouterr()
 
     assert code == 0
+
+
+def test_a_crash_gets_its_own_exit_code_not_the_gates(monkeypatch, capsys):
+    """A crash is not a verdict, and the advisory windows must not be able to
+    downgrade it — a green job that actually crashed is worse than a red one.
+
+    This is exactly what happened: a report-rendering bug exited 1, the
+    re-baselining window read that as a threshold miss, and the run went green.
+    """
+    monkeypatch.setattr(E, "run_suite", lambda a: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr("sys.argv", ["runner", "--provider", "openai"])
+
+    assert E.main() == E.CRASH_EXIT
+    assert E.CRASH_EXIT != 1, "must be distinguishable from a gate failure"
+    assert "crashed before producing a verdict" in capsys.readouterr().err
+
+
+def test_a_config_error_still_exits_one(monkeypatch, capsys):
+    monkeypatch.setattr(E, "run_suite", lambda a: (_ for _ in ()).throw(E.ConfigError("nope")))
+    monkeypatch.setattr("sys.argv", ["runner", "--provider", "openai"])
+
+    assert E.main() == 1
+    assert "nope" in capsys.readouterr().err

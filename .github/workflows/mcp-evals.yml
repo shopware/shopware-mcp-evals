@@ -682,7 +682,15 @@ jobs:
           echo "primary_exit=${rc_primary}" >> "$GITHUB_OUTPUT"
           echo "second_exit=${rc_second}" >> "$GITHUB_OUTPUT"
 
+          # Exit 3 is a crash, not a verdict — no advisory window may downgrade
+          # it. A green job that actually crashed is worse than a red one, and
+          # that is exactly what happened when a report-rendering bug got
+          # absorbed by the re-baselining window.
           failed=0
+          if [ "${rc_primary}" -eq 3 ] || [ "${rc_second}" -eq 3 ]; then
+            echo "::error::an eval run crashed before producing a verdict (see the logs above)."
+            exit 1
+          fi
           if [ "${rc_primary}" -ne 0 ]; then
             if [ "${REBASELINE}" = "true" ]; then
               echo "::warning::admin · primary failed (exit ${rc_primary}), advisory during the recovery/assertion re-baselining window."

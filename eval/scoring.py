@@ -143,7 +143,10 @@ def recovery_summary(graded: list[dict]) -> dict:
         "avg_wrong_calls": round(sum(r.get("wrong_calls", 0) for r in tried) / len(tried), 2),
         "avg_steps_to_correct": round(sum(steps) / len(steps), 2) if steps else None,
         "dry_run_forced": sum(1 for r in tried if r.get("dry_run_forced")),
-        "unexecuted": sum(1 for r in tried if r.get("execution", "").startswith("skipped")),
+        # `or ""`, not a .get() default: `execution` is present and None on any
+        # fixture where the model never answered, and a default only applies to
+        # a missing key. None.startswith crashed the whole report.
+        "unexecuted": sum(1 for r in tried if (r.get("execution") or "").startswith("skipped")),
     }
 
 

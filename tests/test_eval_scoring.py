@@ -368,3 +368,47 @@ def test_unexecuted_and_forced_dry_runs_are_counted():
 def test_discovery_summary_carries_the_recovery_numbers():
     out = S.discovery_summary([attempt("a", first_try=False, recovered=True, wrong=1)])
     assert out["first_try_rate"] == 0.0 and out["recovered"] == 1
+
+
+def test_a_fixture_that_never_answered_does_not_crash_the_summary():
+    """`execution` is present and None whenever the model never produced an
+    answer, and a .get() default only applies to a *missing* key — so
+    None.startswith took down the whole report after every fixture had run."""
+    out = S.recovery_summary([attempt("a", first_try=False, execution=None)])
+
+    assert out["unexecuted"] == 0
+    assert out["first_try_rate"] == 0.0
+
+
+def test_discovery_summary_over_records_the_runner_actually_produces(tmp_path):
+    """Hand-built records kept diverging from real ones — the crash above got
+    through because no scoring test used a record the runner had made."""
+    from eval import runner as E
+
+    E.mcp_init_orig = None
+    record = {
+        "id": "f1",
+        "category": "unambiguous",
+        "expected_tool": "alpha",
+        "selected_tool": None,
+        "passed": False,
+        "first_tool_correct": None,
+        "first_try": False,
+        "recovered": False,
+        "attempted_tools": [],
+        "wrong_calls": 0,
+        "steps_to_correct": None,
+        "execution": None,
+        "dry_run_forced": False,
+        "steps": 6,
+        "meta_calls": [],
+        "discovery_path": "none",
+        "search_hit": None,
+        "enabled_correct_toolset": None,
+        "tokens": {"input": 1, "cached_input": 0, "output": 1},
+    }
+
+    out = S.discovery_summary([record])
+
+    assert out["first_try_rate"] == 0.0
+    assert out["unexecuted"] == 0
