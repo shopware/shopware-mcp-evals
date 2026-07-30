@@ -17,6 +17,7 @@ diagnosis. Runs in about a second and costs nothing.
 """
 
 import argparse
+import json
 import sys
 
 import mcp_client as mc
@@ -109,6 +110,18 @@ def run(endpoint_name: str) -> int:
         return 0
 
     print(f"FAILED — {tool} did not execute.\n  error: {error}\n  cause: {diagnose(error)}")
+
+    # "Error while executing tool" is the MCP layer's generic wrapper, which it
+    # uses whenever an exception escapes the tool rather than being returned
+    # in-band. It carries none of the underlying message, so the diagnosis table
+    # has nothing to match on and the run is a dead end. Two CI runs were spent
+    # that way. Dump everything the response actually carries, so the next
+    # occurrence is diagnosed from the log rather than from a local re-creation
+    # that may not reproduce it.
+    print("\n  --- raw response, for the cases the table cannot name ---")
+    print(f"  result text: {(text or '(empty)')[:1000]}")
+    print(f"  jsonrpc error: {json.dumps(response.get('error'), indent=2)[:1000]}")
+    print(f"  full result: {json.dumps(response.get('result'), indent=2)[:1000]}")
     return 1
 
 

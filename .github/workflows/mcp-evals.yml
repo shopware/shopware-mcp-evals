@@ -893,6 +893,15 @@ jobs:
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
         run: |
           python -m eval.preflight --endpoint store || {
+            # The MCP layer answers an escaped exception with a generic "Error
+            # while executing tool" that carries none of the underlying message,
+            # so the diagnosis table has nothing to match on. The exception
+            # itself only exists in Shopware's log, and the end-of-job dump runs
+            # too late and too broadly to be useful. Pull it here, while we know
+            # exactly which call produced it.
+            echo "--- shopware log, filtered to the UCP/MCP exception ---"
+            grep -hE 'mcp\.|ucp|Ucp\\|Unhandled error' shopware/var/log/*.log 2>/dev/null | tail -n 20 \
+              || echo "(nothing matched; the plugin logs nothing for this path)"
             echo "::error::Store preflight failed - UCP tools cannot execute, so the suite would measure nothing. See the diagnosis above."
             exit 1
           }
