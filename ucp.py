@@ -63,14 +63,29 @@ UNSAFE = frozenset()
 
 # Every UCP runtime tool rejects a request without this header. The SDK reads it
 # with /profile="([^"]+)"/ and then fetches the URI, so it has to be a real
-# document served by a host the instance allows — see assertSafeProfileUri in
+# document served by a host the instance allows — see UrlSafetyValidator in
 # ucp-php-sdk. The shop's own published profile is the default because it always
 # exists and needs no separate service.
 #
-# Note this is the shop's *service* profile, not an agent profile. It clears the
-# `allowedProfileHosts` check but an instance whose `agentAllowlist` is set will
-# still reject it, which is arguably correct: the eval is the agent, the shop is
-# not. Override with UCP_PROFILE_URI when a real agent profile exists.
+# Note this is the shop's *service* profile, not an agent profile. Override with
+# UCP_PROFILE_URI once a real agent profile exists; the shop's own is a stand-in.
+#
+# Two gates sit behind this, and only one of them is configurable:
+#
+#   agentAllowlist  falls back to the sales-channel domains when unset, so it
+#                   passes by default. `ucp:config:set --agent-allowlist=<host>`
+#                   fixes it when an instance has set one.
+#   plain http      allowed only when the host is exactly localhost/127.0.0.1/::1
+#                   AND SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE
+#                   is on. CI meets both (APP_URL is http://localhost:8000, and
+#                   the workflow sets the flag).
+#
+# A local `<shop>.localhost` instance meets neither half of the second and cannot
+# be made to: the SDK's isLocalHost() is an exact match on the bare name, so a
+# `.localhost` subdomain — loopback by RFC 6761 §6.3, and what every Shopware dev
+# setup uses — is treated as a remote host that must therefore be https. No
+# setting reaches past it. Running the Store suite locally needs either https or
+# an SDK that accepts the reserved TLD.
 PROFILE_PATH = "/.well-known/ucp"
 AGENT_NAME = os.environ.get("UCP_AGENT_NAME", "shopware-mcp-evals")
 
