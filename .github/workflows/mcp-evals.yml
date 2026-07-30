@@ -460,6 +460,15 @@ jobs:
       # drifted upstream and the eval expectations may need updating. Treat the
       # LLM eval as advisory in that case so PR/main runs stay green until a
       # reconciliation PR bumps shopware.sha + baseline + expectations together.
+      # Deliberately a separate output from `drift`. `drift` means the admin
+      # catalogue moved, which downgrades the admin gate to advisory — a Store
+      # snapshot changing is no reason to weaken an admin gate. This one only
+      # decides whether there is something to commit.
+      #
+      # `git status --porcelain` rather than `git diff`: store.json is untracked
+      # until the first snapshot lands, and `git diff` says nothing about an
+      # untracked file — so the very run that first produces it would report
+      # nothing to do and never open the PR that commits it.
       - name: Detect tool description drift
         id: drift
         run: |
@@ -508,59 +517,6 @@ jobs:
       #
       # Deliberately NOT part of the gate: this is a convenience, so every failure
       # mode here is swallowed rather than allowed to fail a run whose eval passed.
-      - name: Open a reconciliation PR (nightly only)
-        if: github.event_name == 'schedule' && steps.drift.outputs.drift == 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SW_SHA: ${{ steps.sw-sha.outputs.sha }}
-        run: |
-          set -euo pipefail
-          # One branch per upstream sha: a second nightly on the same trunk commit
-          # updates the existing PR instead of opening another.
-          BRANCH="chore/reconcile-mcp-drift-${SW_SHA:0:12}"
-
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-
-          echo "$SW_SHA" > shopware.sha
-          git add shopware.sha tool-history/latest.json
-
-          if git diff --cached --quiet; then
-            echo "Nothing to reconcile after all — no commit, no PR."
-            exit 0
-          fi
-
-          git show "origin/${GITHUB_REF_NAME}:tool-history/latest.json" > /tmp/baseline.json 2>/dev/null || true
-          python -m eval.drift --old /tmp/baseline.json --new tool-history/latest.json \
-            --heading "What moved upstream" > /tmp/body.md
-
-          {
-            echo ""
-            echo "Opened automatically by the nightly eval run against \`trunk\`."
-            echo "Bumps \`shopware.sha\` to \`$SW_SHA\` and refreshes the catalogue baseline together,"
-            echo "so the next run can attribute its own diff instead of re-reporting this one."
-            echo ""
-            echo "**Check before merging:** a tool added here needs fixtures, and a tool removed"
-            echo "means its fixtures will start skipping. Descriptions changing is the ordinary case."
-            echo ""
-            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          } >> /tmp/body.md
-
-          git commit -q -m "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
-                        -m "Opened by the nightly eval run. See the PR body for what moved."
-          git push -f origin "$BRANCH"
-
-          if gh pr view "$BRANCH" --json number --jq .number > /dev/null 2>&1; then
-            gh pr edit "$BRANCH" --body-file /tmp/body.md
-            echo "Updated the existing reconciliation PR for $BRANCH."
-          else
-            gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
-              --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
-              --body-file /tmp/body.md
-          fi
-
       - name: Run functional tests
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
@@ -788,6 +744,75 @@ jobs:
           for ts in snap["toolsets"]:
               print(f"- `{ts['name']}` — {', '.join(ts['tools'])}")
           EOF
+
+      - name: Detect snapshot changes worth committing
+        id: snapshot
+        run: |
+          set -euo pipefail
+          if [ -n "$(git status --porcelain -- tool-history/)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git status --short -- tool-history/
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a reconciliation PR (nightly only)
+        if: ${{ github.event_name == 'schedule' && (steps.drift.outputs.drift == 'true' || steps.snapshot.outputs.changed == 'true') }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SW_SHA: ${{ steps.sw-sha.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # One branch per upstream sha: a second nightly on the same trunk commit
+          # updates the existing PR instead of opening another.
+          BRANCH="chore/reconcile-mcp-drift-${SW_SHA:0:12}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+
+          echo "$SW_SHA" > shopware.sha
+          git add shopware.sha tool-history/latest.json
+          # The Store snapshot rides along. Without this it would only ever be a
+          # per-run artifact, and everything waiting on it — correct
+          # expected_toolset values, dryRun read from schemas instead of guessed,
+          # Store drift — would stay blocked indefinitely.
+          if [ -f tool-history/store.json ]; then git add tool-history/store.json; fi
+
+          if git diff --cached --quiet; then
+            echo "Nothing to reconcile after all — no commit, no PR."
+            exit 0
+          fi
+
+          git show "origin/${GITHUB_REF_NAME}:tool-history/latest.json" > /tmp/baseline.json 2>/dev/null || true
+          python -m eval.drift --old /tmp/baseline.json --new tool-history/latest.json \
+            --heading "What moved upstream" > /tmp/body.md
+
+          {
+            echo ""
+            echo "Opened automatically by the nightly eval run against \`trunk\`."
+            echo "Bumps \`shopware.sha\` to \`$SW_SHA\` and refreshes the catalogue baseline together,"
+            echo "so the next run can attribute its own diff instead of re-reporting this one."
+            echo ""
+            echo "**Check before merging:** a tool added here needs fixtures, and a tool removed"
+            echo "means its fixtures will start skipping. Descriptions changing is the ordinary case."
+            echo ""
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >> /tmp/body.md
+
+          git commit -q -m "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
+                        -m "Opened by the nightly eval run. See the PR body for what moved."
+          git push -f origin "$BRANCH"
+
+          if gh pr view "$BRANCH" --json number --jq .number > /dev/null 2>&1; then
+            gh pr edit "$BRANCH" --body-file /tmp/body.md
+            echo "Updated the existing reconciliation PR for $BRANCH."
+          else
+            gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
+              --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
+              --body-file /tmp/body.md
+          fi
 
       - name: Run Store API functional tests
         if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'

@@ -162,3 +162,42 @@ def test_an_unclassified_tool_is_not_given_a_dry_run():
     args, forced = TC.prepare_call("unknown-tool", {"a": 1})
 
     assert args == {"a": 1} and forced is False
+
+
+# ---------------------------------------------------------------------------
+# Store classification, once the Store catalogue has been snapshotted
+# ---------------------------------------------------------------------------
+# Every shopware-ucp-* tool is currently classified by hand from its name,
+# because there has never been a Store snapshot to read a `dryRun` property out
+# of. Anything that might mutate was therefore called unsafe, which is why the
+# whole Store suite is graded on selection alone.
+#
+# This is inert until the snapshot lands, then it fails for any Store tool whose
+# schema disagrees with the guess — including any that turn out to have a dryRun
+# and should move to DRY_RUNNABLE and start being executed for real.
+STORE_SNAPSHOT = ROOT / "tool-history" / "store.json"
+store_snapshot_required = pytest.mark.skipif(
+    not STORE_SNAPSHOT.exists(),
+    reason="tool-history/store.json not committed yet — the nightly reconciliation PR adds it",
+)
+
+
+@store_snapshot_required
+def test_every_store_tool_is_classified():
+    tools = [t["name"] for t in json.loads(STORE_SNAPSHOT.read_text())["tools"]]
+    unclassified = sorted(t for t in tools if TC.classify(t) is None)
+
+    assert not unclassified, f"Store tools with no class: {unclassified}"
+
+
+@store_snapshot_required
+def test_store_tools_that_declare_dry_run_are_not_guessed_unsafe():
+    """A Store tool with a dryRun can be executed safely, so leaving it unsafe
+    costs real signal — result assertions and recovery both switch off for it."""
+    snap = json.loads(STORE_SNAPSHOT.read_text())
+    declares = {
+        t["name"] for t in snap["tools"] if TC.DRY_RUN_KEY in ((t.get("inputSchema") or {}).get("properties") or {})
+    }
+    misfiled = sorted(declares & TC.UNSAFE)
+
+    assert not misfiled, f"these declare dryRun and should move to DRY_RUNNABLE: {misfiled}"

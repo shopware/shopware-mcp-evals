@@ -213,3 +213,56 @@ def test_only_meta_fixtures_name_a_toolset_as_a_toolset(label, fixtures):
         f"prompts routing discovery by naming a toolset: {offenders}. "
         f"Add to ALLOWED_TOOLSET_MENTIONS only if that is the point of the fixture."
     )
+
+
+# ---------------------------------------------------------------------------
+# Store fixtures, once the Store catalogue has been snapshotted
+# ---------------------------------------------------------------------------
+# These are inert until tool-history/store.json exists, and that is the point.
+# The Store endpoint has never had a snapshot, so nothing could check its
+# fixtures against reality — which is how 39 of them came to declare a toolset
+# named `shopware`, and 3 `store-api`, when the real ones are shopware-ucp-cart,
+# -catalog and -checkout. The isolated triage arm enabled `shopware`, got zero
+# tools, and every Store failure was then diagnosed as a description problem.
+#
+# The moment the snapshot lands these turn on and fail until the fixtures are
+# corrected against it.
+STORE_SNAPSHOT = ROOT / "tool-history" / "store.json"
+store_snapshot_required = pytest.mark.skipif(
+    not STORE_SNAPSHOT.exists(),
+    reason="tool-history/store.json not committed yet — the nightly reconciliation PR adds it",
+)
+
+
+def _store_snapshot():
+    return json.loads(STORE_SNAPSHOT.read_text())
+
+
+@store_snapshot_required
+def test_store_fixtures_reference_known_tools():
+    tools = {t["name"] for t in _store_snapshot()["tools"]}
+    named = {f["expected_tool"] for f in _positive(STORE)}
+    named |= {t for f in STORE for t in f.get("acceptable_tools", [])}
+
+    assert not sorted(named - tools), f"tools not in {STORE_SNAPSHOT.name}: {sorted(named - tools)}"
+
+
+@store_snapshot_required
+def test_store_fixtures_declare_a_toolset_that_exists():
+    """The check that would have caught `expected_toolset: shopware` on day one."""
+    known = {ts["name"] for ts in _store_snapshot()["toolsets"]}
+    wrong = {f["id"]: f["expected_toolset"] for f in _positive(STORE) if f.get("expected_toolset") not in known}
+
+    assert not wrong, f"toolsets that do not exist on the Store endpoint: {wrong}"
+
+
+@store_snapshot_required
+def test_store_fixtures_declare_the_toolset_their_tool_is_actually_in():
+    toolset_of = {tool: ts["name"] for ts in _store_snapshot()["toolsets"] for tool in ts["tools"]}
+    wrong = {
+        f["id"]: (f["expected_toolset"], toolset_of.get(f["expected_tool"]))
+        for f in _positive(STORE)
+        if f.get("expected_toolset") and toolset_of.get(f["expected_tool"]) != f["expected_toolset"]
+    }
+
+    assert not wrong, f"expected_toolset disagrees with the snapshot (declared, actual): {wrong}"
