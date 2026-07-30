@@ -22,7 +22,7 @@ dependencies = []
 # by search-path order, which put eval/run.py in front of functional/run.py for
 # anything that guessed wrong. They are `runner.py` under their own packages now.
 [tool.setuptools]
-py-modules = ["mcp_client", "ownership", "toollint"]
+py-modules = ["mcp_client", "ownership", "toolclass", "toollint"]
 
 [tool.setuptools.packages.find]
 include = ["eval*", "functional*"]
@@ -38,7 +38,7 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["eval", "functional", "mcp_client", "ownership", "toollint"]
+source = ["eval", "functional", "mcp_client", "ownership", "toolclass", "toollint"]
 # Branch coverage, because statement coverage counts an `if` as covered when only
 # one side ever runs — and the untaken side is where the skip reasons, the error
 # budget and the gate thresholds live.
