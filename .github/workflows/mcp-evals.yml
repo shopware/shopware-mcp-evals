@@ -69,7 +69,18 @@ permissions:
 
 concurrency:
   group: mcp-evals-${{ github.ref }}
-  cancel-in-progress: false
+  # Superseded PR runs are cancelled; nightly and manual dispatch never are.
+  #
+  # Each run installs Shopware and spends real LLM credit, so several pushes in
+  # quick succession used to leave four full runs racing for a result only the
+  # last of which anyone would read. On a PR the newest commit is the only one
+  # that matters.
+  #
+  # Scoped to pull_request on purpose: the group keys on github.ref, so without
+  # the condition a push to the default branch would cancel a nightly halfway
+  # through — and the nightly is the run that opens the reconciliation PR and
+  # carries the only Store catalogue snapshot we get.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Fast lint + unit-test gate lives in its own workflow (.github/workflows/lint.yml)
