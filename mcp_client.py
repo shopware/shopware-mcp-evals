@@ -99,8 +99,33 @@ def admin_endpoint(
     )
 
 
+# Every UCP runtime tool rejects a request without this. The SDK reads it with
+# /profile="([^"]+)"/ and then fetches the URI, so it has to be a real document
+# served by a host the instance allows — see assertSafeProfileUri in the
+# ucp-php-sdk. `.well-known/ucp` on the shop itself is the natural choice: it is
+# the shop's own published profile, so no separate service has to exist and the
+# host is trivially on any allowlist that permits the shop.
+#
+# Without it every shopware-ucp-* call fails, which is not a finding about tool
+# descriptions but looked exactly like one: the whole Store suite failed on it
+# while the tools that were never executed all "passed".
+UCP_PROFILE_PATH = "/.well-known/ucp"
+UCP_AGENT_NAME = os.environ.get("UCP_AGENT_NAME", "shopware-mcp-evals")
+
+
+def ucp_agent_header(base_url: str | None = None, profile_uri: str | None = None) -> str:
+    """The UCP-Agent header value, pointing at the shop's own published profile."""
+    uri = (
+        profile_uri or os.environ.get("UCP_PROFILE_URI") or f"{(base_url or SW_BASE_URL).rstrip('/')}{UCP_PROFILE_PATH}"
+    )
+    return f'{UCP_AGENT_NAME} profile="{uri}"'
+
+
 def store_endpoint(
-    access_key: str | None = None, context_token: str | None = None, base_url: str | None = None
+    access_key: str | None = None,
+    context_token: str | None = None,
+    base_url: str | None = None,
+    profile_uri: str | None = None,
 ) -> Endpoint:
     """Build a Store API endpoint, defaulting to the process configuration.
 
@@ -115,6 +140,7 @@ def store_endpoint(
         {
             "sw-access-key": access_key if access_key is not None else SW_SC_ACCESS_KEY,
             "sw-context-token": context_token or secrets.token_hex(16),
+            "UCP-Agent": ucp_agent_header(base_url, profile_uri),
         },
         base_url,
     )

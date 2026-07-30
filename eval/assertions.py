@@ -102,6 +102,27 @@ def _resolve(payload, path: str):
     return True, current
 
 
+def inband_error(result_text: str | None) -> str | None:
+    """The message from a `{"success": false}` body, or None if there is none.
+
+    UCP tools answer a rejected request with HTTP 200 and an MCP result that
+    carries `success: false` — there is no transport error at all, so
+    `mcp_call_error` returns "" and the call looks clean. Without this the
+    `accepted` tier passed every one of them: the entire Store suite would have
+    gone green while not a single tool did anything, which is a worse outcome
+    than the failure it replaced.
+    """
+    payload = _payload(result_text)
+    if not isinstance(payload, dict) or payload.get("success") is not False:
+        return None
+    err = payload.get("error")
+    if isinstance(err, dict):
+        # `type` carries the classification the server already made — keeping it
+        # in the string lets the markers below sort it without a second scheme.
+        return f"{err.get('type', '')}: {err.get('message', '')}".strip(": ").strip()
+    return str(err) if err else "the tool reported success: false"
+
+
 def check(expect, result_text: str | None, error: str | None) -> tuple[bool, str | None]:
     """Evaluate one fixture's expectation. Returns (passed, failure_reason).
 
@@ -113,6 +134,12 @@ def check(expect, result_text: str | None, error: str | None) -> tuple[bool, str
 
     if tier == "none":
         return True, None
+
+    # An in-band failure is a failure. Checked after `none` so a tool that
+    # cannot be executed is still exempt, and folded into `error` so it sorts
+    # through exactly the same not-found / malformed / environment logic rather
+    # than growing a parallel one.
+    error = error or inband_error(result_text)
 
     if error:
         # Not-found is checked FIRST, before the validation markers, and that

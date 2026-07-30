@@ -216,3 +216,50 @@ def test_the_store_regression_this_fixes():
 def test_an_environment_failure_is_still_neither():
     assert A.check("accepted", None, "500 Internal Server Error") == (False, "tool_error")
     assert A.is_not_found("500 Internal Server Error") is False
+
+
+# ---------------------------------------------------------------------------
+# In-band failures — HTTP 200 with success: false
+# ---------------------------------------------------------------------------
+def test_a_success_false_body_is_a_failure_not_a_pass():
+    """UCP answers a rejected request with HTTP 200 and success: false, so there
+    is no transport error and the call looks clean.
+
+    Without this the `accepted` tier passed every one: the Store suite would
+    have gone green while not a single tool did anything — worse than the
+    failure it replaced.
+    """
+    body = json.dumps({"success": False, "error": {"type": "validation", "message": "UCP-Agent header required"}})
+
+    assert A.check("accepted", body, None) == (False, "invalid_arguments")
+
+
+def test_a_signature_rejection_is_reported_as_an_environment_problem():
+    """A misconfigured allowlist is not the model choosing badly."""
+    body = json.dumps({"success": False, "error": {"type": "signature", "message": "agent domain is not allowed"}})
+
+    assert A.check("accepted", body, None) == (False, "tool_error")
+
+
+def test_an_in_band_not_found_still_satisfies_the_accepted_tier():
+    body = json.dumps({"success": False, "error": {"type": "not_found", "message": "Cart not found"}})
+
+    assert A.check("accepted", body, None) == (True, None)
+    assert A.check("data", body, None) == (False, "not_found")
+
+
+def test_a_successful_body_is_untouched():
+    assert A.check("accepted", json.dumps({"success": True, "data": {"id": "x"}}), None) == (True, None)
+    assert A.inband_error(json.dumps({"success": True})) is None
+    assert A.inband_error(json.dumps({"data": []})) is None
+    assert A.inband_error("not json") is None
+
+
+def test_an_unexecutable_tool_is_still_exempt():
+    """`none` means the call never happened, so there is no body to judge."""
+    body = json.dumps({"success": False, "error": {"type": "validation", "message": "nope"}})
+    assert A.check("none", body, None) == (True, None)
+
+
+def test_a_success_false_body_with_no_error_detail_still_fails():
+    assert A.check("accepted", json.dumps({"success": False}), None)[0] is False

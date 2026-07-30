@@ -40,7 +40,11 @@ def test_the_dry_runnable_set_matches_what_the_schemas_declare():
     here without a dryRun property would be called with an argument it rejects,
     and one omitted would be executed for real.
     """
-    assert sorted(TC.DRY_RUNNABLE) == SCHEMA_DRY_RUN
+    # Admin-scoped: the Store tools are in DRY_RUNNABLE too, and the admin
+    # snapshot knows nothing about them. test_store_tools_that_declare_dry_run_
+    # are_not_guessed_unsafe covers those once store.json lands.
+    admin = sorted(t for t in TC.DRY_RUNNABLE if not t.startswith(("shopware-ucp-", "shopware-store-api-")))
+    assert admin == SCHEMA_DRY_RUN
 
 
 def test_no_tool_is_in_two_classes():
@@ -76,12 +80,15 @@ def test_every_store_fixture_target_is_classified():
     assert not unclassified, f"Store fixture targets with no class: {unclassified}"
 
 
-def test_store_mutations_are_unsafe_until_the_endpoint_is_snapshotted():
-    """Conservative by necessity: with no schema to read a dryRun out of,
-    guessing the other way would place real orders."""
+def test_store_mutations_are_dry_runnable_now_that_the_plugin_declares_it():
+    """These were guessed unsafe while there was no Store schema to read. The
+    plugin added dryRun to exactly its mutating tools, so they are executable
+    again — checkout-complete is the one that can take money, and it is only
+    callable at all because the server offers a safe path."""
     for tool in ("shopware-ucp-checkout-complete", "shopware-ucp-cart-create"):
-        assert TC.classify(tool) == "unsafe"
-        assert TC.is_executable(tool) is False
+        assert TC.classify(tool) == "dry_runnable"
+        args, forced = TC.prepare_call(tool, {})
+        assert args["dryRun"] is True and forced is True
 
 
 def test_unsafe_tools_have_no_dry_run_to_hide_behind():

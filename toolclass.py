@@ -24,10 +24,10 @@ three of thirty — `shopware-media-upload`, `merchant-cart-manage` and
 participate in result assertions or in the recovery loop. Adding `dryRun` to
 them server-side is what would fix that.
 
-On the Store endpoint it is most of the surface, for a different reason: there
-is no committed snapshot to read schemas from, so anything that might mutate is
-classified unsafe by default. Snapshotting the Store catalogue the way
-`eval/snapshot_tools.py` does for admin would let most of those move.
+The Store endpoint used to be almost entirely unsafe for a different reason —
+there was no snapshot to read schemas from, so anything that might mutate was
+guessed unsafe. The plugin has since added dryRun to exactly its mutating tools,
+so that guess is gone and only the three admin tools above remain.
 
 A tool in none of the three sets is not executed either — an unclassified tool
 is loud (tests/test_toolclass.py fails on it) rather than quietly assumed safe.
@@ -45,27 +45,9 @@ DRY_RUNNABLE = frozenset(
         "shopware-order-state",
         "shopware-system-config-write",
         "shopware-theme-config",
-    }
-)
-
-# Mutating with no dryRun to hide behind.
-#
-# The `shopware-ucp-*` half of this set is classified conservatively rather than
-# from evidence: the Store endpoint has no committed snapshot (see
-# tests/test_fixtures.py), so there is nothing to read a `dryRun` property out
-# of. Any of them that turns out to have one belongs in DRY_RUNNABLE, and would
-# start participating in result assertions and recovery instead of being graded
-# on selection alone. Until the Store catalogue is snapshotted, guessing the
-# other way would mean placing real orders.
-UNSAFE = frozenset(
-    {
-        "merchant-cart-manage",  # creates and mutates carts
-        "shopware-media-upload",  # creates a media entity from an upload
-        "swag-dev-tools-scaffold",  # writes plugin scaffolding to disk
-        # Store API / UCP — agentic checkout, all state-changing. Plus
-        # store-api-context, which may only read the sales-channel context, but
-        # "may only" is not a basis for calling something on a live shop.
-        "shopware-store-api-context",
+        # Store API / UCP. Read off the live catalogue rather than guessed: the
+        # plugin added dryRun to exactly its mutating tools, so these move out
+        # of UNSAFE and start being executed, asserted on, and recovered from.
         "shopware-ucp-cart-cancel",
         "shopware-ucp-cart-create",
         "shopware-ucp-cart-update",
@@ -74,6 +56,15 @@ UNSAFE = frozenset(
         "shopware-ucp-checkout-create",
         "shopware-ucp-checkout-update",
         "shopware-ucp-discount-apply",
+    }
+)
+
+# Mutating with no dryRun to hide behind.
+UNSAFE = frozenset(
+    {
+        "merchant-cart-manage",  # creates and mutates carts
+        "shopware-media-upload",  # creates a media entity from an upload
+        "swag-dev-tools-scaffold",  # writes plugin scaffolding to disk
     }
 )
 
@@ -105,6 +96,10 @@ READ_ONLY = frozenset(
         "shopware-ucp-catalog-search",
         "shopware-ucp-checkout-get",
         "shopware-ucp-order-get",
+        # Takes no parameters and returns the sales-channel context. Guessed
+        # unsafe while there was no Store schema to check; the live catalogue
+        # shows it has no arguments at all, so there is nothing to mutate with.
+        "shopware-store-api-context",
     }
 )
 
