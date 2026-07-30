@@ -61,15 +61,26 @@ TIER_ORDER = (DISCOVERY, "core", "dev-tools", "merchant-tools", "agentic-commerc
 OPTIONAL = frozenset({"merchant-tools", "agentic-commerce"})
 
 
-def owner_of(tool: str) -> str:
-    """Owning repository for a tool name, or UNKNOWN if no prefix matches."""
+def owner_of(tool: str | None) -> str:
+    """Owning repository for a tool name, or UNKNOWN if no prefix matches.
+
+    Accepts None because negative fixtures have no expected tool — the whole
+    point of them is that no tool should be called. They carry `expected_tool`
+    as an explicit None, so `result.get("expected_tool", "")` hands back None
+    rather than the default: the key is present, its value is null.
+
+    That shape has now broken this repo three times in three different modules,
+    each time as an AttributeError inside a gate or summary, after a full LLM
+    pass had already been paid for. Guarding here rather than at each call site
+    is what stops there being a fourth.
+    """
     for prefix, owner in OWNER_PREFIXES:
-        if tool.startswith(prefix):
+        if (tool or "").startswith(prefix):
             return owner
     return UNKNOWN
 
 
-def tier_of(tool: str) -> str:
+def tier_of(tool: str | None) -> str:
     """Reporting bucket: like owner_of, but splits core's discovery meta-tools out."""
     if tool in DISCOVERY_TOOLS:
         return DISCOVERY

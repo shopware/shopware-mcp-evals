@@ -177,3 +177,30 @@ def test_negative_fixtures_stay_out_of_the_core_denominator():
     ]
 
     assert OWN.core_rate(results) == (1, 1, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Negative fixtures carry `expected_tool: None`
+# ---------------------------------------------------------------------------
+def test_a_missing_expected_tool_is_unknown_not_a_crash():
+    """`result.get("expected_tool", "")` returns None, not "", because the key is
+    present with a null value. That crashed a full CI run at the gate, after the
+    LLM pass had already been paid for."""
+    assert OWN.owner_of(None) == OWN.UNKNOWN
+    assert OWN.tier_of(None) == OWN.UNKNOWN
+    assert OWN.owner_of("") == OWN.UNKNOWN
+
+
+def test_the_real_negative_fixtures_survive_the_gate_path():
+    """Over the actual fixture files, not a hand-built dict — the previous two
+    fixes for this same shape passed their unit tests and still broke CI."""
+    import pathlib
+
+    import yaml
+
+    for name in ("eval/fixtures.yaml", "eval/fixtures_store.yaml"):
+        raw = yaml.safe_load(pathlib.Path(name).read_text())
+        for fixture in raw["fixtures"] if isinstance(raw, dict) else raw:
+            # exactly what print_gate does
+            assert OWN.owner_of(fixture.get("expected_tool", "")) in OWN.TIER_ORDER
+            assert OWN.tier_of(fixture.get("expected_tool", "")) in OWN.TIER_ORDER
