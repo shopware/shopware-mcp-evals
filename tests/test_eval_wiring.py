@@ -248,7 +248,11 @@ def test_startup_survives_the_real_fixtures_including_negatives(monkeypatch, tmp
     the catalogue probe, before a single fixture was graded, with no report and
     no partial output.
     """
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    # setattr, not setenv: require_credentials reads module-level constants
+    # captured at import, so setenv only works on a machine with a .env — which
+    # is why this passed locally and failed in CI.
+    for name in ("SW_ACCESS_KEY", "SW_SECRET_ACCESS_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setattr(E, name, "test-value")
     monkeypatch.setattr(E, "build_client", lambda provider, credential: object())
     monkeypatch.setattr(E, "fetch_system_prompt", lambda endpoint, enabled=True: "SYSTEM")
     # Deliberately a partial catalogue: the absent-tool report is the code under
@@ -272,8 +276,8 @@ def test_startup_survives_the_real_fixtures_including_negatives(monkeypatch, tmp
 
 
 def test_startup_survives_the_real_store_fixtures(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("SW_SC_ACCESS_KEY", "sc-key")
+    for name in ("SW_SC_ACCESS_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setattr(E, name, "test-value")
     monkeypatch.setattr(E, "build_client", lambda provider, credential: object())
     monkeypatch.setattr(E, "fetch_system_prompt", lambda endpoint, enabled=True: "SYSTEM")
     monkeypatch.setattr(E, "probe_catalogue", lambda endpoint: set())
