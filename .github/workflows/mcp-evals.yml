@@ -117,10 +117,19 @@ jobs:
       # the whole Store suite only ever ran on a manual dispatch that nobody
       # triggered, so its 42 fixtures had never once executed against a server.
       RUN_STORE: ${{ github.event.inputs.run_store != 'false' }}
-      # Nightly always triages; a manual dispatch can ask for it. Not on PRs by
-      # default — it re-runs failures under two more arms, which costs real
-      # money on a branch that may be iterating.
-      TRIAGE: ${{ github.event_name == 'schedule' || github.event.inputs.triage == 'true' }}
+      # Nightly always triages. On a PR, the `run-triage` label asks for it; on a
+      # manual dispatch, the `triage` input does. Not on by default — it re-runs
+      # failures under two more arms, which costs real money on a branch that may
+      # still be iterating.
+      #
+      # The label exists because workflow_dispatch inputs are validated against
+      # the workflow file on the DEFAULT branch, so the input below cannot be
+      # passed until this file is on main. A label is read from the event and
+      # works on the branch immediately.
+      TRIAGE: >-
+        ${{ github.event_name == 'schedule'
+            || github.event.inputs.triage == 'true'
+            || contains(github.event.pull_request.labels.*.name, 'run-triage') }}
 
     steps:
       - name: Checkout evals repo

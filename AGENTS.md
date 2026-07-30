@@ -115,7 +115,8 @@ python -m functional.runner --skip-dev-tools
 .venv/bin/python3 -m eval.runner --output results/x.json  # custom report path
 .venv/bin/python3 -m eval.runner --triage                 # re-run ONLY the failures under
                                                           # the isolated + full arms.
-                                                          # In CI: nightly, or the `triage`
+                                                          # In CI: nightly, the `run-triage`
+                                                          # PR label, or the `triage`
                                                           # workflow_dispatch input.
 
 # Cost of a run vs the previous one, per fixture. Warns, never gates.
