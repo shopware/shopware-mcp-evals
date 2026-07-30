@@ -720,9 +720,17 @@ jobs:
 
       # -------------------------------------------------------------------
       # Store API / UCP suite — runs by default; skip with run_store=false.
+      #
+      # Every step below carries `!cancelled()` rather than a bare condition,
+      # because a failing step short-circuits everything after it and these are
+      # independent of the admin suite. Without it, one admin fixture failing
+      # took the whole Store suite with it, reported as `skipped` — which reads
+      # exactly like "the plugin is missing" and cost a round of chasing a
+      # composer problem that did not exist. The plugin installs fine; it was
+      # the admin eval crashing first.
       # -------------------------------------------------------------------
       - name: Fetch sales-channel access key
-        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
+        if: ${{ !cancelled() && env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true' }}
         id: sc
         run: |
           set -euo pipefail
@@ -747,7 +755,7 @@ jobs:
       # Uploaded as an artifact rather than committed here: the nightly
       # reconciliation PR is where a snapshot enters the repo.
       - name: Snapshot Store tool catalogue
-        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
+        if: ${{ !cancelled() && env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true' }}
         continue-on-error: true
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
@@ -804,7 +812,7 @@ jobs:
           }
 
       - name: Preflight the Store endpoint
-        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
+        if: ${{ !cancelled() && env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true' }}
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
@@ -884,14 +892,14 @@ jobs:
           fi
 
       - name: Run Store API functional tests
-        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
+        if: ${{ !cancelled() && env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true' }}
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
         run: python -m functional.runner --endpoint store
 
       - name: Run Store API LLM eval (advisory)
-        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
+        if: ${{ !cancelled() && env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true' }}
         continue-on-error: true
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
