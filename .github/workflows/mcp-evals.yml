@@ -662,8 +662,15 @@ jobs:
             --suite-label "admin · second validator" > second.log 2>&1 &
           pid_second=$!
 
-          wait "${pid_primary}"; rc_primary=$?
-          wait "${pid_second}"; rc_second=$?
+          # `|| rc=$?`, not `wait; rc=$?`. GitHub runs this with `bash -e`, which
+          # the script's own `set -uo pipefail` does not undo, and a failing
+          # `wait` is a simple command — so the shell exited *at the wait* the
+          # first time a runner returned non-zero. Everything below never ran:
+          # no `cat primary.log`, so the reason was invisible, and none of the
+          # advisory handling underneath, so REBASELINE and DRIFTED could not
+          # take effect. The step just failed with a bare exit code.
+          rc_primary=0; wait "${pid_primary}" || rc_primary=$?
+          rc_second=0; wait "${pid_second}" || rc_second=$?
 
           echo "::group::admin · primary (exit ${rc_primary})"
           cat primary.log

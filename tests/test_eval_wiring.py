@@ -233,3 +233,53 @@ def test_main_returns_one_on_a_configuration_error(monkeypatch, capsys):
 
     assert E.main() == 1
     assert "unknown mode" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# run_suite startup against the REAL fixture files
+# ---------------------------------------------------------------------------
+def test_startup_survives_the_real_fixtures_including_negatives(monkeypatch, tmp_path, capsys):
+    """The gap that let a KeyError reach CI.
+
+    Every unit test built its own fixture dicts, so nothing exercised the
+    startup path against the committed YAML. `run_suite` indexed
+    `f["expected_tool"]` while computing which tools are absent from the
+    catalogue — negative fixtures do not have one, so the whole run died after
+    the catalogue probe, before a single fixture was graded, with no report and
+    no partial output.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(E, "build_client", lambda provider, credential: object())
+    monkeypatch.setattr(E, "fetch_system_prompt", lambda endpoint, enabled=True: "SYSTEM")
+    # Deliberately a partial catalogue: the absent-tool report is the code under
+    # test, so it has to actually have something to report.
+    monkeypatch.setattr(E, "probe_catalogue", lambda endpoint: {"shopware-entity-search"})
+
+    graded = {}
+
+    def fake_pass(provider, client, fixtures, *a, **kw):
+        graded["fixtures"] = fixtures
+        return [E.skipped_result(f, "discovery") for f in fixtures]
+
+    monkeypatch.setattr(E, "run_discovery_pass", fake_pass)
+
+    code = E.run_suite(args(provider="openai", output=str(tmp_path / "r.json")))
+    capsys.readouterr()
+
+    assert code == 0
+    negatives = [f for f in graded["fixtures"] if f.get("expect_no_tool")]
+    assert negatives, "the real admin fixtures must include negatives for this to be a regression test"
+
+
+def test_startup_survives_the_real_store_fixtures(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("SW_SC_ACCESS_KEY", "sc-key")
+    monkeypatch.setattr(E, "build_client", lambda provider, credential: object())
+    monkeypatch.setattr(E, "fetch_system_prompt", lambda endpoint, enabled=True: "SYSTEM")
+    monkeypatch.setattr(E, "probe_catalogue", lambda endpoint: set())
+    monkeypatch.setattr(E, "run_discovery_pass", lambda p, c, fixtures, *a, **kw: [])
+
+    code = E.run_suite(args(provider="openai", endpoint="store", output=str(tmp_path / "s.json")))
+    capsys.readouterr()
+
+    assert code == 0

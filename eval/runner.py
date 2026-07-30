@@ -1176,7 +1176,10 @@ def run_suite(args) -> int:
     system_prompt = fetch_system_prompt(endpoint, enabled=not args.no_system_prompt)
 
     available_tools = probe_catalogue(endpoint)
-    absent = sorted({f["expected_tool"] for f in fixtures} - available_tools)
+    # `.get()`: a negative fixture names no tool, so there is nothing that could
+    # be absent from the catalogue — and indexing it here crashed the whole run
+    # before a single fixture had been graded.
+    absent = sorted({f["expected_tool"] for f in fixtures if f.get("expected_tool")} - available_tools)
     if absent:
         print(f"Catalogue: {len(available_tools)} tools; will skip fixtures for absent: {', '.join(absent)}")
 
