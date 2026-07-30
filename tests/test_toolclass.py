@@ -258,3 +258,31 @@ def test_an_explicit_profile_uri_wins():
     import ucp
 
     assert 'profile="https://agent.example/p"' in ucp.agent_header("http://shop.test", "https://agent.example/p")
+
+
+def test_mutating_ucp_calls_carry_an_idempotency_key():
+    """Without it every dry run fails on "Idempotency key is required for
+    mutating UCP requests" before the tool does any work, which reads as a
+    tool-quality failure in the results and is not one."""
+    import ucp
+
+    for tool in sorted(ucp.DRY_RUNNABLE | ucp.UNSAFE):
+        assert ucp.call_headers(tool).get("Idempotency-Key"), tool
+
+
+def test_reads_and_non_ucp_tools_get_no_extra_headers():
+    """The key identifies a mutation. Sending one on a read is noise, and sending
+    one on an admin tool would leak plugin specifics onto the other endpoint."""
+    import ucp
+
+    for tool in sorted(ucp.READ_ONLY) + ["shopware-entity-search", "shopware-store-api-context"]:
+        assert ucp.call_headers(tool) == {}, tool
+
+
+def test_each_call_gets_a_fresh_key():
+    """The server replays a completed response for a repeated key, so a shared
+    one would serve the previous fixture's answer to the next."""
+    import ucp
+
+    keys = {ucp.call_headers("shopware-ucp-cart-create")["Idempotency-Key"] for _ in range(20)}
+    assert len(keys) == 20

@@ -156,9 +156,14 @@ def _throttle_wait(resp: requests.Response) -> float:
 
 
 def _rpc(
-    method: str, params: dict, session_id: str | None = None, rpc_id: int = 1, endpoint: Endpoint = ADMIN
+    method: str,
+    params: dict,
+    session_id: str | None = None,
+    rpc_id: int = 1,
+    endpoint: Endpoint = ADMIN,
+    extra_headers: dict | None = None,
 ) -> requests.Response:
-    headers = dict(endpoint.auth_headers)
+    headers = {**endpoint.auth_headers, **(extra_headers or {})}
     # Streamable HTTP requires the client to accept both reply shapes; the server
     # answers application/json for a lone response and text/event-stream when it
     # also has to push a notification (e.g. tools/list_changed after an enable).
@@ -221,10 +226,15 @@ def _response(resp: requests.Response, rpc_id: int) -> dict:
 
 
 def _rpc_json(
-    method: str, params: dict, session_id: str | None = None, rpc_id: int = 1, endpoint: Endpoint = ADMIN
+    method: str,
+    params: dict,
+    session_id: str | None = None,
+    rpc_id: int = 1,
+    endpoint: Endpoint = ADMIN,
+    extra_headers: dict | None = None,
 ) -> dict:
     """_rpc plus response extraction (single JSON object or SSE stream)."""
-    return _response(_rpc(method, params, session_id, rpc_id, endpoint), rpc_id)
+    return _response(_rpc(method, params, session_id, rpc_id, endpoint, extra_headers), rpc_id)
 
 
 def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
@@ -247,7 +257,16 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
 
 def mcp_call(session_id: str, tool: str, arguments: dict, endpoint: Endpoint = ADMIN) -> dict:
     """Call a tool. Returns the full JSON-RPC response dict."""
-    return _rpc_json("tools/call", {"name": tool, "arguments": arguments}, session_id, rpc_id=99, endpoint=endpoint)
+    return _rpc_json(
+        "tools/call",
+        {"name": tool, "arguments": arguments},
+        session_id,
+        rpc_id=99,
+        endpoint=endpoint,
+        # UCP-specific, and the only other UCP reference in this module — see
+        # ucp.py. Empty for every non-UCP tool, so the admin path is untouched.
+        extra_headers=ucp.call_headers(tool),
+    )
 
 
 def mcp_result_text(resp: dict) -> str:

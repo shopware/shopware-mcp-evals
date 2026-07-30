@@ -22,6 +22,7 @@ The two things this module carries are the ones a caller cannot guess:
 """
 
 import os
+import uuid
 
 # Tools this plugin owns. `shopware-store-api-` is excluded on purpose — see the
 # module docstring.
@@ -80,12 +81,23 @@ UNSAFE = frozenset()
 #                   is on. CI meets both (APP_URL is http://localhost:8000, and
 #                   the workflow sets the flag).
 #
-# A local `<shop>.localhost` instance meets neither half of the second and cannot
-# be made to: the SDK's isLocalHost() is an exact match on the bare name, so a
-# `.localhost` subdomain — loopback by RFC 6761 §6.3, and what every Shopware dev
-# setup uses — is treated as a remote host that must therefore be https. No
-# setting reaches past it. Running the Store suite locally needs either https or
-# an SDK that accepts the reserved TLD.
+# A local `<shop>.localhost` instance fails the host half upstream: the SDK's
+# isLocalHost() is an exact match on the bare name, so a `.localhost` subdomain —
+# loopback by RFC 6761 §6.3, and what every Shopware dev setup uses — is treated
+# as remote and therefore required to be https. No setting reaches past it; it
+# needs the one-line SDK change accepting the reserved TLD.
+#
+# Then set UCP_PROFILE_URI, because the *server* fetches this URI and it is not
+# on the host's network. A shop published at `<shop>.localhost:8088` through a
+# host proxy listens on :8000 inside its own container, so the published URI is
+# connection-refused there and the fetch fails as an unlogged `internal` error.
+# Point it at the port the container itself serves, keeping the host the
+# agentAllowlist expects:
+#
+#   UCP_PROFILE_URI=http://<shop>.localhost:8000/.well-known/ucp
+#
+# CI needs none of this: APP_URL is http://localhost:8000, which is both the
+# published URL and the one the server can reach.
 PROFILE_PATH = "/.well-known/ucp"
 AGENT_NAME = os.environ.get("UCP_AGENT_NAME", "shopware-mcp-evals")
 
@@ -98,6 +110,25 @@ def agent_header(base_url: str, profile_uri: str | None = None) -> str:
     """The UCP-Agent header value for a shop at `base_url`."""
     uri = profile_uri or os.environ.get("UCP_PROFILE_URI") or f"{base_url.rstrip('/')}{PROFILE_PATH}"
     return f'{AGENT_NAME} profile="{uri}"'
+
+
+def call_headers(tool: str) -> dict[str, str]:
+    """Per-call headers for a UCP tool, empty for anything else.
+
+    Mutating UCP operations are rejected outright when `idempotencyRequired` is
+    on — which it is by default — so without this every dry run fails with
+    "Idempotency key is required for mutating UCP requests" before the tool does
+    any work. That reads like a tool-quality problem in the results and is not.
+
+    A fresh key per call is deliberate. The key identifies one logical operation,
+    and the server replays a completed response for a repeated one; reusing a key
+    across fixtures would serve fixture A's answer to fixture B. Dry runs are
+    also careful not to consume the key (see previewMutation in the plugin), so
+    the two never collide.
+    """
+    if not is_ucp_tool(tool) or tool not in DRY_RUNNABLE | UNSAFE:
+        return {}
+    return {"Idempotency-Key": str(uuid.uuid4())}
 
 
 def all_classified() -> frozenset[str]:
