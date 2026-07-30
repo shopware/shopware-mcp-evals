@@ -778,6 +778,31 @@ jobs:
       #
       # Hard failure, not continue-on-error: if the tools cannot run there is
       # nothing for the suite to measure, and a green run would be a lie.
+      # Cross-check our safety classification against what the server declares.
+      #
+      # toolclass.READ_ONLY is a hand-maintained list, and being wrong about it
+      # is the one classification mistake with real consequences: a tool wrongly
+      # filed there is executed for real, with no dryRun, against this instance.
+      # `debug:mcp` prints the ACL privileges each tool actually requires, so a
+      # READ_ONLY tool needing `:update` is caught by the server disagreeing with
+      # us rather than by someone noticing afterwards.
+      #
+      # Also catches a tool the server grew that nothing has classified yet —
+      # those are silently never executed, which looks like a passing suite.
+      #
+      # Admin registry only: `debug:mcp` takes no endpoint flag and does not list
+      # the Store/UCP tools at all (measured — 30 registered against 17 more that
+      # the store endpoint advertises). eval/preflight.py covers that side.
+      - name: Check the tool registry against toolclass
+        run: |
+          cd shopware
+          bin/console debug:mcp --tools --no-ansi > /tmp/debug-mcp.txt
+          cd ..
+          python -m eval.registry_check --from-file /tmp/debug-mcp.txt || {
+            echo "::error::The server's declared privileges disagree with toolclass.py. See above - a READ_ONLY tool that mutates would be executed for real."
+            exit 1
+          }
+
       - name: Preflight the Store endpoint
         if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
         env:

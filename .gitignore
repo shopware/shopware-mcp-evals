@@ -21,3 +21,25 @@ __pycache__/
 
 # tool-history is tracked deliberately (audit trail of MCP descriptions)
 !tool-history/
+
+# --- shopware-dev (managed by sw-dev) ---
+# MCP / LSP tooling configs (symlinked from ~/shopware-dev)
+.mcp-php-tooling.json
+.mcp-js-tooling.json
+.mcp-gh-tooling.json
+.lsp-php-tooling.json
+.mcp-php-tooling.json.bak.shopware-dev
+.mcp-js-tooling.json.bak.shopware-dev
+.mcp-gh-tooling.json.bak.shopware-dev
+.lsp-php-tooling.json.bak.shopware-dev
+compose.override.yaml.bak.shopware-dev
+# skills.sh CLI (obsolete when using sw-dev link — do not commit)
+skills-lock.json
+.skills-version
+# Agent skills symlinked by sw-dev (source: ai-skills-shopware/skills)
+.cursor/skills/
+.claude/skills/
+.codex/skills/
+.agents/skills/
+.agents/
+# --- /shopware-dev ---
