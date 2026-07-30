@@ -616,7 +616,7 @@
       "name": "swag-dev-tools-list-extensions"
     },
     {
-      "description": "List which Shopware Agent Skills exist in this project: those shipped under .agents/skills/ plus any shipped by installed extensions. Returns the catalogue, one entry per skill, with its name, a one-line description, and its source (core or extension). These skills are the authoritative source of truth for Shopware coding conventions. DO NOT use this to read a skill's instructions: it returns the index only, never the SKILL.md body. Use swag-dev-tools-load-skill for that. Returns an empty list on installs that do not ship the source (e.g. production/composer installs).",
+      "description": "Enumerate which Shopware Agent Skills exist in this project: those shipped under .agents/skills/ plus any shipped by installed extensions. Returns a catalogue with one entry per skill: its name, a one-line description, and its source (core or extension). Use it to see which topics are covered, and to resolve an exact skill name from a topic. These skills are the authoritative source of truth for Shopware coding conventions. Returns an empty list on installs that do not ship the source (e.g. production/composer installs).",
       "inputSchema": {
         "properties": {},
         "type": "object"
@@ -624,7 +624,7 @@
       "name": "swag-dev-tools-list-skills"
     },
     {
-      "description": "Read the body of a Shopware Agent Skill by name, e.g. \"shopware-php-code\" or \"shopware-admin-js\". If you don't already know the skill name, swag-dev-tools-list-skills will tell you. Returns the SKILL.md content \u2014 the authoritative Shopware coding guidance. Load the relevant skill BEFORE generating or editing code so the output follows current conventions. Note: these skills target CORE contribution; core-only rules (BC promises, @internal/@final policy, RELEASE_INFO/UPGRADE, OpenAPI JSON under src/Core) do not apply to extension development.",
+      "description": "Read the body of a Shopware Agent Skill by name, e.g. \"shopware-php-code\" or \"shopware-admin-js\". Call this directly with the name you were given; it resolves the name itself and reports back if no such skill exists. Returns the SKILL.md content, the authoritative Shopware coding guidance. Load the relevant skill BEFORE generating or editing code so the output follows current conventions. Note: these skills target CORE contribution; core-only rules (BC promises, @internal/@final policy, RELEASE_INFO/UPGRADE, OpenAPI JSON under src/Core) do not apply to extension development.",
       "inputSchema": {
         "properties": {
           "name": {
