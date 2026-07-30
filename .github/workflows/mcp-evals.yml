@@ -877,6 +877,7 @@ jobs:
       # the Store/UCP tools at all (measured — 30 registered against 17 more that
       # the store endpoint advertises). eval/preflight.py covers that side.
       - name: Check the tool registry against toolclass
+        if: ${{ !cancelled() }}
         run: |
           cd shopware
           bin/console debug:mcp --tools --no-ansi > /tmp/debug-mcp.txt
@@ -900,8 +901,11 @@ jobs:
             # too late and too broadly to be useful. Pull it here, while we know
             # exactly which call produced it.
             echo "--- shopware log, filtered to the UCP/MCP exception ---"
-            grep -hE 'mcp\.|ucp|Ucp\\|Unhandled error' shopware/var/log/*.log 2>/dev/null | tail -n 20 \
-              || echo "(nothing matched; the plugin logs nothing for this path)"
+            echo "log files present:"; ls -la shopware/var/log/ 2>/dev/null || echo "  (no var/log directory)"
+            hits=$(grep -hE 'mcp\.|ucp|Ucp\\|Unhandled error' shopware/var/log/*.log 2>/dev/null | tail -n 20 || true)
+            # `grep | tail` exits 0 on empty input, so `|| echo` never fired and
+            # the last run printed a header with nothing under it.
+            if [ -n "${hits}" ]; then echo "${hits}"; else echo "  (nothing matched - the plugin logs nothing for this path)"; fi
             echo "::error::Store preflight failed - UCP tools cannot execute, so the suite would measure nothing. See the diagnosis above."
             exit 1
           }

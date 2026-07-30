@@ -567,6 +567,11 @@ def render(
     )
 
 
+# GitHub silently discards a step summary over this size, leaving the step green
+# and the run page blank. 1 MiB, per the Actions docs.
+GITHUB_SUMMARY_LIMIT = 1024 * 1024
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -611,8 +616,26 @@ def main() -> int:
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
-        with open(summary_path, "a") as handle:
-            handle.write(markdown + "\n")
+        # GitHub caps a step summary at 1 MiB and drops the whole thing when it
+        # is exceeded — silently, with the step still reporting success. The
+        # failure detail here scales with the number of failures (prompt plus
+        # discovery trail each), so a bad run produces the largest summary and
+        # is exactly when it would vanish.
+        #
+        # Truncating keeps the tables, which are the part worth reading; the
+        # byte count goes to stdout either way so "no summary" can be told apart
+        # from "summary too big" without another run to find out.
+        encoded = (markdown + "\n").encode()
+        print(f"::notice::job summary is {len(encoded):,} bytes (GitHub drops anything over {GITHUB_SUMMARY_LIMIT:,})")
+        if len(encoded) > GITHUB_SUMMARY_LIMIT:
+            note = (
+                "\n\n---\n\n**Truncated** — the full summary exceeded GitHub's 1 MiB limit. "
+                "See the step log or the uploaded artifact.\n"
+            )
+            encoded = encoded[: GITHUB_SUMMARY_LIMIT - len(note.encode())] + note.encode()
+            print(f"::warning::job summary truncated to {len(encoded):,} bytes")
+        with open(summary_path, "ab") as handle:
+            handle.write(encoded)
     return 0
 
 
