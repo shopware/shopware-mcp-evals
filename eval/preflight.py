@@ -19,6 +19,7 @@ diagnosis. Runs in about a second and costs nothing.
 import argparse
 import json
 import sys
+import time
 
 import mcp_client as mc
 import toolclass
@@ -90,13 +91,24 @@ def diagnose(error: str) -> str:
 def run(endpoint_name: str) -> int:
     tool, args = PROBES[endpoint_name]
     endpoint = mc.endpoint_by_name(endpoint_name)
-    print(f"Preflight: {tool} on the {endpoint_name} endpoint ({endpoint.url})")
+    print(f"Preflight: {tool} on the {endpoint_name} endpoint ({endpoint.url})", flush=True)
+    if endpoint_name == "store":
+        import ucp
+
+        print(f"  UCP-Agent: {ucp.agent_header(mc.SW_BASE_URL)}", flush=True)
 
     session_id, _ = mc.mcp_init(endpoint)
     mc.enable_all_toolsets(session_id, endpoint)
 
     prepared, _ = toolclass.prepare_call(tool, args)
+    # Timed, because duration separates two failures that look identical from the
+    # client: a request the server rejected outright, and one where the server
+    # blocked trying to fetch something. UCP fetches the profile URI mid-request,
+    # so if the shop's own URL is served by a worker pool with nothing spare, it
+    # waits on itself. Sub-second means rejected; multi-second means blocked.
+    started = time.monotonic()
     response = mc.mcp_call(session_id, tool, prepared, endpoint)
+    elapsed = time.monotonic() - started
     text = mc.mcp_result_text(response)
 
     # An in-band `{"success": false}` arrives as HTTP 200 with no transport
@@ -106,10 +118,10 @@ def run(endpoint_name: str) -> int:
     error = mc.mcp_call_error(response) or inband_error(text) or ""
 
     if not error:
-        print(f"OK — {tool} executed and returned a result ({len(text)} bytes).")
+        print(f"OK — {tool} executed and returned a result ({len(text)} bytes) in {elapsed:.2f}s.")
         return 0
 
-    print(f"FAILED — {tool} did not execute.\n  error: {error}\n  cause: {diagnose(error)}")
+    print(f"FAILED — {tool} did not execute after {elapsed:.2f}s.\n  error: {error}\n  cause: {diagnose(error)}")
 
     # "Error while executing tool" is the MCP layer's generic wrapper, which it
     # uses whenever an exception escapes the tool rather than being returned
