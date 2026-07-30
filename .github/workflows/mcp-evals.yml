@@ -749,30 +749,75 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
             | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
-          SC_JSON=$(curl -fsS "${APP_URL}/api/sales-channel?limit=50" \
+          # Pick the sales channel that OWNS ${APP_URL}, not merely the first one
+          # with an access key.
+          #
+          # UCP resolves its runtime configuration from the domain the request
+          # arrives at, not from the sw-access-key. Measured: the same key and the
+          # same configured channel answers OK through a registered domain and
+          # "Missing signature headers" through an unregistered one, because the
+          # unregistered host silently falls back to the defaults — where
+          # signaturePolicy is 'strict'.
+          #
+          # So the channel we configure below has to be the channel that owns the
+          # URL we call, or the config is written somewhere it will never be read.
+          DOM_JSON=$(curl -fsS "${APP_URL}/api/sales-channel-domain?limit=100" \
             -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json')
-          # Same channel for both, so the key we authenticate with is the one
-          # whose signature policy we relax below.
-          SC_KEY=$(printf '%s' "$SC_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((sc.get('attributes',sc).get('accessKey') for sc in d.get('data',[]) if sc.get('attributes',sc).get('accessKey')),''))")
-          SC_ID=$(printf '%s' "$SC_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((sc.get('id','') for sc in d.get('data',[]) if sc.get('attributes',sc).get('accessKey')),''))")
+          SC_ID=$(printf '%s' "$DOM_JSON" | APP_URL="${APP_URL}" python3 -c "import os,sys,json; d=json.load(sys.stdin); u=os.environ['APP_URL'].rstrip('/'); print(next((x.get('attributes',x).get('salesChannelId','') for x in d.get('data',[]) if (x.get('attributes',x).get('url') or '').rstrip('/')==u),''))")
+          if [ -z "${SC_ID}" ]; then
+            echo "::error::No sales channel is registered for ${APP_URL}, so UCP would read default config (signaturePolicy=strict) and reject every call. Registered domains:"
+            printf '%s' "$DOM_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(' -', x.get('attributes',x).get('url')) for x in d.get('data',[])]"
+            exit 1
+          fi
+          SC_KEY=$(curl -fsS "${APP_URL}/api/sales-channel/${SC_ID}" \
+            -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+            | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('attributes',d).get('accessKey',''))")
           echo "::add-mask::${SC_KEY}"
+          echo "Sales channel ${SC_ID} owns ${APP_URL}"
           echo "sc_access_key=${SC_KEY}" >> "$GITHUB_OUTPUT"
 
-          # Turn UCP request signing off on this throwaway instance.
+          # Configure UCP so the tools can actually be called.
           #
-          # signaturePolicy defaults to 'strict' (UcpConfig.php), so every UCP
-          # runtime call demands RFC 9421 HTTP message signatures. Without this,
-          # all of them fail with "Missing signature headers" before doing any
-          # work — which is precisely what happened, and it looked like a tool
-          # problem rather than a config default.
+          # FOUR separate gates sit in front of every UCP runtime tool, all of
+          # them defaults, none of them mentioned in any tool description. Each
+          # one was found the hard way, and each one fails the whole suite:
           #
-          # Same reasoning as disabling the MCP rate limiter above: these
-          # fixtures measure tool selection, not transport security, and the
-          # instance dies with the job. The cost is stated plainly — CI does not
-          # exercise UCP request signing, so a regression there has to be caught
-          # by the plugin's own tests, not here.
+          #   signaturePolicy   defaults to 'strict' -> every call must carry
+          #                     RFC 9421 HTTP message signatures, which this
+          #                     suite does not send.
+          #   agentAllowlist    may this profile host act as an agent here.
+          #   platformAllowlist may the profile be hosted there.
+          #   dev mode + http   set as SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_
+          #                     DEVELOPMENT_MODE in .env.local during plugin
+          #                     install, since plain http is refused otherwise.
+          #
+          # The two allowlists are set EXPLICITLY rather than left to their
+          # fallbacks. Empty, agentAllowlist falls back to the sales-channel
+          # domains and platformAllowlist to the host of the incoming request,
+          # so it happens to work only while all three hosts agree. That is not
+          # a property to depend on, and when it broke it presented as a generic
+          # "Error while executing tool" with nothing in the log.
+          #
+          # Same trade as disabling the MCP rate limiter above: these fixtures
+          # measure tool selection, not transport security, and the instance dies
+          # with the job. Stated plainly so it is not mistaken for coverage — CI
+          # does not exercise UCP signing or host allowlisting, so a regression
+          # in either has to be caught by the plugin's own tests.
+          UCP_HOST=$(printf '%s' "${APP_URL}" | python3 -c 'import sys,urllib.parse; print(urllib.parse.urlparse(sys.stdin.read().strip()).hostname or "")')
+          echo "UCP host for profile, agent and platform allowlists: ${UCP_HOST}"
+
           cd shopware
-          bin/console ucp:config:set --sales-channel="${SC_ID}" --signature-policy=off --no-interaction
+          bin/console ucp:config:set --sales-channel="${SC_ID}" --no-interaction \
+            --signature-policy=off \
+            --agent-allowlist="${UCP_HOST}" \
+            --platform-allowlist="${UCP_HOST}"
+
+          # The dev-mode flag is the one gate that is not sales-channel config,
+          # so assert it rather than trusting the earlier step wrote it.
+          grep -q 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' .env.local || {
+            echo "::error::UCP profile-fetching dev mode is not set in .env.local, so plain-http profile URIs will be refused."
+            exit 1
+          }
 
       # The Store catalogue has never been snapshotted, so everything that
       # derives from one had to be guessed for it: toolclass could not read
