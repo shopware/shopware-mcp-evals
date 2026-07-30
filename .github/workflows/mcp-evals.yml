@@ -56,6 +56,10 @@ on:
         description: 'Run the Store API / UCP suite. On by default; set false to skip it (saves the agentic-commerce checkout and ~42 LLM fixtures).'
         required: false
         default: 'true'
+      triage:
+        description: 'Re-run the failures under the isolated and full arms to locate each one (own description / cross-group collision / discovery layer). Nightly does this anyway; use this to diagnose on demand.'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -85,16 +89,16 @@ jobs:
       EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
       EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
       APP_URL: http://localhost:8000
-      # TEMPORARY. `passed` changed meaning: the chosen tool is now executed and
-      # its result asserted, and a wrong first pick may be recovered from. The
-      # 0.90/0.85 thresholds were calibrated against first-tool-correct, so they
-      # no longer describe the same quantity — assertions push the rate down,
-      # recovery pushes it up, and the net is unknown until it has been measured.
+      # The 0.90/0.85 thresholds predate execution and recovery, so they were
+      # held advisory for one run to see whether they still described a
+      # meaningful bar under the stronger definition of `passed`. Measured:
+      # primary 97% (93/96), second validator 95% (91/96) — both clear their
+      # existing gate with room, so the numbers stay and the window is closed.
       #
-      # While this is true both admin gates warn instead of failing. Read
-      # `first_try_rate` and `recovery_rate` from a nightly, set the thresholds
-      # from those numbers, then delete this and the two branches that read it.
-      REBASELINE: 'true'
+      # Deliberately NOT raised to match. That is one sample, and this repo has
+      # already been bitten by a threshold set from one: the second validator
+      # scored 89% on one commit and 90% on the next with nothing changed in
+      # between. Raise them from a run of nightlies, not from this.
       # The eval is the bulk of the wall clock: ~425s of summed fixture latency per
       # model, which at the old 4-way concurrency was ~106s of a 155s step. It sat
       # at 4 because the MCP endpoint answered 429 above that, and the step below
@@ -113,6 +117,10 @@ jobs:
       # the whole Store suite only ever ran on a manual dispatch that nobody
       # triggered, so its 42 fixtures had never once executed against a server.
       RUN_STORE: ${{ github.event.inputs.run_store != 'false' }}
+      # Nightly always triages; a manual dispatch can ask for it. Not on PRs by
+      # default — it re-runs failures under two more arms, which costs real
+      # money on a branch that may be iterating.
+      TRIAGE: ${{ github.event_name == 'schedule' || github.event.inputs.triage == 'true' }}
 
     steps:
       - name: Checkout evals repo
@@ -422,7 +430,7 @@ jobs:
       # main's cache but writes to its own, so a PR is measured against main's
       # last nightly and cannot poison the baseline for anyone else.
       - name: Restore previous cost baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: baseline
           key: eval-cost-baseline-${{ github.run_id }}
@@ -633,17 +641,17 @@ jobs:
           # Fixed output paths so the cross-model comparison step can find them.
           # --summary-row feeds the consolidated job summary rendered at the end of
           # the job; the numeric prefix fixes each row's position in its table.
-          # Nightly only: after the discovery pass, re-run ONLY its failures
-          # with the fixture's own toolset enabled, then with the whole
-          # catalogue enabled. That separates three problems which look
-          # identical in the gating arm — a bad description, a collision with
-          # another group, or a discovery layer that never surfaced the tool.
+          # After the discovery pass, re-run ONLY its failures with the
+          # fixture's own toolset enabled, then with the whole catalogue
+          # enabled. That separates three problems which look identical in the
+          # gating arm — a bad description, a collision with another group, or a
+          # discovery layer that never surfaced the tool.
           #
           # In the same invocation on purpose. A separate step would re-run the
           # whole discovery pass first just to learn what failed, doubling the
           # primary cost; here the failures are already in memory, so triage is
           # ~18 extra fixture runs (~$0.10) rather than ~96.
-          [ "${GITHUB_EVENT_NAME:-}" = "schedule" ] && args+=(--triage)
+          if [ "${TRIAGE}" = "true" ]; then args+=(--triage); fi
 
           python -m eval.runner "${args[@]}" \
             --output "results/eval-primary.json" \
@@ -667,7 +675,7 @@ jobs:
           # `wait` is a simple command — so the shell exited *at the wait* the
           # first time a runner returned non-zero. Everything below never ran:
           # no `cat primary.log`, so the reason was invisible, and none of the
-          # advisory handling underneath, so REBASELINE and DRIFTED could not
+          # advisory handling underneath, so the DRIFTED downgrade could not
           # take effect. The step just failed with a bare exit code.
           rc_primary=0; wait "${pid_primary}" || rc_primary=$?
           rc_second=0; wait "${pid_second}" || rc_second=$?
@@ -692,9 +700,7 @@ jobs:
             exit 1
           fi
           if [ "${rc_primary}" -ne 0 ]; then
-            if [ "${REBASELINE}" = "true" ]; then
-              echo "::warning::admin · primary failed (exit ${rc_primary}), advisory during the recovery/assertion re-baselining window."
-            elif [ "${DRIFTED}" = "true" ]; then
+            if [ "${DRIFTED}" = "true" ]; then
               echo "::warning::admin · primary failed (exit ${rc_primary}), treated as advisory because the tool catalogue has drifted from the committed baseline."
             else
               echo "::error::admin · primary failed (exit ${rc_primary})."
@@ -702,12 +708,8 @@ jobs:
             fi
           fi
           if [ "${rc_second}" -ne 0 ]; then
-            if [ "${REBASELINE}" = "true" ]; then
-              echo "::warning::admin · second validator failed (exit ${rc_second}), advisory during the recovery/assertion re-baselining window."
-            else
-              echo "::error::admin · second validator failed (exit ${rc_second})."
-              failed=1
-            fi
+            echo "::error::admin · second validator failed (exit ${rc_second})."
+            failed=1
           fi
           exit "${failed}"
 
@@ -773,6 +775,13 @@ jobs:
           # --advisory: this step is continue-on-error, so its row must not be
           # read as a gating verdict. Without the suite label it rendered as a
           # third, unexplained openai/gpt-4o result.
+          # Triage matters more here than on admin: every UCP tool is unsafe to
+          # execute (no dryRun, no committed Store snapshot), so this suite is
+          # graded on selection alone and its failures cluster — order-get and
+          # checkout-get trade prompts. The arms are what say whether that is a
+          # description collision or the discovery layer.
+          if [ "${TRIAGE}" = "true" ]; then args+=(--triage); fi
+
           # --output is fixed rather than left to the default timestamped name
           # so the summary step can name this report explicitly for the per-tool
           # scorecard, the way it already does for the two admin runs.
@@ -834,7 +843,7 @@ jobs:
 
       - name: Persist cost baseline
         if: ${{ github.event_name == 'schedule' && !cancelled() && steps.eval.conclusion != 'skipped' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: baseline
           key: eval-cost-baseline-${{ github.run_id }}

@@ -114,7 +114,9 @@ python -m functional.runner --skip-dev-tools
 .venv/bin/python3 -m eval.runner --no-system-prompt       # ad-hoc, skip system prompt
 .venv/bin/python3 -m eval.runner --output results/x.json  # custom report path
 .venv/bin/python3 -m eval.runner --triage                 # re-run ONLY the failures under
-                                                          # the isolated + full arms
+                                                          # the isolated + full arms.
+                                                          # In CI: nightly, or the `triage`
+                                                          # workflow_dispatch input.
 
 # Cost of a run vs the previous one, per fixture. Warns, never gates.
 .venv/bin/python3 -m eval.cost_drift --current results/eval-primary.json \
@@ -132,12 +134,16 @@ python -m functional.runner --endpoint store
 .venv/bin/python3 -m pytest tests -q --cov   # enforces the 90% branch-coverage floor
 ```
 
-> **The gates are advisory right now.** `passed` changed meaning — the chosen
-> tool is executed and its result asserted, and a wrong first pick may be
-> recovered from — so the 0.90/0.85 thresholds no longer describe the same
-> quantity. `REBASELINE: 'true'` in the workflow makes both admin gates warn
-> instead of fail. Read `first_try_rate` and `recovery_rate` off a nightly, set
-> the thresholds from those, then delete the flag and the two branches reading it.
+> **Measured under the new definition of `passed`** (tool executed, result
+> asserted, recovery allowed): primary **97%** (93/96), second validator **95%**
+> (91/96), store **64%** (29/45). The admin thresholds were left at 0.90/0.85 —
+> both clear them with room, and raising them off a single run is what produced
+> the 89%/90% flapping this repo already documents.
+>
+> The store suite's 64% is a real finding, not a threshold problem: every UCP
+> tool is unsafe to execute, so that suite is graded on selection alone, and its
+> failures cluster on `order-get`/`checkout-get`. It is advisory, so it shows up
+> as a red annotation on an otherwise green job.
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
 itself, and `compare_runs.py --gate both --min-pass-rate 0.9
