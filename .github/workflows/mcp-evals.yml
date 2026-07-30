@@ -764,6 +764,31 @@ jobs:
               print(f"- `{ts['name']}` — {', '.join(ts['tools'])}")
           EOF
 
+      # Prove one tool actually executes before spending an LLM pass on 45
+      # fixtures.
+      #
+      # This is the guard for the failure that hid for the whole life of the
+      # Store suite: every UCP runtime tool rejected every call, and the suite
+      # still reported a pass rate, because selection-only grading cannot tell
+      # "picked the right tool" from "picked the right tool and the server
+      # refused it". Execution turned that silence into 45 red fixtures — better,
+      # but still a full LLM pass spent to learn what one call answers in a
+      # second, and still shaped like a tool-quality result when it is an
+      # environment problem.
+      #
+      # Hard failure, not continue-on-error: if the tools cannot run there is
+      # nothing for the suite to measure, and a green run would be a lie.
+      - name: Preflight the Store endpoint
+        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
+        run: |
+          python -m eval.preflight --endpoint store || {
+            echo "::error::Store preflight failed - UCP tools cannot execute, so the suite would measure nothing. See the diagnosis above."
+            exit 1
+          }
+
       - name: Detect snapshot changes worth committing
         id: snapshot
         run: |

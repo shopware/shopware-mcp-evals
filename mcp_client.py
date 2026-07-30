@@ -348,8 +348,20 @@ def enable_all_toolsets(session_id: str, endpoint: Endpoint = ADMIN) -> list[str
 
 
 def mcp_fetch_system_prompt(session_id: str, server_instructions: str, endpoint: Endpoint = ADMIN) -> str:
-    """Fetch all MCP context prompts and combine with server instructions."""
-    result = _rpc_json("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint).get("result", {})
+    """Fetch all MCP context prompts and combine with server instructions.
+
+    Prompts are optional in MCP, and an endpoint that does not serve them is not
+    a broken endpoint. A 404 here used to abort the whole suite before a single
+    fixture ran — the run reported a crash, not a result, over a feature the
+    Store endpoint answers with an empty list anyway. Degrade to the server
+    instructions instead, and say so, so a genuinely missing prompt set is
+    visible without being fatal.
+    """
+    try:
+        result = _rpc_json("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint).get("result", {})
+    except requests.HTTPError as exc:
+        print(f"WARNING: {endpoint.name} endpoint does not serve prompts/list ({exc}); using server instructions only")
+        return server_instructions.strip()
     prompt_names = [p["name"] for p in result.get("prompts", [])]
 
     parts = []
