@@ -749,11 +749,30 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
             | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
-          SC_KEY=$(curl -fsS "${APP_URL}/api/sales-channel?limit=50" \
-            -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((sc.get('attributes',sc).get('accessKey') for sc in d.get('data',[]) if sc.get('attributes',sc).get('accessKey')),''))")
+          SC_JSON=$(curl -fsS "${APP_URL}/api/sales-channel?limit=50" \
+            -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json')
+          # Same channel for both, so the key we authenticate with is the one
+          # whose signature policy we relax below.
+          SC_KEY=$(printf '%s' "$SC_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((sc.get('attributes',sc).get('accessKey') for sc in d.get('data',[]) if sc.get('attributes',sc).get('accessKey')),''))")
+          SC_ID=$(printf '%s' "$SC_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((sc.get('id','') for sc in d.get('data',[]) if sc.get('attributes',sc).get('accessKey')),''))")
           echo "::add-mask::${SC_KEY}"
           echo "sc_access_key=${SC_KEY}" >> "$GITHUB_OUTPUT"
+
+          # Turn UCP request signing off on this throwaway instance.
+          #
+          # signaturePolicy defaults to 'strict' (UcpConfig.php), so every UCP
+          # runtime call demands RFC 9421 HTTP message signatures. Without this,
+          # all of them fail with "Missing signature headers" before doing any
+          # work — which is precisely what happened, and it looked like a tool
+          # problem rather than a config default.
+          #
+          # Same reasoning as disabling the MCP rate limiter above: these
+          # fixtures measure tool selection, not transport security, and the
+          # instance dies with the job. The cost is stated plainly — CI does not
+          # exercise UCP request signing, so a regression there has to be caught
+          # by the plugin's own tests, not here.
+          cd shopware
+          bin/console ucp:config:set --sales-channel="${SC_ID}" --signature-policy=off --no-interaction
 
       # The Store catalogue has never been snapshotted, so everything that
       # derives from one had to be guessed for it: toolclass could not read

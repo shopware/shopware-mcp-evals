@@ -61,3 +61,13 @@ def test_an_unknown_error_admits_it_rather_than_guessing():
 def test_an_empty_error_does_not_crash_the_table():
     assert preflight.diagnose("")
     assert preflight.diagnose(None)
+
+
+def test_strict_signing_names_the_default_that_causes_it():
+    """signaturePolicy defaults to 'strict', so this fires on any instance nobody
+    configured — which is every CI run. The advice has to say it is a default,
+    or it reads as a broken tool."""
+    advice = preflight.diagnose("signature: Missing signature headers.")
+
+    assert "--signature-policy=off" in advice
+    assert "default" in advice.lower()

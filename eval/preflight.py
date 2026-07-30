@@ -58,6 +58,12 @@ DIAGNOSES = (
         "bin/console ucp:config:set --sales-channel=<id> --agent-allowlist=<host>",
     ),
     (
+        "missing signature headers",
+        "signaturePolicy is 'strict' — its default — so every UCP call must carry RFC 9421 "
+        "HTTP message signatures, which this suite does not send. On a throwaway instance: "
+        "bin/console ucp:config:set --sales-channel=<id> --signature-policy=off",
+    ),
+    (
         "idempotency key is required",
         "A mutating call went out without an Idempotency-Key. See ucp.call_headers.",
     ),
