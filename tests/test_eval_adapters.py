@@ -746,3 +746,29 @@ def test_categories_the_arms_cannot_speak_to_are_skipped(stub_arms, capsys, cate
     capsys.readouterr()
 
     assert out == {}
+
+
+def test_an_arm_that_cannot_advertise_the_tool_reports_setup_failure(stub_arms):
+    """An arm that never put the tool in front of the model answers nothing
+    about its description — grading it would be inventing a finding."""
+    result = E.run_fixture_discovery(
+        "openai",
+        FakeClient(),
+        fixture(tool="shopware-entity-delete", expected_toolset="nonexistent"),
+        "m",
+        None,
+        6,
+        arm="isolated",
+    )
+
+    assert result["skipped"] is True
+    assert "arm setup failed" in result["skip_reason"]
+    assert "nonexistent" in result["skip_reason"]
+
+
+def test_the_discovery_arm_never_reports_setup_failure(stub_mcp):
+    """Discovery starts from the default surface by design — the tool being
+    absent is the thing it measures, not a broken experiment."""
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 6)
+
+    assert not result.get("skipped")

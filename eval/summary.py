@@ -205,10 +205,19 @@ def render_arm_matrix(reports: list[dict]) -> str:
         "|---|---|:---:|:---:|---|",
     ]
     buckets = {}
+    unusable = []
     for fid in triaged:
         iso = arms.get("isolated", {}).get(fid)
         full = arms.get("full", {}).get(fid)
         if iso is None or full is None:
+            continue
+        # An arm that could not put the tool in front of the model answers
+        # nothing, and must not be read as a verdict on the description. This
+        # is the whole reason the check exists: the first Store triage produced
+        # an empty surface for every fixture, and diagnosing that as "the tool's
+        # own description" was confidently wrong sixteen times over.
+        if iso.get("skipped") or full.get("skipped"):
+            unusable.append((fid, (iso if iso.get("skipped") else full).get("skip_reason", "")))
             continue
         key = (bool(iso.get("passed")), bool(full.get("passed")))
         label, _ = DIAGNOSIS[key]
@@ -222,8 +231,21 @@ def render_arm_matrix(reports: list[dict]) -> str:
     for label, explanation in DIAGNOSIS.values():
         if label in buckets:
             lines.append(f"- **{label}** ({len(buckets[label])}) — {explanation}")
+    if unusable:
+        lines += [
+            "",
+            f"**{len(unusable)} could not be diagnosed.** The arm never advertised the tool, so it",
+            "answers nothing about the description — the setup failed, not the fixture:",
+            "",
+        ]
+        for fid, reason in unusable:
+            lines.append(f"- `{fid}` — {reason}")
+
+    diagnosed = len(triaged) - len(unusable)
     lines.append("")
-    lines.append(f"<sub>Triaged {len(triaged)} discovery failures. Passing fixtures are not re-run.</sub>")
+    lines.append(
+        f"<sub>Triaged {len(triaged)} discovery failures, {diagnosed} diagnosed. Passing fixtures are not re-run.</sub>"
+    )
     lines.append("")
     return "\n".join(lines)
 

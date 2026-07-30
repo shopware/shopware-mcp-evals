@@ -322,6 +322,25 @@ def run_fixture_discovery(
     catalog = {t["name"]: t for t in mcp_tools_list_all(session_id, endpoint=endpoint)}
     if arm != "discovery":
         catalog = {n: t for n, t in catalog.items() if n not in META_TOOLS}
+        # The diagnostic arms only mean anything if the tool under test was
+        # actually put in front of the model. When enabling does not surface it
+        # — a toolset named differently on this endpoint, an enable that no-ops
+        # — the model has nothing to pick and fails for a reason that has
+        # nothing to do with the description.
+        #
+        # This is reported as an unusable experiment, never graded. The first
+        # run of these arms against the Store endpoint produced an empty surface
+        # for all 16 fixtures, and without this the matrix read every one of
+        # them as "the tool's own description" — a confident answer to a
+        # question that was never asked.
+        if expected_tool and expected_tool not in catalog:
+            record = skipped_result(fixture, arm)
+            record["skip_reason"] = (
+                f"arm setup failed: {expected_tool} was not advertised after enabling "
+                f"{'all toolsets' if arm == 'full' else fixture.get('expected_toolset')!r} "
+                f"({len(catalog)} tools offered) — this arm cannot answer anything about it"
+            )
+            return record
     tools = tools_fn(list(catalog.values()))
     # What the advertised surface costs to put in front of the model. The
     # opening figure is the price of v2's promise — a fresh session shows three

@@ -633,3 +633,52 @@ def test_render_includes_the_arm_matrix_when_reports_carry_one():
         [arm_report(isolated=[outcome("a", True)], full=[outcome("a", True)])],
     )
     assert "### Where the failures are" in text
+
+
+def test_an_arm_that_never_advertised_the_tool_is_not_diagnosed():
+    """The regression this guard exists for.
+
+    The first Store triage produced an empty surface for all 16 fixtures — the
+    toolset name did not match, so nothing was enabled. Without this, the matrix
+    read every one as "the tool's own description": a confident answer to a
+    question that was never asked.
+    """
+    reports = [
+        arm_report(
+            isolated=[
+                {
+                    "id": "broken",
+                    "passed": False,
+                    "expected_tool": "alpha",
+                    "skipped": True,
+                    "skip_reason": "arm setup failed: alpha was not advertised",
+                },
+                outcome("real", False),
+            ],
+            full=[outcome("broken", False), outcome("real", False)],
+        )
+    ]
+
+    out = S.render_arm_matrix(reports)
+
+    assert "could not be diagnosed" in out
+    assert "arm setup failed" in out
+    assert "| `broken` |" not in out, "it must not appear in the diagnosis table"
+    assert "| `real` |" in out
+    assert "2 discovery failures, 1 diagnosed" in out
+
+
+def test_a_fully_unusable_triage_diagnoses_nothing():
+    reports = [
+        arm_report(
+            isolated=[
+                {"id": "a", "passed": False, "expected_tool": "alpha", "skipped": True, "skip_reason": "no surface"}
+            ],
+            full=[{"id": "a", "passed": False, "expected_tool": "alpha", "skipped": True, "skip_reason": "no surface"}],
+        )
+    ]
+
+    out = S.render_arm_matrix(reports)
+
+    assert "1 discovery failures, 0 diagnosed" in out
+    assert "the tool's own description" not in out
