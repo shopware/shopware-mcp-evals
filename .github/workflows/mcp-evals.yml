@@ -99,6 +99,7 @@ jobs:
       # already been bitten by a threshold set from one: the second validator
       # scored 89% on one commit and 90% on the next with nothing changed in
       # between. Raise them from a run of nightlies, not from this.
+      #
       # The eval is the bulk of the wall clock: ~425s of summed fixture latency per
       # model, which at the old 4-way concurrency was ~106s of a 155s step. It sat
       # at 4 because the MCP endpoint answered 429 above that, and the step below
@@ -759,6 +760,34 @@ jobs:
             | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((sc.get('attributes',sc).get('accessKey') for sc in d.get('data',[]) if sc.get('attributes',sc).get('accessKey')),''))")
           echo "::add-mask::${SC_KEY}"
           echo "sc_access_key=${SC_KEY}" >> "$GITHUB_OUTPUT"
+
+      # The Store catalogue has never been snapshotted, so everything that
+      # derives from one had to be guessed for it: toolclass could not read
+      # schemas to find dryRun, tests/test_fixtures.py could not validate
+      # expected_toolset, and drift detection did not cover it. The Store
+      # fixtures ended up declaring toolsets that do not exist ('shopware',
+      # 'store-api'; the real ones are shopware-ucp-cart / -catalog / -checkout)
+      # and nothing could catch it.
+      #
+      # Uploaded as an artifact rather than committed here: the nightly
+      # reconciliation PR is where a snapshot enters the repo.
+      - name: Snapshot Store tool catalogue
+        if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'
+        continue-on-error: true
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
+        run: |
+          python -m eval.snapshot_tools --endpoint store \
+            --output tool-history/store.json
+          echo "### Store catalogue" >> "$GITHUB_STEP_SUMMARY"
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          snap = json.load(open("tool-history/store.json"))
+          print(f"{len(snap['tools'])} tools in {len(snap['toolsets'])} toolsets\n")
+          for ts in snap["toolsets"]:
+              print(f"- `{ts['name']}` — {', '.join(ts['tools'])}")
+          EOF
 
       - name: Run Store API functional tests
         if: env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true'

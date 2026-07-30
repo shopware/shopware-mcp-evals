@@ -56,7 +56,22 @@ def test_missing_credentials_exit_one_without_touching_the_network(monkeypatch, 
     monkeypatch.setattr("sys.argv", ["snapshot_tools", "--output", str(tmp_path / "x.json")])
 
     assert S.main() == 1
-    assert "SW_BASE_URL, SW_ACCESS_KEY, SW_SECRET_ACCESS_KEY required" in capsys.readouterr().err
+    # Only what is actually missing is named — reporting the whole list makes
+    # the reader check three variables to find the one that is empty.
+    err = capsys.readouterr().err
+    assert "SW_ACCESS_KEY required" in err
+    assert "SW_BASE_URL" not in err
+
+
+def test_the_store_endpoint_asks_for_the_sales_channel_key(monkeypatch, tmp_path, capsys):
+    """The admin pair is meaningless on the Store endpoint, and demanding it
+    would block a correctly configured Store snapshot."""
+    monkeypatch.setattr(S, "SW_SC_ACCESS_KEY", "")
+    monkeypatch.setattr(S, "mcp_init", lambda **_k: pytest.fail("must not open a session"))
+    monkeypatch.setattr("sys.argv", ["snapshot_tools", "--endpoint", "store", "--output", str(tmp_path / "x.json")])
+
+    assert S.main() == 1
+    assert "SW_SC_ACCESS_KEY required" in capsys.readouterr().err
 
 
 def test_snapshot_records_the_default_surface_and_the_full_catalogue(monkeypatch, tmp_path, capsys):

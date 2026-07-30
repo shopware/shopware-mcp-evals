@@ -387,7 +387,14 @@ def run_fixture_discovery(
             tokens[bucket] = tokens.get(bucket, 0) + count
 
         if not turn["tool_calls"]:
-            fail_reason = "no_tool_call"
+            # Only when nothing was ever attempted. A model that called the
+            # right tool, watched it fail and then answered in prose has a
+            # far more useful reason already recorded, and overwriting it with
+            # "no_tool_call" is what hid a broken assertion tier for three
+            # runs: every Store failure read as "the model called nothing"
+            # when it had in fact called exactly the right tool.
+            if not attempted_tools:
+                fail_reason = "no_tool_call"
             break
 
         messages.append(turn["assistant_message"])
@@ -433,7 +440,10 @@ def run_fixture_discovery(
                 execution = "executed"
 
                 ok, reason = check(fixture.get("expect_result"), result_text, err)
-                attempt |= {"executed": True, "ok": ok, "reason": reason}
+                # The server's own words, truncated. Without this the report
+                # could say a call failed but never what the server said, so
+                # diagnosing it meant re-running with a debugger attached.
+                attempt |= {"executed": True, "ok": ok, "reason": reason, "error": (err or "")[:200]}
                 attempted_tools.append(attempt)
 
                 if correct and ok:

@@ -772,3 +772,26 @@ def test_the_discovery_arm_never_reports_setup_failure(stub_mcp):
     result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 6)
 
     assert not result.get("skipped")
+
+
+def test_a_failed_call_keeps_its_reason_when_the_model_then_gives_up(stub_exec, monkeypatch):
+    """The bug that hid a broken assertion tier for three runs.
+
+    The model called the right tool, the call failed, and it answered in prose
+    on the next turn — so `no_tool_call` overwrote the real reason and every
+    report said the model had chosen nothing.
+    """
+    monkeypatch.setattr(E, "mcp_call", lambda *a, **k: {"_reply": "", "_err": "Missing required parameter: id"})
+
+    result = E.run_fixture_discovery("openai", ScriptedClient([(TOOL, {})]), fixture(), "m", None, 6)
+
+    assert result["selected_tool"] == TOOL, "it did choose a tool"
+    assert result["fail_reason"] == "invalid_arguments", "and the informative reason survives"
+    assert result["attempted_tools"][0]["error"].startswith("Missing required parameter")
+
+
+def test_no_tool_call_still_reported_when_nothing_was_ever_attempted(stub_mcp):
+    result = E.run_fixture_discovery("openai", FakeClient(None), fixture(), "m", None, 6)
+
+    assert result["fail_reason"] == "no_tool_call"
+    assert result["attempted_tools"] == []

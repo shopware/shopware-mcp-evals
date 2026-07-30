@@ -161,3 +161,58 @@ def test_every_declared_tier_is_understood():
     for tier in A.TIERS:
         passed, _ = A.check(tier, payload(data=[{"id": 1}]), None)
         assert passed is True
+
+
+# ---------------------------------------------------------------------------
+# not-found vs malformed — the distinction the `accepted` tier exists for
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Checkout with id co_xyz789 not found",
+        "No such cart",
+        "Entity does not exist",
+        "Could not be found",
+        "404 Not Found",
+    ],
+)
+def test_an_id_that_does_not_resolve_is_accepted(error):
+    """The whole point of the tier. A fixture cannot know a real UUID, so
+    "not found" proves the call was well-formed — which is what is under test."""
+    assert A.is_not_found(error) is True
+    assert A.check("accepted", None, error) == (True, None)
+
+
+def test_the_data_tier_still_fails_on_not_found():
+    """`data` claims the call returned something; not-found is not something."""
+    assert A.check("data", None, "Checkout not found") == (False, "not_found")
+
+
+def test_a_malformed_request_fails_even_at_the_accepted_tier():
+    """Not-found is the fixture's invented value; a missing parameter is the
+    model's own doing and must still fail."""
+    assert A.check("accepted", None, "Missing required parameter: checkoutId") == (False, "invalid_arguments")
+
+
+def test_not_found_wins_over_the_word_invalid():
+    """ "invalid" turns up inside plenty of not-found messages. Of the two ways
+    to be wrong, wrongly failing a fixture is worse — it sends someone off to
+    rewrite a description that was fine."""
+    assert A.check("accepted", None, "Invalid or unknown checkout id co_xyz789 — not found") == (True, None)
+
+
+def test_the_store_regression_this_fixes():
+    """15 of 15 executed Store fixtures failed this way while all 25 unexecuted
+    ones passed, and it read as a description problem for three runs.
+
+    The model named the right tool, called it with the id the prompt gave it,
+    and the server said that checkout does not exist.
+    """
+    passed, reason = A.check("accepted", None, "Checkout session co_xyz789 not found")
+
+    assert passed is True and reason is None
+
+
+def test_an_environment_failure_is_still_neither():
+    assert A.check("accepted", None, "500 Internal Server Error") == (False, "tool_error")
+    assert A.is_not_found("500 Internal Server Error") is False

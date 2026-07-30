@@ -47,6 +47,18 @@ VALIDATION_MARKERS = (
     "constraint",
 )
 
+# The addressed thing does not exist. Distinct from a malformed request: the
+# call was shaped correctly, the id in it just does not resolve.
+NOT_FOUND_MARKERS = (
+    "not found",
+    "no such",
+    "does not exist",
+    "could not be found",
+    "unknown id",
+    "no entity",
+    "404",
+)
+
 TIERS = ("data", "accepted", "none")
 
 
@@ -61,6 +73,14 @@ def is_validation_error(error: str | None) -> bool:
         return False
     lowered = str(error).lower()
     return any(marker in lowered for marker in VALIDATION_MARKERS)
+
+
+def is_not_found(error: str | None) -> bool:
+    """Whether an error means "that id does not resolve"."""
+    if not error:
+        return False
+    lowered = str(error).lower()
+    return any(marker in lowered for marker in NOT_FOUND_MARKERS)
 
 
 def _payload(result_text: str | None):
@@ -95,9 +115,26 @@ def check(expect, result_text: str | None, error: str | None) -> tuple[bool, str
         return True, None
 
     if error:
-        # A rejected call is the model's fault; anything else is the
-        # environment's and is reported so it can be excluded upstream.
-        return False, "invalid_arguments" if is_validation_error(error) else "tool_error"
+        # Not-found is checked FIRST, before the validation markers, and that
+        # ordering is deliberate.
+        #
+        # `accepted` exists precisely so a fixture that has to invent an id
+        # ("checkout session co_xyz789") can still prove the call was
+        # well-formed. The original code failed on *any* error, which made the
+        # tier do the opposite of its stated purpose and failed every executed
+        # Store fixture — 15 of 15 — while the ones never executed all passed.
+        # Three runs were spent looking for a description problem that was
+        # this.
+        #
+        # Order matters because "invalid" is a broad word that turns up inside
+        # plenty of not-found messages ("Invalid or unknown checkout id"), and
+        # of the two ways to be wrong, wrongly failing a fixture is worse: it
+        # sends someone off to rewrite a description that was fine.
+        if is_not_found(error):
+            return (True, None) if tier == "accepted" else (False, "not_found")
+        if is_validation_error(error):
+            return False, "invalid_arguments"
+        return False, "tool_error"
 
     if tier == "accepted":
         return True, None

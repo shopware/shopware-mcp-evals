@@ -106,6 +106,20 @@ def print_discovery_block(discovery: list[dict]):
             expected = r.get("expected_tool") or "(no tool — nothing should match)"
             print(f"  {DIM}Expected:{RESET} {GREEN}{expected}{RESET}")
             print(f"  {DIM}Got:{RESET}      {RED}{r['selected_tool']}{RESET}")
+            # What it actually tried, and what came back. A fixture that named
+            # the right tool and had the call rejected looks identical to one
+            # that never chose anything unless this is printed.
+            for attempt in r.get("attempted_tools") or []:
+                if attempt.get("ok"):
+                    continue
+                bits = [f"{attempt['tool']}"]
+                if not attempt.get("executed"):
+                    bits.append("not executed")
+                if attempt.get("reason"):
+                    bits.append(str(attempt["reason"]))
+                if attempt.get("error"):
+                    bits.append(f"server said: {attempt['error'][:100]}")
+                print(f"  {DIM}Tried:{RESET}    {' — '.join(bits)}")
             if r["meta_calls"]:
                 trail = " → ".join(
                     f"{m['tool']}({json.dumps(m['input'], ensure_ascii=False)[:40]})" for m in r["meta_calls"]
