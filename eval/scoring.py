@@ -15,9 +15,34 @@ eval/summary.py and eval/compare_runs.py are the best-tested code here.
 from ownership import core_rate
 
 
-def is_correct(selected_tool: str | None, fixture: dict) -> bool:
-    """A selection is correct if it is the expected tool or any tool listed in
-    the fixture's optional `acceptable_tools` (for genuinely multi-valid prompts)."""
+def is_negative(fixture: dict) -> bool:
+    """A fixture where the right answer is that no tool applies.
+
+    Everything else in the suite asks "is X picked when X is right", which
+    measures recall and cannot catch an over-broad description: a tool that also
+    wins prompts it has no business winning still scores 100%. These fixtures
+    are the other half — a plausible, adjacent request the catalogue genuinely
+    cannot serve, where calling anything is the failure.
+    """
+    return bool(fixture.get("expect_no_tool"))
+
+
+def is_correct(selected_tool: str | None, fixture: dict, fail_reason: str | None = None) -> bool:
+    """Whether a fixture's outcome is the right one.
+
+    For an ordinary fixture: the expected tool, or any of the optional
+    `acceptable_tools` (for genuinely multi-valid prompts).
+
+    For a negative fixture: no tool at all — but only if the model actually
+    concluded. Running out of steps also leaves `selected_tool` empty, and that
+    is not a decision to decline, it is a model still rummaging when the budget
+    ran out. Scoring the two the same would let a fixture pass for timing out,
+    which is why `fail_reason` is consulted here rather than in the runner: the
+    rule belongs next to the rest of the scoring policy where it is testable
+    without a server.
+    """
+    if is_negative(fixture):
+        return selected_tool is None and fail_reason != "step_cap"
     if selected_tool is None:
         return False
     return selected_tool == fixture["expected_tool"] or selected_tool in fixture.get("acceptable_tools", [])
@@ -45,15 +70,21 @@ def score(results: list[dict]) -> dict:
     tools: dict[str, dict] = {}
     cats: dict[str, dict] = {}
     for r in scored(results):
-        t = r["expected_tool"]
+        t = r.get("expected_tool")
         c = r["category"]
-        tools.setdefault(t, {"pass": 0, "total": 0})
         cats.setdefault(c, {"pass": 0, "total": 0})
-        tools[t]["total"] += 1
         cats[c]["total"] += 1
         if r["passed"]:
-            tools[t]["pass"] += 1
             cats[c]["pass"] += 1
+        # A negative fixture names no tool, so it has no row in the per-tool
+        # table — it is a statement about the catalogue as a whole. It still
+        # counts in its category, which is where it is meant to be read.
+        if not t:
+            continue
+        tools.setdefault(t, {"pass": 0, "total": 0})
+        tools[t]["total"] += 1
+        if r["passed"]:
+            tools[t]["pass"] += 1
     return {"tools": tools, "cats": cats}
 
 
@@ -83,6 +114,39 @@ def count_rate_limited(results: list[dict] | None) -> int:
     return sum(1 for r in results or [] if any(n in str(r.get("error", "")).lower() for n in needles))
 
 
+def recovery_summary(graded: list[dict]) -> dict:
+    """How often the model got there first time, and how often it corrected itself.
+
+    A wrong first pick that the model recovers from is a different — and much
+    milder — problem than one it never recovers from, and the pass rate alone
+    cannot tell them apart now that recovery is allowed. `first_try_rate` is the
+    number that used to *be* the pass rate, kept so the two can be compared
+    across the change.
+
+    Fixtures that predate the recovery loop carry none of these fields, so they
+    are counted only where the field exists rather than assumed to be first-try.
+    """
+    tried = [r for r in graded if r.get("attempted_tools") is not None]
+    if not tried:
+        return {}
+    first_try = sum(1 for r in tried if r.get("first_try"))
+    missed_first = [r for r in tried if not r.get("first_try")]
+    recovered = sum(1 for r in missed_first if r.get("recovered"))
+    steps = [r["steps_to_correct"] for r in tried if r.get("steps_to_correct") is not None]
+    return {
+        "first_try_rate": round(first_try / len(tried), 2),
+        # Of the fixtures that did NOT land it first time, how many got there in
+        # the end. Denominator is the misses, not everything, so a suite that is
+        # mostly first-try does not dilute it to meaninglessness.
+        "recovery_rate": round(recovered / len(missed_first), 2) if missed_first else None,
+        "recovered": recovered,
+        "avg_wrong_calls": round(sum(r.get("wrong_calls", 0) for r in tried) / len(tried), 2),
+        "avg_steps_to_correct": round(sum(steps) / len(steps), 2) if steps else None,
+        "dry_run_forced": sum(1 for r in tried if r.get("dry_run_forced")),
+        "unexecuted": sum(1 for r in tried if r.get("execution", "").startswith("skipped")),
+    }
+
+
 def discovery_summary(discovery: list[dict]) -> dict:
     graded = scored(discovery)
     n = len(graded)
@@ -93,6 +157,12 @@ def discovery_summary(discovery: list[dict]) -> dict:
         paths[r["discovery_path"]] = paths.get(r["discovery_path"], 0) + 1
     search_used = [r for r in graded if r["search_hit"] is not None]
     search_hits = sum(1 for r in search_used if r["search_hit"])
+    # Where the expected tool actually placed, over the fixtures that searched
+    # and found it. `search_hit` says the ranker returned it at all; this says
+    # whether it returned it somewhere a model would plausibly read. Read with
+    # .get() because reports written before this field existed are still
+    # compared against.
+    ranks = sorted(r.get("search_rank") for r in graded if r.get("search_rank") is not None)
     toolset_graded = [r for r in graded if r["enabled_correct_toolset"] is not None]
     toolset_correct = sum(1 for r in toolset_graded if r["enabled_correct_toolset"])
     return {
@@ -104,8 +174,11 @@ def discovery_summary(discovery: list[dict]) -> dict:
         "path_distribution": paths,
         "search_used": len(search_used),
         "search_hit_rate": round(search_hits / len(search_used), 2) if search_used else None,
+        "search_rank_p50": ranks[len(ranks) // 2] if ranks else None,
+        "search_rank_worst": ranks[-1] if ranks else None,
         "toolset_enable_graded": len(toolset_graded),
         "toolset_enable_correct": toolset_correct,
+        **recovery_summary(graded),
         "tokens": total_tokens(graded),
     }
 

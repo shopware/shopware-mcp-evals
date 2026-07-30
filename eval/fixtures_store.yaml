@@ -325,3 +325,36 @@ fixtures:
     expected_tool: shopware-store-api-context
     expected_toolset: store-api
     notes: Customer login state is part of the context payload — not a cart or order read.
+
+  # -------------------------------------------------------------------------
+  # Negative — the right answer is that no tool applies
+  # -------------------------------------------------------------------------
+  # See the block in fixtures.yaml for the rules. The storefront surface is
+  # narrower than admin, so these probe the boundary that matters here: a
+  # shopper asking for something only an admin (or nobody) can do.
+
+  - id: negative_change_price
+    category: negative
+    prompt: "Drop the price on this jacket to 19.99 for me, it is cheaper on your competitor's site."
+    expect_no_tool: true
+    notes: >
+      Pricing is an admin capability and is not on the Store API surface at all.
+      The hazard is a catalogue/search tool treating this as a product operation
+      rather than declining.
+
+  - id: negative_cancel_and_refund
+    category: negative
+    prompt: "Cancel the order I placed this morning and put the money back on my card."
+    expect_no_tool: true
+    notes: >
+      Storefront checkout creates orders; it does not cancel them or move money.
+      Adjacent to cart and checkout, which is where an over-broad description
+      would bite.
+
+  - id: negative_loyalty_points
+    category: negative
+    prompt: "Enrol me in your loyalty scheme and tell me how many points I have collected so far."
+    expect_no_tool: true
+    notes: >
+      No loyalty or rewards capability exists on this surface. Customer-facing
+      enough that an account or context tool could plausibly be mistaken for it.

@@ -244,3 +244,127 @@ def test_the_verdict_carries_the_sets_the_report_renders_from():
     assert [x["id"] for x in v["graded"]] == ["a", "e"]
     assert [x["id"] for x in v["gating"]] == ["a"]
     assert v["passed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Negative fixtures — the right answer is that no tool applies
+# ---------------------------------------------------------------------------
+
+
+def negative(**over):
+    return {"id": "neg", "category": "negative", "expect_no_tool": True, **over}
+
+
+def test_declining_a_negative_fixture_passes():
+    assert S.is_correct(None, negative(), fail_reason="no_tool_call") is True
+
+
+def test_calling_anything_on_a_negative_fixture_fails():
+    """The whole point: an over-broad description bites here and nowhere else."""
+    assert S.is_correct("shopware-entity-search", negative()) is False
+
+
+def test_running_out_of_steps_is_not_a_decision_to_decline():
+    """Both leave selected_tool empty, but only one is the model concluding.
+
+    Without this, a negative fixture passes for timing out — the model is still
+    rummaging when the budget runs out and gets credit for restraint.
+    """
+    assert S.is_correct(None, negative(), fail_reason="step_cap") is False
+    assert S.is_correct(None, negative(), fail_reason=None) is True
+
+
+def test_ordinary_fixtures_ignore_the_fail_reason():
+    fixture = {"expected_tool": "alpha"}
+    assert S.is_correct("alpha", fixture, fail_reason="step_cap") is True
+    assert S.is_correct(None, fixture, fail_reason=None) is False
+
+
+def test_is_negative_keys_on_the_flag_not_the_category():
+    assert S.is_negative(negative()) is True
+    assert S.is_negative({"category": "negative"}) is False
+    assert S.is_negative({"expected_tool": "alpha"}) is False
+
+
+def test_a_negative_has_no_row_in_the_per_tool_table_but_counts_in_its_category():
+    """It is a statement about the catalogue, not about one tool."""
+    out = S.score(
+        [
+            {"expected_tool": "alpha", "category": "unambiguous", "passed": True},
+            {"expected_tool": None, "category": "negative", "passed": False},
+        ]
+    )
+
+    assert list(out["tools"]) == ["alpha"]
+    assert out["cats"]["negative"] == {"pass": 0, "total": 1}
+
+
+# ---------------------------------------------------------------------------
+# Recovery aggregates
+# ---------------------------------------------------------------------------
+def attempt(fid, first_try, recovered=False, wrong=0, steps_to_correct=None, **extra):
+    return {
+        "id": fid,
+        "category": "unambiguous",
+        "expected_tool": "alpha",
+        "passed": first_try or recovered,
+        "first_try": first_try,
+        "recovered": recovered,
+        "wrong_calls": wrong,
+        "steps_to_correct": steps_to_correct,
+        "attempted_tools": [{"tool": "alpha", "correct": first_try}],
+        "search_hit": None,
+        "steps": 1,
+        "discovery_path": "direct",
+        "enabled_correct_toolset": None,
+        **extra,
+    }
+
+
+def test_recovery_rate_is_measured_over_the_fixtures_that_missed_first():
+    """Denominator is the misses, not everything — otherwise a mostly-first-try
+    suite dilutes it to meaninglessness."""
+    out = S.recovery_summary(
+        [
+            attempt("a", first_try=True),
+            attempt("b", first_try=True),
+            attempt("c", first_try=False, recovered=True, wrong=1, steps_to_correct=2),
+            attempt("d", first_try=False, wrong=3),
+        ]
+    )
+
+    assert out["first_try_rate"] == 0.5
+    assert out["recovery_rate"] == 0.5, "one of the two misses recovered"
+    assert out["recovered"] == 1
+    assert out["avg_wrong_calls"] == 1.0
+    assert out["avg_steps_to_correct"] == 2
+
+
+def test_a_suite_that_never_misses_has_no_recovery_rate():
+    out = S.recovery_summary([attempt("a", first_try=True)])
+    assert out["first_try_rate"] == 1.0
+    assert out["recovery_rate"] is None
+
+
+def test_recovery_aggregates_are_absent_for_reports_that_predate_them():
+    """Older fixtures carry none of these fields and must not be counted as
+    first-try by default."""
+    assert S.recovery_summary([{"id": "old", "passed": True}]) == {}
+
+
+def test_unexecuted_and_forced_dry_runs_are_counted():
+    out = S.recovery_summary(
+        [
+            attempt("a", first_try=True, execution="executed", dry_run_forced=True),
+            attempt("b", first_try=True, execution="skipped_unsafe"),
+            attempt("c", first_try=True, execution="skipped_unclassified"),
+        ]
+    )
+
+    assert out["dry_run_forced"] == 1
+    assert out["unexecuted"] == 2
+
+
+def test_discovery_summary_carries_the_recovery_numbers():
+    out = S.discovery_summary([attempt("a", first_try=False, recovered=True, wrong=1)])
+    assert out["first_try_rate"] == 0.0 and out["recovered"] == 1

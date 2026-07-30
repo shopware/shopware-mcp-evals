@@ -85,6 +85,16 @@ jobs:
       EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
       EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
       APP_URL: http://localhost:8000
+      # TEMPORARY. `passed` changed meaning: the chosen tool is now executed and
+      # its result asserted, and a wrong first pick may be recovered from. The
+      # 0.90/0.85 thresholds were calibrated against first-tool-correct, so they
+      # no longer describe the same quantity — assertions push the rate down,
+      # recovery pushes it up, and the net is unknown until it has been measured.
+      #
+      # While this is true both admin gates warn instead of failing. Read
+      # `first_try_rate` and `recovery_rate` from a nightly, set the thresholds
+      # from those numbers, then delete this and the two branches that read it.
+      REBASELINE: 'true'
       # The eval is the bulk of the wall clock: ~425s of summed fixture latency per
       # model, which at the old 4-way concurrency was ~106s of a 155s step. It sat
       # at 4 because the MCP endpoint answered 429 above that, and the step below
@@ -402,6 +412,22 @@ jobs:
           # truth for versions; pyproject.toml declares none.
           pip install -e . --no-deps
 
+      # The previous run's report, for the cost comparison at the end. A cache
+      # rather than an artifact download: restore-keys falls back to the most
+      # recent entry with this prefix, so there is no API call and no run-id
+      # bookkeeping. On a first run, or when the cache has expired, nothing is
+      # restored and cost_drift says it has nothing to compare against.
+      #
+      # Cache scoping does something useful for free here: a PR branch can read
+      # main's cache but writes to its own, so a PR is measured against main's
+      # last nightly and cannot poison the baseline for anyone else.
+      - name: Restore previous cost baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: baseline
+          key: eval-cost-baseline-${{ github.run_id }}
+          restore-keys: eval-cost-baseline-
+
       - name: Snapshot MCP tool descriptions
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
@@ -607,6 +633,18 @@ jobs:
           # Fixed output paths so the cross-model comparison step can find them.
           # --summary-row feeds the consolidated job summary rendered at the end of
           # the job; the numeric prefix fixes each row's position in its table.
+          # Nightly only: after the discovery pass, re-run ONLY its failures
+          # with the fixture's own toolset enabled, then with the whole
+          # catalogue enabled. That separates three problems which look
+          # identical in the gating arm — a bad description, a collision with
+          # another group, or a discovery layer that never surfaced the tool.
+          #
+          # In the same invocation on purpose. A separate step would re-run the
+          # whole discovery pass first just to learn what failed, doubling the
+          # primary cost; here the failures are already in memory, so triage is
+          # ~18 extra fixture runs (~$0.10) rather than ~96.
+          [ "${GITHUB_EVENT_NAME:-}" = "schedule" ] && args+=(--triage)
+
           python -m eval.runner "${args[@]}" \
             --output "results/eval-primary.json" \
             --summary-row "results/rows/1-admin-primary.json" \
@@ -639,7 +677,9 @@ jobs:
 
           failed=0
           if [ "${rc_primary}" -ne 0 ]; then
-            if [ "${DRIFTED}" = "true" ]; then
+            if [ "${REBASELINE}" = "true" ]; then
+              echo "::warning::admin · primary failed (exit ${rc_primary}), advisory during the recovery/assertion re-baselining window."
+            elif [ "${DRIFTED}" = "true" ]; then
               echo "::warning::admin · primary failed (exit ${rc_primary}), treated as advisory because the tool catalogue has drifted from the committed baseline."
             else
               echo "::error::admin · primary failed (exit ${rc_primary})."
@@ -647,8 +687,12 @@ jobs:
             fi
           fi
           if [ "${rc_second}" -ne 0 ]; then
-            echo "::error::admin · second validator failed (exit ${rc_second})."
-            failed=1
+            if [ "${REBASELINE}" = "true" ]; then
+              echo "::warning::admin · second validator failed (exit ${rc_second}), advisory during the recovery/assertion re-baselining window."
+            else
+              echo "::error::admin · second validator failed (exit ${rc_second})."
+              failed=1
+            fi
           fi
           exit "${failed}"
 
@@ -714,7 +758,11 @@ jobs:
           # --advisory: this step is continue-on-error, so its row must not be
           # read as a gating verdict. Without the suite label it rendered as a
           # third, unexplained openai/gpt-4o result.
+          # --output is fixed rather than left to the default timestamped name
+          # so the summary step can name this report explicitly for the per-tool
+          # scorecard, the way it already does for the two admin runs.
           python -m eval.runner --endpoint store "${args[@]}" \
+            --output "results/eval-store.json" \
             --summary-row "results/rows/3-store.json" \
             --suite-label "store · UCP" \
             --advisory
@@ -736,9 +784,45 @@ jobs:
       - name: Write job summary
         if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
         run: |
+          # --reports names this job's three reports explicitly. It must not
+          # become a glob over results/: that directory is committed and holds
+          # every historical report, so a glob would pool runs from months ago —
+          # against older descriptions and older fixtures — into a table
+          # presented as this job's. A report that did not run is simply absent.
           python -m eval.summary \
             --rows "results/rows" \
-            --comparison "results/eval-comparison.json"
+            --comparison "results/eval-comparison.json" \
+            --reports "results/eval-primary.json" \
+                      "results/eval-second-validator.json" \
+                      "results/eval-store.json"
+
+      # Advisory, and non-gating by construction — cost_drift always exits 0.
+      # A cost regression is invisible in the pass rate: discovery taking two
+      # extra search rounds per fixture, or a tool that starts returning ten
+      # times the payload, moves the bill and nothing else.
+      - name: Cost drift (advisory)
+        if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
+        run: |
+          python -m eval.cost_drift \
+            --current "results/eval-primary.json" \
+            --previous "baseline/eval-primary.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Only the nightly writes the baseline. A PR run saving its own numbers
+      # would make the next PR's comparison meaningless — the point of
+      # comparison is a known-good scheduled run on trunk, not whatever landed
+      # in CI most recently.
+      - name: Save cost baseline
+        if: ${{ github.event_name == 'schedule' && !cancelled() && steps.eval.conclusion != 'skipped' }}
+        run: |
+          mkdir -p baseline
+          cp results/eval-primary.json baseline/ 2>/dev/null || true
+
+      - name: Persist cost baseline
+        if: ${{ github.event_name == 'schedule' && !cancelled() && steps.eval.conclusion != 'skipped' }}
+        uses: actions/cache/save@v4
+        with:
+          path: baseline
+          key: eval-cost-baseline-${{ github.run_id }}
 
       - name: Upload eval results
         if: always()

@@ -92,7 +92,13 @@ def breakdown(results: list[dict]) -> dict[str, dict]:
     """
     out: dict[str, dict] = {}
     for r in results or []:
-        tier = tier_of(r.get("expected_tool", ""))
+        # A negative fixture expects no tool, so no repository owns it — it is a
+        # statement about the catalogue as a whole. Attributing it would file
+        # every one of them under "unattributed" and invent a tier that reads
+        # like a drift alarm.
+        if not r.get("expected_tool"):
+            continue
+        tier = tier_of(r["expected_tool"])
         bucket = out.setdefault(tier, {"passed": 0, "total": 0, "ids": [], "failed_ids": []})
         bucket["total"] += 1
         bucket["ids"].append(r.get("id"))
@@ -112,6 +118,9 @@ def core_rate(results: list[dict]) -> tuple[int, int, float]:
     denominator at a size where one nondeterministic miss doesn't flip the
     build, while `breakdown` still reports the two lines apart.
     """
-    core = [r for r in results or [] if owner_of(r.get("expected_tool", "")) == CORE]
+    # Negative fixtures are excluded for the same reason as in breakdown: they
+    # name no tool, so they cannot be charged to core's denominator. They still
+    # count in the overall rate, which is the axis they belong on.
+    core = [r for r in results or [] if r.get("expected_tool") and owner_of(r["expected_tool"]) == CORE]
     passed = sum(1 for r in core if r.get("passed"))
     return passed, len(core), (passed / len(core) if core else 1.0)

@@ -17,7 +17,11 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT = ROOT / "tool-history" / "latest.json"
 
-CATEGORIES = {"unambiguous", "disambiguation", "chain", "meta", "discovery"}
+CATEGORIES = {"unambiguous", "disambiguation", "chain", "meta", "discovery", "negative"}
+
+# Fixtures where the right answer is that no tool applies. They carry no
+# `expected_tool`, so every check keyed on one has to skip them.
+NEGATIVE = "negative"
 
 # Every tool needs at least this many prompts. Three is the point where a pass
 # stops being attributable to one lucky phrasing.
@@ -38,15 +42,54 @@ DEFAULT_TOOLS = set(_snapshot["default_tools"])
 TOOLSET_OF = {tool: ts["name"] for ts in _snapshot["toolsets"] for tool in ts["tools"]}
 
 
+def _positive(fixtures):
+    return [f for f in fixtures if f["category"] != NEGATIVE]
+
+
 def _counts(fixtures):
-    return collections.Counter(f["expected_tool"] for f in fixtures)
+    return collections.Counter(f["expected_tool"] for f in _positive(fixtures))
 
 
 @pytest.mark.parametrize("label,fixtures", ALL_FILES)
 def test_required_fields_are_present(label, fixtures):
     for fixture in fixtures:
-        for field in ("id", "category", "prompt", "expected_tool"):
+        fields = (
+            ("id", "category", "prompt")
+            if fixture["category"] == NEGATIVE
+            else ("id", "category", "prompt", "expected_tool")
+        )
+        for field in fields:
             assert fixture.get(field), f"{label}: fixture {fixture.get('id')!r} is missing {field}"
+
+
+@pytest.mark.parametrize("label,fixtures", ALL_FILES)
+def test_negative_fixtures_declare_themselves_and_name_no_tool(label, fixtures):
+    """`expect_no_tool` is what the runner and scorer key on, so the category
+    label alone is not enough — and a negative carrying an `expected_tool` would
+    be scored against a tool it is meant to prove nothing should reach."""
+    for fixture in fixtures:
+        if fixture["category"] != NEGATIVE:
+            continue
+        assert fixture.get("expect_no_tool") is True, f"{label}: {fixture['id']} must set expect_no_tool: true"
+        assert not fixture.get("expected_tool"), f"{label}: {fixture['id']} is negative but names an expected_tool"
+        assert not fixture.get("expected_toolset"), f"{label}: {fixture['id']} is negative but names a toolset"
+
+
+@pytest.mark.parametrize("label,fixtures", ALL_FILES)
+def test_only_negative_fixtures_set_expect_no_tool(label, fixtures):
+    stray = [f["id"] for f in fixtures if f.get("expect_no_tool") and f["category"] != NEGATIVE]
+    assert not stray, f"{label}: expect_no_tool outside the negative category: {stray}"
+
+
+@pytest.mark.parametrize("label,fixtures", ALL_FILES)
+def test_negative_fixtures_explain_what_would_answer_them(label, fixtures):
+    """A negative expires the moment the server grows the capability it probes.
+
+    The note is what a reviewer reads on the drift PR to decide whether a newly
+    added tool has just turned this fixture into a false accusation.
+    """
+    thin = [f["id"] for f in fixtures if f["category"] == NEGATIVE and len((f.get("notes") or "").strip()) < 40]
+    assert not thin, f"{label}: negative fixtures need notes saying what capability would answer them: {thin}"
 
 
 @pytest.mark.parametrize("label,fixtures", ALL_FILES)
@@ -74,7 +117,7 @@ def test_prompts_are_unique(label, fixtures):
 @pytest.mark.parametrize("label,fixtures", ALL_FILES)
 def test_toolset_is_declared_for_non_meta_fixtures(label, fixtures):
     """Discovery mode grades toolset-enable, so every non-meta fixture needs a target."""
-    missing = [f["id"] for f in fixtures if f["category"] != "meta" and not f.get("expected_toolset")]
+    missing = [f["id"] for f in _positive(fixtures) if f["category"] != "meta" and not f.get("expected_toolset")]
     assert not missing, f"{label}: non-meta fixtures without expected_toolset: {missing}"
 
 
@@ -98,7 +141,7 @@ def test_every_tool_has_enough_prompts(label, fixtures):
 
 def test_admin_fixtures_reference_known_tools():
     """Catches a typo or a tool renamed server-side."""
-    named = {f["expected_tool"] for f in ADMIN}
+    named = {f["expected_tool"] for f in _positive(ADMIN)}
     named |= {t for f in ADMIN for t in f.get("acceptable_tools", [])}
     unknown = sorted(named - SNAPSHOT_TOOLS)
     assert not unknown, f"tools not in {SNAPSHOT.name}: {unknown}"
@@ -108,7 +151,7 @@ def test_admin_fixtures_declare_the_right_toolset():
     """A fixture pointing at the wrong group would grade toolset-enable incorrectly."""
     wrong = {
         f["id"]: (f["expected_toolset"], TOOLSET_OF.get(f["expected_tool"]))
-        for f in ADMIN
+        for f in _positive(ADMIN)
         if f.get("expected_toolset") and TOOLSET_OF.get(f["expected_tool"]) != f["expected_toolset"]
     }
     assert not wrong, f"expected_toolset disagrees with the snapshot (declared, actual): {wrong}"

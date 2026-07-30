@@ -281,3 +281,23 @@ def test_tier_block_is_silent_on_an_empty_gating_set(capsys):
     R.print_tier_block([])
 
     assert plain(capsys) == ""
+
+
+def test_a_failing_negative_fixture_says_what_was_expected(capsys):
+    """Printing a bare "None" would read as a broken fixture, not a finding."""
+    R.print_discovery_block(
+        [
+            disc(
+                "neg1",
+                passed=False,
+                expected_tool=None,
+                selected_tool="shopware-entity-search",
+                category="negative",
+                fail_reason="wrong_tool",
+            )
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "(no tool — nothing should match)" in out
+    assert "shopware-entity-search" in out

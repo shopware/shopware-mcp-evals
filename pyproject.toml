@@ -22,7 +22,7 @@ dependencies = []
 # by search-path order, which put eval/run.py in front of functional/run.py for
 # anything that guessed wrong. They are `runner.py` under their own packages now.
 [tool.setuptools]
-py-modules = ["mcp_client", "ownership"]
+py-modules = ["mcp_client", "ownership", "toollint"]
 
 [tool.setuptools.packages.find]
 include = ["eval*", "functional*"]
@@ -38,7 +38,7 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.coverage.run]
-source = ["eval", "functional", "mcp_client", "ownership"]
+source = ["eval", "functional", "mcp_client", "ownership", "toollint"]
 # Branch coverage, because statement coverage counts an `if` as covered when only
 # one side ever runs — and the untaken side is where the skip reasons, the error
 # budget and the gate thresholds live.
@@ -58,15 +58,20 @@ skip_covered = true
 # workflow so a local `pytest --cov` enforces the same number CI does — a
 # threshold you only discover in CI is one you find out about after pushing.
 #
-# The run sits at ~87% branch coverage, so this leaves ~2 points of slack, which
-# is for ordinary churn rather than for platform drift: measured on identical code,
-# linux CI reported 83.04% against darwin's ~83%, so the two agree to well under a
-# point. Do not read the slack as room for a real dip.
+# It ratchets: whenever the suite reaches a new high, this is raised to hold it,
+# so coverage can only ever go up. Leave ~1-2 points of slack below the measured
+# number for ordinary churn — not for platform drift, which is far smaller than
+# that: measured on identical code, linux CI reported 83.04% against darwin's
+# ~83%, so the two agree to well under a point. Do not read the slack as room
+# for a real dip.
 #
-# Was 80 while the run sat at ~83%. Dropping baseline mode removed its branches,
-# and the replacement tests reached run_fixture_discovery, which had no direct
-# coverage at all, so the number moved to ~87% on its own. Raised to hold that
-# rather than let it drift back.
+# History: 80 while the run sat at ~83%. Dropping baseline mode removed its
+# branches and the replacement tests reached run_fixture_discovery, which had no
+# direct coverage at all, taking it to ~87% — raised to 85. The per-tool
+# scorecard, catalogue lint, negative fixtures and cost accounting all landed as
+# pure modules with full test coverage, taking it to ~91%.
 #
-# The part worth covering next is functional/runner's verify_* checks, at 79%.
-fail_under = 85
+# The part worth covering next is functional/runner's verify_* checks, at 79% —
+# by some distance the largest remaining gap, and the one that has to close
+# before this can move much past 92.
+fail_under = 90

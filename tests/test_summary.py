@@ -339,3 +339,297 @@ def test_main_survives_a_missing_comparison_file(tmp_path, monkeypatch, capsys):
 
     assert S.main() == 0
     assert "Not available" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Per-tool scorecard section
+# ---------------------------------------------------------------------------
+
+
+def fixture_result(fid, expected, selected, passed):
+    return {"id": fid, "expected_tool": expected, "selected_tool": selected, "passed": passed}
+
+
+def report(*results):
+    return {"modes": {"discovery": {"results": list(results)}}}
+
+
+def tool_rows(text):
+    """Tool names from the scorecard table, in rendered order."""
+    return [
+        line.split("`")[1] for line in text.splitlines() if line.startswith("| `") and "×" not in line.split("|")[1]
+    ]
+
+
+def test_load_reports_warns_about_a_corrupt_report_but_not_a_skipped_one(tmp_path, capsys):
+    """The Store suite is conditional, so an absent report is the normal case.
+
+    Warning on it would fire on most runs, and a warning that always fires is
+    one nobody reads — including the corrupt-file warning that matters.
+    """
+    good = tmp_path / "eval-primary.json"
+    good.write_text(json.dumps(report(fixture_result("a", "alpha", "alpha", True))))
+    broken = tmp_path / "eval-broken.json"
+    broken.write_text("{not json")
+
+    loaded = S.load_reports([str(good), str(broken), str(tmp_path / "eval-store.json")])
+
+    assert len(loaded) == 1
+    warnings = capsys.readouterr().err
+    assert "eval-broken.json" in warnings
+    assert "eval-store.json" not in warnings
+
+
+def test_load_reports_without_paths_is_empty():
+    assert S.load_reports(None) == []
+
+
+def test_pooled_results_keeps_every_observation_across_runs():
+    """Pooling, not deduping: precision is a property of the description, so a
+    miss under either model is evidence about the same description."""
+    primary = report(fixture_result("shared", "alpha", "alpha", True))
+    second = report(fixture_result("shared", "alpha", "beta", False))
+
+    assert len(S.pooled_results([primary, second])) == 2
+
+
+def test_pooled_results_excludes_the_triage_arms():
+    """The arms re-run the same failures under a different advertised surface.
+    Folding them in counted one failure three times and inflated every
+    confusion pair by however many arms happened to run."""
+    both = {
+        "modes": {
+            "discovery": {"results": [fixture_result("f", "alpha", "beta", False)]},
+            "isolated": {"results": [fixture_result("f", "alpha", "beta", False)]},
+            "full": {"results": [fixture_result("f", "alpha", "beta", False)]},
+        }
+    }
+
+    pooled = S.pooled_results([both])
+
+    assert len(pooled) == 1
+
+
+def test_load_catalog_returns_full_definitions_and_survives_a_missing_file(tmp_path, capsys):
+    snap = tmp_path / "latest.json"
+    snap.write_text(json.dumps({"tools": [{"name": "alpha", "description": "d", "inputSchema": {}}, {"no": "name"}]}))
+
+    catalog = S.load_catalog(str(snap))
+    assert list(catalog) == ["alpha"]
+    assert catalog["alpha"]["inputSchema"] == {}
+
+    assert S.load_catalog(str(tmp_path / "nope.json")) == {}
+    assert "Could not read tool catalogue" in capsys.readouterr().err
+    assert S.load_catalog(None) == {}
+
+
+def test_scorecard_section_is_omitted_when_there_is_nothing_to_score():
+    assert S.render_tool_scorecard([], {}) == ""
+    assert S.render_tool_scorecard([fixture_result("n", None, None, True)], {}) == ""
+
+
+def test_scorecard_section_names_the_thief_in_the_victims_row():
+    """`beta` wins its own fixture and steals alpha's — recall alone calls beta
+    perfect (1/1) and says nothing about the theft.
+
+    Rows are ranked worst-quality-first, so `alpha` leads: it is the tool that
+    won nothing. What makes the table actionable is that alpha's row names beta
+    as the cause, and the pair is restated below.
+    """
+    text = S.render_tool_scorecard(
+        [
+            fixture_result("a1", "alpha", "beta", False),
+            fixture_result("b1", "beta", "beta", True),
+        ],
+        {},
+    )
+    assert tool_rows(text) == ["alpha", "beta"]
+    assert "| `beta` | 1 | 100% | 2 | 50% |" in text
+    assert "`alpha` ×1" in text
+    assert "Confusion pairs" in text
+    assert "`alpha` / `beta` — 1 miss(es)" in text
+
+
+def test_scorecard_section_flags_a_mutual_pair():
+    text = S.render_tool_scorecard(
+        [
+            fixture_result("a1", "alpha", "beta", False),
+            fixture_result("b1", "beta", "alpha", False),
+        ],
+        {},
+    )
+    assert "**(mutual)**" in text
+
+
+def test_scorecard_section_truncates_a_long_steal_list():
+    results = [fixture_result(f"v{i}", f"victim{i}", "greedy", False) for i in range(4)]
+    text = S.render_tool_scorecard(results, {})
+    assert "+2" in text
+
+
+def test_render_includes_the_scorecard_when_results_are_supplied():
+    text = S.render(
+        [row("admin · primary", "gpt-4o", 0.9, 1)],
+        None,
+        [fixture_result("a1", "alpha", "alpha", True)],
+        {},
+    )
+    assert "### Per-tool scorecard" in text
+
+
+def test_render_omits_the_scorecard_when_no_reports_were_named():
+    text = S.render([row("admin · primary", "gpt-4o", 0.9, 1)], None)
+    assert "### Per-tool scorecard" not in text
+
+
+# ---------------------------------------------------------------------------
+# Cost headline
+# ---------------------------------------------------------------------------
+
+
+def cost_block(total=1.5, graded=10, passed=9, **over):
+    return {
+        "model": "gpt-5.4-mini",
+        "priced": True,
+        "unverified": False,
+        "verified": "2026-07-30",
+        "tokens": {"input": 1_500_000, "cached_input": 200_000, "output": 12_000},
+        "total_usd": total,
+        "graded": graded,
+        "passed": passed,
+        **over,
+    }
+
+
+def test_cost_section_reports_the_total_and_both_unit_prices():
+    rows = [row("admin · primary", "gpt-5.4-mini", 0.9, 10, cost=cost_block())]
+
+    out = S.render_cost(rows)
+
+    assert "$1.50" in out
+    assert "1.5M input (200k cached)" in out
+    assert "per fixture" in out and "per *passing* fixture" in out
+    assert "Prices last verified 2026-07-30" in out
+
+
+def test_cost_per_passing_fixture_is_dearer_than_cost_per_fixture_when_some_fail():
+    """Sanity on the arithmetic: fewer passes than fixtures means a higher unit
+    price for signal, which is the whole reason the second number exists."""
+    out = S.render_cost([row("s", "m", 0.5, 10, cost=cost_block(total=1.0, graded=10, passed=5))])
+
+    assert "$0.1000 per fixture" in out
+    assert "$0.2000 per *passing* fixture" in out
+
+
+def test_an_unpriced_model_shows_a_gap_in_the_table_not_a_zero():
+    """$0.00 would read as free rather than as unknown."""
+    rows = [row("s", "mystery", 0.9, 10, cost=cost_block(total=None, priced=False))]
+
+    assert "unpriced" in S.render_runs(rows)
+    assert "$0.00" not in S.render_runs(rows)
+
+
+def test_a_row_with_no_cost_block_renders_a_dash():
+    assert "| — |" in S.render_runs([row("s", "m", 0.9, 10)])
+
+
+def test_the_job_total_says_so_when_a_price_is_missing():
+    rows = [
+        row("a", "m1", 0.9, 10, cost=cost_block()),
+        row("b", "mystery", 0.9, 10, cost=cost_block(total=None, model="mystery")),
+    ]
+
+    out = S.render_cost(rows)
+
+    assert "incomplete" in out and "mystery" in out
+    assert "3.0M input" in out, "token volume is known even when the price is not"
+
+
+def test_estimated_rates_are_marked_in_the_table_and_footnoted():
+    rows = [row("a", "gpt-5.4-mini", 0.9, 10, cost=cost_block(unverified=True))]
+
+    assert "$1.50*" in S.render_runs(rows)
+    assert "estimated rates for gpt-5.4-mini" in S.render_cost(rows)
+
+
+def test_cost_section_is_omitted_when_no_run_reported_one():
+    assert S.render_cost([row("a", "m", 0.9, 10)]) == ""
+    assert S.render_cost([]) == ""
+
+
+# ---------------------------------------------------------------------------
+# Arm matrix
+# ---------------------------------------------------------------------------
+
+
+def arm_report(**arms):
+    return {"modes": {arm: {"results": results} for arm, results in arms.items()}}
+
+
+def outcome(fid, passed, expected="alpha"):
+    return {"id": fid, "passed": passed, "expected_tool": expected}
+
+
+def test_arm_matrix_separates_the_three_causes_of_one_symptom():
+    """All three failed the discovery arm identically. The arms say which
+    problem produced that symptom, which is the difference between a rewrite,
+    a pair to differentiate, and a group description."""
+    reports = [
+        arm_report(
+            discovery=[outcome("own", False), outcome("collide", False), outcome("layer", False)],
+            isolated=[outcome("own", False), outcome("collide", True), outcome("layer", True)],
+            full=[outcome("own", False), outcome("collide", False), outcome("layer", True)],
+        )
+    ]
+
+    out = S.render_arm_matrix(reports)
+
+    assert "| `own` | `alpha` | ✗ | ✗ | the tool's own description |" in out
+    assert "| `collide` | `alpha` | ✓ | ✗ | a cross-group collision |" in out
+    assert "| `layer` | `alpha` | ✓ | ✓ | the discovery layer |" in out
+
+
+def test_arm_matrix_counts_each_bucket_and_says_what_to_do():
+    reports = [
+        arm_report(
+            isolated=[outcome("a", True), outcome("b", True)],
+            full=[outcome("a", True), outcome("b", True)],
+        )
+    ]
+
+    out = S.render_arm_matrix(reports)
+
+    assert "**the discovery layer** (2)" in out
+    assert "McpToolGroup" in out
+
+
+def test_arm_matrix_states_that_passing_fixtures_were_not_re_run():
+    """A silent cap reads as full coverage when it is not."""
+    reports = [arm_report(isolated=[outcome("a", True)], full=[outcome("a", True)])]
+
+    assert "Triaged 1 discovery failures" in S.render_arm_matrix(reports)
+
+
+def test_arm_matrix_is_omitted_when_triage_did_not_run():
+    assert S.render_arm_matrix([arm_report(discovery=[outcome("a", False)])]) == ""
+    assert S.render_arm_matrix([]) == ""
+
+
+def test_a_fixture_only_one_arm_reached_is_not_diagnosed():
+    """Both arms are needed to place a failure; one alone cannot."""
+    reports = [arm_report(isolated=[outcome("a", True)], full=[])]
+
+    out = S.render_arm_matrix(reports)
+
+    assert "`a`" not in out
+
+
+def test_render_includes_the_arm_matrix_when_reports_carry_one():
+    text = S.render(
+        [row("admin · primary", "m", 0.9, 1)],
+        None,
+        None,
+        None,
+        [arm_report(isolated=[outcome("a", True)], full=[outcome("a", True)])],
+    )
+    assert "### Where the failures are" in text

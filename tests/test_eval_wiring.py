@@ -158,7 +158,8 @@ def test_the_real_fixture_files_load_through_this_path():
     for endpoint, expected in (("admin", 90), ("store", 42)):
         fixtures = E.load_fixtures(E.fixtures_path_for(endpoint, None))
         assert len(fixtures) >= expected // 2
-        assert all("expected_tool" in f for f in fixtures)
+        # Negative fixtures name no tool — the flag is what identifies them.
+        assert all("expected_tool" in f or f.get("expect_no_tool") for f in fixtures)
 
 
 # ---------------------------------------------------------------------------

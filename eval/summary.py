@@ -30,6 +30,8 @@ import sys
 from pathlib import Path
 
 from eval.compare_runs import render_actionable, render_detail, render_split, render_unmatched
+from eval.cost import combine
+from eval.tool_scorecard import collisions, rank_worst, scorecard
 from ownership import TIER_ORDER
 
 # Prefix for synthetic fixture ids, used only when a summary row predates the
@@ -63,8 +65,8 @@ def render_runs(rows: list[dict]) -> str:
         return "No eval run reported a result.\n"
 
     lines = [
-        "| Suite | Provider | Model | Pass rate | Graded | Errors | Throttled | Gate |",
-        "|---|---|---|---:|---:|---:|---:|---|",
+        "| Suite | Provider | Model | Pass rate | Graded | Errors | Throttled | Cost | Gate |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|",
     ]
     for r in rows:
         gate = r.get("gate", "?")
@@ -76,8 +78,152 @@ def render_runs(rows: list[dict]) -> str:
         lines.append(
             f"| {r.get('suite', '?')} | `{r.get('provider', '?')}` | `{r.get('model', '?')}` | "
             f"{round(100 * r.get('rate', 0))}% | {r.get('graded', 0)} | {r.get('errored', 0)} | "
-            f"{r.get('throttled', 0)} | {gate} |"
+            f"{r.get('throttled', 0)} | {_usd(r.get('cost'))} | {gate} |"
         )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _usd(cost: dict | None) -> str:
+    """A run's dollar cost, or an explicit gap.
+
+    "—" for a run with no cost block at all (an older row) and "unpriced" for
+    one whose model is missing from pricing.yaml. Neither renders as $0.00,
+    which would read as free rather than as unknown.
+    """
+    if not cost:
+        return "—"
+    if cost.get("total_usd") is None:
+        return "unpriced"
+    return f"${cost['total_usd']:.2f}" + ("*" if cost.get("unverified") else "")
+
+
+def _tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.0f}k"
+    return str(count)
+
+
+def render_cost(rows: list[dict]) -> str:
+    """The job's total cost, and the two numbers that make it actionable.
+
+    Cost per fixture says what a data point costs. Cost per *passing* fixture
+    says what a unit of signal costs, which is the one that survives a change to
+    the suite: a run that costs more but converts failures into passes got
+    cheaper by this measure and more expensive by the total.
+    """
+    costs = [r["cost"] for r in rows if r.get("cost")]
+    if not costs:
+        return ""
+
+    job = combine(costs)
+    graded = sum(r.get("graded", 0) for r in rows)
+    passed = sum(c.get("passed", 0) for c in costs)
+    tokens = job["tokens"]
+
+    total = f"${job['total_usd']:.2f}"
+    if not job["complete"]:
+        total += f" (incomplete — no price for {', '.join(m for m in job['unpriced_models'] if m)})"
+
+    parts = [
+        f"**Cost of this run:** {total} · "
+        f"{_tokens(tokens['input'])} input ({_tokens(tokens['cached_input'])} cached) · "
+        f"{_tokens(tokens['output'])} output"
+    ]
+    if graded and job["total_usd"]:
+        per_fixture = job["total_usd"] / graded
+        parts.append(f"${per_fixture:.4f} per fixture")
+    if passed and job["total_usd"]:
+        parts.append(f"${job['total_usd'] / passed:.4f} per *passing* fixture")
+
+    lines = [" · ".join(parts), ""]
+    verified = next((c.get("verified") for c in costs if c.get("verified")), None)
+    notes = [f"Prices last verified {verified}." if verified else None]
+    if job["unverified_models"]:
+        notes.append(f"\\* estimated rates for {', '.join(job['unverified_models'])} — see `pricing.yaml`.")
+    notes = [n for n in notes if n]
+    if notes:
+        lines += [f"<sub>{' '.join(notes)}</sub>", ""]
+    return "\n".join(lines)
+
+
+# What each combination of arm outcomes points at. Keyed by
+# (passed_isolated, passed_full); the discovery arm failed in every row, which
+# is the only reason the fixture is here.
+DIAGNOSIS = {
+    (False, False): (
+        "the tool's own description",
+        "It loses even against its own group. Rewrite the description, or the fixture is wrong.",
+    ),
+    (True, False): (
+        "a cross-group collision",
+        "Distinguishable among its siblings, beaten by something in another group — fix the pair, not the tool.",
+    ),
+    (True, True): (
+        "the discovery layer",
+        "It wins whenever it is advertised, so the problem is being found: the "
+        "`#[McpToolGroup]` description, or tool-search ranking.",
+    ),
+    (False, True): (
+        "intra-group ambiguity",
+        "Beaten by a sibling but not by the wider catalogue — unusual; check the "
+        "group's descriptions against each other.",
+    ),
+}
+
+
+def render_arm_matrix(reports: list[dict]) -> str:
+    """Where each discovery failure actually lives.
+
+    The discovery arm says a fixture failed. It cannot say why, because three
+    different problems produce the same symptom: a bad description, a collision
+    with a tool in another group, or a discovery layer that never surfaced the
+    right tool at all. Re-running just the failures with the group pre-enabled,
+    and then with the whole catalogue enabled, separates them.
+    """
+    arms = {}
+    for report in reports:
+        for arm in ("discovery", "isolated", "full"):
+            mode = (report.get("modes") or {}).get(arm)
+            if mode:
+                arms.setdefault(arm, {}).update({r["id"]: r for r in mode.get("results", [])})
+
+    if not (arms.get("isolated") or arms.get("full")):
+        return ""
+
+    triaged = sorted(set(arms.get("isolated", {})) | set(arms.get("full", {})))
+    lines = [
+        "### Where the failures are",
+        "",
+        "Each fixture below failed the gating discovery arm, then was re-run with only",
+        "its own toolset enabled, and again with the whole catalogue enabled. The",
+        "combination says which of three different problems produced the same symptom.",
+        "",
+        "| Fixture | Expected | isolated | full | Diagnosis |",
+        "|---|---|:---:|:---:|---|",
+    ]
+    buckets = {}
+    for fid in triaged:
+        iso = arms.get("isolated", {}).get(fid)
+        full = arms.get("full", {}).get(fid)
+        if iso is None or full is None:
+            continue
+        key = (bool(iso.get("passed")), bool(full.get("passed")))
+        label, _ = DIAGNOSIS[key]
+        buckets.setdefault(label, []).append(fid)
+        lines.append(
+            f"| `{fid}` | `{iso.get('expected_tool') or full.get('expected_tool')}` | "
+            f"{'✓' if key[0] else '✗'} | {'✓' if key[1] else '✗'} | {label} |"
+        )
+    lines.append("")
+
+    for label, explanation in DIAGNOSIS.values():
+        if label in buckets:
+            lines.append(f"- **{label}** ({len(buckets[label])}) — {explanation}")
+    lines.append("")
+    lines.append(f"<sub>Triaged {len(triaged)} discovery failures. Passing fixtures are not re-run.</sub>")
     lines.append("")
     return "\n".join(lines)
 
@@ -249,13 +395,151 @@ def render_comparison(cmp_: dict | None) -> str:
     )
 
 
-def render(rows: list[dict], cmp_: dict | None) -> str:
+def load_reports(paths: list[str] | None) -> list[dict]:
+    """Read the full per-run reports named by the caller.
+
+    The rows carry a verdict; the scorecard needs every fixture's selection.
+
+    Explicit paths, deliberately not a directory glob. `results/` is committed
+    and holds every historical report, so globbing `eval-*.json` there would
+    pool runs from months ago — against older descriptions, older fixtures and
+    in one case a mode that no longer exists — into a table presented as this
+    job's. It would look right and be wrong. The workflow knows exactly which
+    three files it just wrote, so it names them.
+
+    A report that is simply absent is silent: the Store suite is conditional, so
+    warning about it would fire on most runs, and a warning that always fires is
+    one nobody reads — which is how the corrupt-file case below would get
+    missed. A report that exists but cannot be parsed is a real problem and says
+    so. Either way it costs a table, never the build.
+    """
+    reports = []
+    for path in paths or []:
+        try:
+            reports.append(json.loads(Path(path).read_text()))
+        except FileNotFoundError:
+            continue
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"::warning::Could not read eval report {path}: {exc}", file=sys.stderr)
+    return reports
+
+
+def load_catalog(path: str | None) -> dict[str, dict]:
+    """Tool name -> full definition, from a snapshot written by snapshot_tools.py.
+
+    compare_runs.load_catalogue reads the same file but keeps only descriptions;
+    the scorecard wants the whole definition so it can report on the schema too.
+    """
+    if not path:
+        return {}
+    try:
+        snapshot = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"::warning::Could not read tool catalogue {path}: {exc}", file=sys.stderr)
+        return {}
+    return {t["name"]: t for t in snapshot.get("tools", []) if t.get("name")}
+
+
+def pooled_results(reports: list[dict]) -> list[dict]:
+    """Every graded discovery result in the job, across suites and models.
+
+    Pooled rather than deduplicated per fixture, which is the opposite of what
+    render_tiers does. The tier table answers "did this fixture pass", so
+    counting it once per model would double-weight the admin suite. The
+    scorecard answers "how good is this description", and a description that
+    only misleads the weaker model is still a weaker description — every graded
+    observation is evidence, so every one counts.
+
+    The `discovery` arm only. The triage arms re-run the same failures under a
+    different advertised surface, which is a different experiment: folding them
+    in counted one failure three times and inflated every confusion pair by
+    however many arms happened to run. They have their own table.
+    """
+    return [
+        r
+        for report in reports
+        for arm, mode in report.get("modes", {}).items()
+        if arm == "discovery"
+        for r in mode.get("results", [])
+    ]
+
+
+def _pct(value: float | None) -> str:
+    return "–" if value is None else f"{round(100 * value)}%"
+
+
+def _partners(counts: dict[str, int], limit: int = 2) -> str:
+    shown = [f"`{name}` ×{n}" for name, n in list(counts.items())[:limit]]
+    if len(counts) > limit:
+        shown.append(f"+{len(counts) - limit}")
+    return ", ".join(shown) or "–"
+
+
+def render_tool_scorecard(results: list[dict], catalog: dict[str, dict]) -> str:
+    """Per-tool recall, precision and confusion — the half recall alone can't show.
+
+    Recall is what the pass rate already reports: did this tool win the fixtures
+    written for it. Precision is new, and it is the number that catches an
+    over-broad description — a tool that wins its own fixtures *and* its
+    siblings' scores 100% on recall while actively making the catalogue worse.
+    Sorted worst-F1 first so the tool to fix is the first row.
+    """
+    if not results:
+        return ""
+
+    card = scorecard(results, catalog)
+    if not card:
+        return ""
+
+    lines = [
+        "### Per-tool scorecard",
+        "",
+        "Recall = won the fixtures written for it. Precision = was right when picked.",
+        "A tool with high recall and low precision has an over-broad description: it",
+        "is winning its siblings' prompts, which the pass rate alone cannot show.",
+        "",
+        "| Tool | Fixtures | Recall | Picked | Precision | F1 | Steals from | Search rank |",
+        "|---|---:|---:|---:|---:|---:|---|---:|",
+    ]
+    for name, e in rank_worst(card):
+        rank = "–" if e["search_rank_p50"] is None else f"{e['search_rank_p50']:g}"
+        lines.append(
+            f"| `{name}` | {e['expected_n']} | {_pct(e['recall'])} | {e['selected_n']} | "
+            f"{_pct(e['precision'])} | {_pct(e['f1'])} | {_partners(e['steals_from'])} | {rank} |"
+        )
+    lines.append("")
+
+    found = collisions(card)
+    if found:
+        lines += [
+            "**Confusion pairs.** A mutual pair is the strongest signal here — both",
+            "descriptions attract each other's prompts, so they need differentiating",
+            "from each other rather than fixing one at a time.",
+            "",
+        ]
+        for pair in found:
+            mark = " **(mutual)**" if pair["mutual"] else ""
+            lines.append(f"- `{pair['pair'][0]}` / `{pair['pair'][1]}` — {pair['total']} miss(es){mark}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def render(
+    rows: list[dict],
+    cmp_: dict | None,
+    results: list[dict] | None = None,
+    catalog: dict | None = None,
+    reports: list[dict] | None = None,
+) -> str:
     return "\n".join(
         [
             "## MCP evals",
             "",
             render_runs(rows),
+            render_cost(rows),
             render_tiers(rows),
+            render_tool_scorecard(results or [], catalog or {}),
+            render_arm_matrix(reports or []),
             render_comparison(cmp_),
         ]
     )
@@ -267,6 +551,20 @@ def main() -> int:
         "--rows", default="results/rows", help="Directory of per-run summary rows (default results/rows)"
     )
     parser.add_argument("--comparison", help="Path to the cross-model comparison JSON (eval/compare_runs.py --output)")
+    parser.add_argument(
+        "--reports",
+        nargs="*",
+        help=(
+            "Full eval reports written by THIS job, named explicitly, for the per-tool "
+            "scorecard. Not a glob: results/ is committed and holds historical reports "
+            "that must not be pooled into this job's table."
+        ),
+    )
+    parser.add_argument(
+        "--tools",
+        default="tool-history/latest.json",
+        help="Tool catalogue snapshot, so the scorecard can flag tools no fixture covers",
+    )
     args = parser.parse_args()
 
     cmp_ = None
@@ -279,7 +577,14 @@ def main() -> int:
             # the summary rather than warned about here.
             cmp_ = None
 
-    markdown = render(load_rows(Path(args.rows)), cmp_)
+    reports = load_reports(args.reports)
+    markdown = render(
+        load_rows(Path(args.rows)),
+        cmp_,
+        pooled_results(reports),
+        load_catalog(args.tools),
+        reports,
+    )
     print(markdown)
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")

@@ -35,6 +35,16 @@ def test_row_carries_everything_the_summary_table_needs(tmp_path, capsys):
     )
     capsys.readouterr()
 
+    # The parent dir does not exist in CI until the first run writes into it.
+    assert json.loads(path.read_text()) == row
+
+    # Cost travels with the row so the summary can add its column without
+    # re-reading every full report. Asserted separately: its contents are
+    # eval/cost.py's contract, pinned in tests/test_cost.py, and inlining them
+    # here would make an unrelated pricing edit fail this shape test.
+    cost = row.pop("cost")
+    assert cost["model"] == "gpt-4o" and cost["graded"] == 85
+
     assert row == {
         "suite": "admin · primary",
         "provider": "openai",
@@ -59,8 +69,6 @@ def test_row_carries_everything_the_summary_table_needs(tmp_path, capsys):
             }
         },
     }
-    # The parent dir does not exist in CI until the first run writes into it.
-    assert json.loads(path.read_text()) == row
 
 
 def test_row_splits_by_owning_repository(capsys):

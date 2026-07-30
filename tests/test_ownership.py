@@ -22,6 +22,8 @@ FIXTURE_TOOLS = sorted(
         f["expected_tool"]
         for name in ("fixtures.yaml", "fixtures_store.yaml")
         for f in yaml.safe_load((ROOT / "eval" / name).read_text())["fixtures"]
+        # Negative fixtures name no tool — there is nothing to attribute.
+        if f.get("expected_tool")
     }
 )
 
@@ -151,3 +153,27 @@ def test_the_current_fixture_set_splits_across_all_four_repos():
     owners = {OWN.owner_of(t) for t in FIXTURE_TOOLS}
 
     assert owners == {"core", "dev-tools", "merchant-tools", "agentic-commerce"}
+
+
+def test_negative_fixtures_are_not_attributed_to_any_repository():
+    """They name no tool, so no repo owns them. Attributing would file every
+    one under "unattributed" and invent a tier that reads like a drift alarm."""
+    results = [
+        {"id": "a", "expected_tool": "shopware-entity-search", "passed": True},
+        {"id": "n", "expected_tool": None, "passed": False},
+    ]
+
+    tiers = OWN.breakdown(results)
+
+    assert OWN.UNKNOWN not in tiers
+    assert tiers["core"]["total"] == 1
+
+
+def test_negative_fixtures_stay_out_of_the_core_denominator():
+    """They still count in the overall rate — that is the axis they belong on."""
+    results = [
+        {"id": "a", "expected_tool": "shopware-entity-search", "passed": True},
+        {"id": "n", "expected_tool": None, "passed": False},
+    ]
+
+    assert OWN.core_rate(results) == (1, 1, 1.0)

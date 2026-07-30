@@ -90,6 +90,10 @@ pip install -e . --no-deps   # makes `from mcp_client import ...` resolve anywhe
 ## Running tests
 
 ```bash
+# Layer 0 — static: description checks over the committed catalogue snapshot.
+# No server, no model, no tokens. Advisory: always exits 0.
+python -m toollint
+
 # Layer 1 — functional: v2 discovery mechanics + per-tool dryRun-safe calls
 python -m functional.runner
 python -m functional.runner --skip-media-upload
@@ -109,6 +113,12 @@ python -m functional.runner --skip-dev-tools
 .venv/bin/python3 -m eval.runner --id disambig_count_vs_search
 .venv/bin/python3 -m eval.runner --no-system-prompt       # ad-hoc, skip system prompt
 .venv/bin/python3 -m eval.runner --output results/x.json  # custom report path
+.venv/bin/python3 -m eval.runner --triage                 # re-run ONLY the failures under
+                                                          # the isolated + full arms
+
+# Cost of a run vs the previous one, per fixture. Warns, never gates.
+.venv/bin/python3 -m eval.cost_drift --current results/eval-primary.json \
+                                     --previous baseline/eval-primary.json
 
 # Snapshot the full catalogue for drift detection
 .venv/bin/python3 eval/snapshot_tools.py --output tool-history/latest.json
@@ -119,8 +129,15 @@ python -m functional.runner --endpoint store
 
 # Unit tests (offline, no server) — reporting, runner logic, throttle retry
 .venv/bin/python3 -m pytest tests -q
-.venv/bin/python3 -m pytest tests -q --cov   # enforces the 85% branch-coverage floor
+.venv/bin/python3 -m pytest tests -q --cov   # enforces the 90% branch-coverage floor
 ```
+
+> **The gates are advisory right now.** `passed` changed meaning — the chosen
+> tool is executed and its result asserted, and a wrong first pick may be
+> recovered from — so the 0.90/0.85 thresholds no longer describe the same
+> quantity. `REBASELINE: 'true'` in the workflow makes both admin gates warn
+> instead of fail. Read `first_try_rate` and `recovery_rate` off a nightly, set
+> the thresholds from those, then delete the flag and the two branches reading it.
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
 itself, and `compare_runs.py --gate both --min-pass-rate 0.9
@@ -152,8 +169,14 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/reporting.py` | Reusable pass/fail/skip harness + JSON report writer |
 | `eval/fixtures_store.yaml` | Store API / UCP buyer-journey fixtures |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
-| `eval/runner.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |
+| `eval/runner.py` | Discovery-mode LLM eval: finds the tool, executes it, asserts the result, allows recovery |
 | `eval/scoring.py` | Results → counts, rates and the gate verdict. Pure, and what the gate is decided by |
+| `toolclass.py` | **Read before touching execution.** May a tool be called, and how to make it safe (read-only / dry-runnable / unsafe / unclassified) |
+| `toollint.py` | Layer 0 static description checks; advisory, runs in lint.yml |
+| `eval/assertions.py` | `expect_result` tiers, and the line between a call the server rejected and one that returned nothing |
+| `eval/tool_scorecard.py` | Per-tool recall, **precision**, F1, confusion pairs. The half a pass rate cannot show |
+| `eval/cost.py` / `eval/cost_drift.py` | What a run costs, and whether that moved |
+| `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
@@ -186,17 +209,33 @@ Where the tools come from:
 
 ## Improving tool descriptions / groups
 
-When an LLM eval fixture fails:
-1. Note the failing prompt, the mode, and (discovery mode) the meta-call trail.
-2. Edit the `#[McpTool(description: '...')]`, `#[McpToolGroup('...')]`, or
-   `meta: ['deferred' => ...]` PHP attribute in the Shopware repo.
-3. Restart the Shopware server.
-4. Re-run `eval/runner.py --id <fixture-id>` to verify improvement.
+Do not start from the failing prompt — start from where the failure *is*. Three
+different problems produce an identical failure in the gating arm, and each
+wants a different edit:
+
+1. **Run `--triage`** (or read the "Where the failures are" table in the job
+   summary). It re-runs the failures with only their own toolset enabled, then
+   with the whole catalogue enabled:
+   - fails both → the tool's own `#[McpTool(description:)]`
+   - passes isolated, fails full → a **cross-group collision**; fix the pair,
+     not the tool. The scorecard's `steals_from` column names the other half
+   - passes both → the **discovery layer**: `#[McpToolGroup]` description, or
+     tool-search ranking (check `search_rank`)
+2. **Check the per-tool scorecard** for precision. A tool with high recall and
+   low precision is over-broad and is quietly taking its siblings' prompts —
+   that is invisible in the pass rate and is usually the real bug.
+3. Edit the PHP attribute in the Shopware repo, restart the server, and re-run
+   `eval/runner.py --id <fixture-id>`.
+
+`python -m toollint` is free and catches some of this before a run: a
+description that never says *when* to call the tool fires on half the catalogue.
 
 ## Adding fixtures
 
 Add entries to `eval/fixtures.yaml`. Required fields: `id`, `category`,
-`prompt`, `expected_tool`. Optional: `expected_toolset` (for deferred tools —
+`prompt`, `expected_tool`. Optional: `expect_result` (assertion tier — defaults
+to `accepted`; see the header of fixtures.yaml for why everything is on that
+default for now), `expected_toolset` (for deferred tools —
 grades whether the right toolset was enabled), `max_steps` (per-fixture
 discovery step cap), `notes`. Categories:
 
@@ -209,3 +248,24 @@ discovery step cap), `notes`. Categories:
 After editing a tool's PHP attributes in the Shopware repo, restart the
 Shopware server before re-running — the tool list is read at MCP `initialize`
 time.
+
+### Negative fixtures
+
+`category: negative` + `expect_no_tool: true`, no `expected_tool`. The right
+answer is that nothing applies, which is the only way to catch an over-broad
+description directly rather than waiting for it to steal a sibling's fixture.
+
+Two rules, both learned the hard way:
+
+- **No legitimate first step.** "Export all orders to CSV and email it" is not a
+  valid negative — fetching the orders is a reasonable opening move, so a model
+  calling `entity-search` is behaving correctly and the fixture would punish it.
+  Keep them external or infrastructural.
+- **Plausible and adjacent.** "What is the weather" measures nothing. The point
+  is a request a shop admin would really make, next to a group that might bite.
+
+Meta calls are free — searching, finding nothing, then declining is the
+behaviour under test and passes. Running out of steps does **not** pass: that is
+a model still rummaging, not one that concluded. `notes` must say what
+capability would answer the prompt, because the fixture becomes a false
+accusation the moment the server grows it.

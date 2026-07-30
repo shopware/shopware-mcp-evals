@@ -1,0 +1,163 @@
+"""Result assertions.
+
+The load-bearing distinction is between a call the server rejected and one it
+ran and returned nothing for. Getting that wrong in one direction turns the
+suite into a test of the demo-data seed; in the other it lets malformed calls
+pass as long as the tool name was right.
+"""
+
+import json
+
+import pytest
+
+from eval import assertions as A
+
+
+def payload(**data):
+    return json.dumps(data)
+
+
+# ---------------------------------------------------------------------------
+# The tiers
+# ---------------------------------------------------------------------------
+def test_the_none_tier_passes_whatever_happened():
+    """Selection-only, for tools that cannot be executed at all."""
+    assert A.check("none", None, "everything is on fire") == (True, None)
+
+
+def test_the_accepted_tier_passes_on_an_empty_result():
+    """The honest tier for a fixture that has to invent an id: the model cannot
+    know a real UUID, so 'not found' says the call was well-formed."""
+    assert A.check("accepted", payload(data=[]), None) == (True, None)
+
+
+def test_the_accepted_tier_still_fails_a_rejected_call():
+    passed, reason = A.check("accepted", None, "Validation failed: entity is required")
+
+    assert passed is False and reason == "invalid_arguments"
+
+
+def test_the_data_tier_wants_something_back():
+    assert A.check({"tier": "data", "min_items": {"path": "data", "n": 1}}, payload(data=[{"id": "x"}]), None) == (
+        True,
+        None,
+    )
+
+    passed, reason = A.check({"tier": "data", "min_items": {"path": "data", "n": 1}}, payload(data=[]), None)
+    assert passed is False and reason == "too_few:data<1"
+
+
+# ---------------------------------------------------------------------------
+# Whose fault the failure is
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Validation failed for parameter 'entity'",
+        "Invalid filter syntax",
+        "Missing required parameter: ids",
+        "Unknown parameter 'limits'",
+        "Value must be an integer",
+        "Request body malformed",
+    ],
+)
+def test_a_rejected_call_is_the_models_fault(error):
+    assert A.is_validation_error(error) is True
+    assert A.check("accepted", None, error) == (False, "invalid_arguments")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "500 Internal Server Error",
+        "Connection reset by peer",
+        "Plugin SwagMcpDevTools is not installed",
+        "429 Too Many Requests",
+    ],
+)
+def test_an_environment_failure_is_reported_separately(error):
+    """A 500 or a missing plugin is not evidence about a tool description, so it
+    must be distinguishable upstream rather than counted as a wrong answer."""
+    assert A.is_validation_error(error) is False
+    assert A.check("accepted", None, error) == (False, "tool_error")
+
+
+def test_no_error_at_all_is_not_a_validation_error():
+    assert A.is_validation_error(None) is False
+    assert A.is_validation_error("") is False
+
+
+# ---------------------------------------------------------------------------
+# Predicates
+# ---------------------------------------------------------------------------
+def test_has_keys_walks_a_dotted_path():
+    spec = {"tier": "data", "has_keys": ["data.total"]}
+
+    assert A.check(spec, payload(data={"total": 7}), None) == (True, None)
+    assert A.check(spec, payload(data={}), None) == (False, "missing:data.total")
+
+
+def test_a_key_present_but_null_is_missing():
+    """A tool that answers `{"total": null}` has not supplied the total."""
+    assert A.check({"tier": "data", "has_keys": ["total"]}, payload(total=None), None) == (False, "missing:total")
+
+
+def test_min_items_counts_lists_dicts_and_strings():
+    spec = {"tier": "data", "min_items": {"path": "data", "n": 2}}
+
+    assert A.check(spec, payload(data=[1, 2]), None)[0] is True
+    assert A.check(spec, payload(data={"a": 1, "b": 2}), None)[0] is True
+    assert A.check(spec, payload(data="ab"), None)[0] is True
+    assert A.check(spec, payload(data=[1]), None) == (False, "too_few:data<2")
+
+
+def test_min_items_against_a_scalar_is_reported_as_a_shape_problem():
+    spec = {"tier": "data", "min_items": {"path": "data", "n": 1}}
+    assert A.check(spec, payload(data=7), None) == (False, "not_a_collection:data")
+
+
+def test_min_items_on_an_absent_path():
+    spec = {"tier": "data", "min_items": {"path": "results", "n": 1}}
+    assert A.check(spec, payload(data=[1]), None) == (False, "not_a_collection:results")
+
+
+def test_contains_matches_the_raw_response_text():
+    spec = {"tier": "data", "contains": ["productNumber"]}
+
+    assert A.check(spec, payload(data=[{"productNumber": "SW-1"}]), None) == (True, None)
+    assert A.check(spec, payload(data=[{"id": "x"}]), None) == (False, "missing_text:productNumber")
+
+
+def test_predicates_are_all_required_and_the_first_failure_is_reported():
+    spec = {"tier": "data", "has_keys": ["data"], "min_items": {"path": "data", "n": 5}}
+    assert A.check(spec, payload(data=[1]), None) == (False, "too_few:data<5")
+
+
+def test_an_unparseable_body_fails_the_data_tier_but_not_the_accepted_one():
+    """Accepted only claims the server took the call; data claims it answered."""
+    assert A.check("data", "<html>gateway timeout</html>", None) == (False, "unreadable_result")
+    assert A.check("accepted", "<html>gateway timeout</html>", None) == (True, None)
+
+
+def test_an_empty_body_is_unreadable_for_the_data_tier():
+    assert A.check("data", "", None) == (False, "unreadable_result")
+
+
+# ---------------------------------------------------------------------------
+# normalise
+# ---------------------------------------------------------------------------
+def test_a_fixture_with_no_expectation_gets_the_honest_default():
+    """`accepted` is what a fixture with nothing declared actually supports."""
+    assert A.normalise(None) == {"tier": "accepted"}
+    assert A.check(None, payload(data=[]), None) == (True, None)
+
+
+def test_normalise_accepts_a_bare_tier_or_a_mapping():
+    assert A.normalise("data") == {"tier": "data"}
+    assert A.normalise({"tier": "data", "contains": ["x"]}) == {"tier": "data", "contains": ["x"]}
+
+
+def test_every_declared_tier_is_understood():
+    for tier in A.TIERS:
+        passed, _ = A.check(tier, payload(data=[{"id": 1}]), None)
+        assert passed is True

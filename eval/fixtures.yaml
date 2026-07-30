@@ -20,7 +20,30 @@
 #                     whether toolset-enable picked the right group in discovery
 #                     mode. Only the `meta` fixtures omit it (they need no toolset).
 #   max_steps:        (optional) per-fixture override of the discovery step cap.
+#   expect_no_tool:   (negative fixtures only) the right answer is that no tool
+#                     applies; calling anything is the failure.
+#   expect_result:    (optional) how much of the executed call to assert on.
+#                     Defaults to `accepted`, and every fixture currently uses
+#                     that default deliberately — see below.
 #   notes:            why this case is interesting (disambiguation, chaining...)
+#
+# expect_result tiers:
+#   accepted  the arguments passed validation and the server took the call. An
+#             empty or not-found result is fine. This is the honest tier for a
+#             fixture that has to invent an id: the model cannot know a real
+#             UUID, so "not found" proves the call was well-formed, which is the
+#             thing under test.
+#   data      the call should also return something. Takes `has_keys`,
+#             `min_items` and `contains` predicates against the payload.
+#   none      selection only. Automatic for tools that cannot be executed
+#             safely (toolclass.UNSAFE), so it rarely needs setting by hand.
+#
+# Why everything is on `accepted` for now: the `data` tier needs real payload
+# shapes to assert against, and those have not been observed yet — the demo data
+# is generated, and the seeding step is explicitly non-fatal, so a fixture
+# asserting on a shape guessed from the schema would fail for reasons that have
+# nothing to do with tool quality. Upgrade fixtures to `data` from an actual
+# run's payloads, not from the schema.
 #
 # Categories:
 #   unambiguous     one clear tool
@@ -788,3 +811,77 @@ fixtures:
     notes: >
       theme-config is deferred in the 'theme' toolset. Probes whether search
       ranks it for theme/color queries and whether the model reaches it.
+
+  # -------------------------------------------------------------------------
+  # Negative — the right answer is that no tool applies
+  # -------------------------------------------------------------------------
+  # Every other fixture asks "is tool X picked when X is right", which measures
+  # recall only. A description broad enough to also win prompts it has no
+  # business winning still scores 100% on that. These are the other half: a
+  # plausible, adjacent admin request the catalogue genuinely cannot serve,
+  # where reaching for any tool is the failure.
+  #
+  # Two rules, both learned the hard way:
+  #
+  #   * The ask must have no legitimate first step. "Export all orders to CSV
+  #     and email it" is NOT a valid negative — fetching the orders is a
+  #     reasonable opening move, so a model calling entity-search is behaving
+  #     correctly and the fixture would punish it. Every prompt below is
+  #     external or infrastructural, so no shop-data lookup helps.
+  #   * Meta calls are free. Searching the catalogue, finding nothing and then
+  #     declining is exactly the behaviour being tested, and passes.
+  #
+  # They expire: if the server grows the capability, the fixture becomes a false
+  # accusation. `notes` says what would answer it, so the drift PR can tell.
+
+  - id: negative_carrier_label
+    category: negative
+    prompt: "Print the DHL shipping label for our latest parcel and send it to the warehouse printer."
+    expect_no_tool: true
+    notes: >
+      Would need a carrier/label integration. Nothing here talks to a carrier;
+      order tooling changes states, it does not produce labels. Adjacent to the
+      order group on purpose — that is the group most likely to bite.
+
+  - id: negative_newsletter_campaign
+    category: negative
+    prompt: "Send our spring sale announcement out to everyone on the mailing list this afternoon."
+    expect_no_tool: true
+    notes: >
+      Would need a mail/campaign sender. Customer data is readable here, but
+      nothing sends mail — the risk is a customer-lookup tool biting on
+      "everyone on the mailing list".
+
+  - id: negative_subscription_billing
+    category: negative
+    prompt: "Set up a recurring monthly billing plan so premium members are charged automatically."
+    expect_no_tool: true
+    notes: >
+      Would need subscription/recurring-billing capability, which is not in this
+      catalogue. Cart and checkout tools handle one-off purchases only.
+
+  - id: negative_social_post
+    category: negative
+    prompt: "Publish the new collection announcement to our Instagram and Facebook accounts."
+    expect_no_tool: true
+    notes: >
+      Would need social integrations. Entirely outside the shop; included as the
+      clear-cut control against which the adjacent negatives can be read.
+
+  - id: negative_cache_clear
+    category: negative
+    prompt: "Clear the application cache and warm it back up, the frontend is serving stale content."
+    expect_no_tool: true
+    notes: >
+      Would need console/cache administration. The dev-tools group is the
+      hazard: it exposes logs, extensions and scaffolding, so a description
+      broad enough to read as "developer operations" would bite here.
+
+  - id: negative_restore_backup
+    category: negative
+    prompt: "Roll us back to yesterday evening's database snapshot, a bad import wrecked the catalogue."
+    expect_no_tool: true
+    notes: >
+      Would need backup/restore administration. Destructive and unserveable, so
+      the tool most at risk of biting is entity-delete — which is exactly the
+      one that must not.

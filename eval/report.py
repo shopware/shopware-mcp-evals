@@ -100,7 +100,11 @@ def print_discovery_block(discovery: list[dict]):
         for r in failed:
             print(f"\n  [{r['id']}] {r['category']}  ({r.get('fail_reason')})")
             print(f"  {DIM}Prompt:{RESET}   {r['prompt'][:80]}")
-            print(f"  {DIM}Expected:{RESET} {GREEN}{r['expected_tool']}{RESET}")
+            # A negative fixture names no tool: the expectation is that nothing
+            # is called, so printing a bare "None" here would read as a bug in
+            # the fixture rather than the finding it actually is.
+            expected = r.get("expected_tool") or "(no tool — nothing should match)"
+            print(f"  {DIM}Expected:{RESET} {GREEN}{expected}{RESET}")
             print(f"  {DIM}Got:{RESET}      {RED}{r['selected_tool']}{RESET}")
             if r["meta_calls"]:
                 trail = " → ".join(

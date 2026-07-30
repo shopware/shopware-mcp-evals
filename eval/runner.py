@@ -41,6 +41,8 @@ from pathlib import Path
 
 import yaml
 
+from eval.assertions import check
+from eval.cost import load_pricing, run_cost
 from eval.report import (
     BOLD,
     DIM,
@@ -57,6 +59,7 @@ from eval.scoring import (
     executed,
     gate_verdict,
     is_correct,
+    is_negative,
     scored,
 )
 from mcp_client import (
@@ -68,6 +71,7 @@ from mcp_client import (
     SW_SC_ACCESS_KEY,
     SW_SECRET_ACCESS_KEY,
     enable_all_toolsets,
+    enable_toolset,
     endpoint_by_name,
     mcp_call,
     mcp_call_error,
@@ -77,6 +81,7 @@ from mcp_client import (
     mcp_tools_list_all,
 )
 from ownership import CORE, breakdown, owner_of
+from toolclass import classify, is_executable, prepare_call
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -138,8 +143,14 @@ def anthropic_turn(client, model: str, system_prompt: str | None, messages: list
             "content": [{"type": "tool_result", "tool_use_id": call_id, "content": text} for call_id, text in results],
         },
         "stop_reason": response.stop_reason,
+        # Anthropic's `input_tokens` is the uncached remainder — cache reads are
+        # reported separately and are NOT included in it. The OpenAI adapter
+        # below has to subtract instead. Getting this backwards silently
+        # double-counts or under-counts the bill, which is why both adapters
+        # normalise to the same three buckets here rather than at the far end.
         "tokens": {
             "input": response.usage.input_tokens,
+            "cached_input": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
             "output": response.usage.output_tokens,
         },
     }
@@ -186,6 +197,14 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
             }
             for c in msg.tool_calls
         ]
+    # OpenAI's `prompt_tokens` INCLUDES the cached prefix, so the full-price
+    # bucket is the difference — the opposite of Anthropic above, where
+    # `input_tokens` already excludes it. OpenAI caches prompts automatically
+    # over ~1k tokens with no opt-in, so this is not zero even though this
+    # harness never sets cache_control: it is a discount we receive whether or
+    # not we asked for it, and ignoring it would overstate the bill.
+    details = getattr(response.usage, "prompt_tokens_details", None)
+    cached = (getattr(details, "cached_tokens", 0) or 0) if details else 0
     return {
         "tool_calls": tool_calls,
         "assistant_message": assistant_message,
@@ -194,7 +213,8 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
         ],
         "stop_reason": response.choices[0].finish_reason,
         "tokens": {
-            "input": response.usage.prompt_tokens,
+            "input": max(response.usage.prompt_tokens - cached, 0),
+            "cached_input": cached,
             "output": response.usage.completion_tokens,
         },
     }
@@ -205,19 +225,45 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
 # ---------------------------------------------------------------------------
 
 
-def _search_result_tools(result_text: str) -> list[dict]:
-    """Extract the tool definitions returned inline by shopware-tool-search,
-    in MCP tool shape ({name, description, inputSchema})."""
+def _surface_tokens(tools: list[dict]) -> int:
+    """Rough token cost of the advertised tool list.
+
+    Chars/4, deliberately: an exact count needs a tokenizer per provider and
+    would change nothing about the comparison this feeds — surface at turn one
+    against surface at its peak, in the same units, for the same run.
+    """
+    return len(json.dumps(tools)) // 4
+
+
+def _search_rows(result_text: str) -> tuple[list[dict], int | None]:
+    """Ranked rows from shopware-tool-search, plus the candidate pool size.
+
+    Each row is {tool, score, matchedIn, rank}, `rank` being the 1-indexed
+    position the server returned it in. The rank is the point: a boolean "was
+    the right tool in the results" cannot tell first place from ninth, and the
+    difference decides whether a model scrolling a 20-result list ever reaches
+    it. The server already computes and sends `score`/`matchedIn`; this used to
+    drop both on the floor.
+    """
     try:
         payload = json.loads(result_text)
     except json.JSONDecodeError, TypeError:
-        return []
-    tools = []
-    for r in payload.get("data", []):
+        return [], None
+    rows = []
+    for position, r in enumerate(payload.get("data", []), start=1):
         tool = r.get("tool") if isinstance(r, dict) else None
         if isinstance(tool, dict) and tool.get("name"):
-            tools.append(tool)
-    return tools
+            rows.append({"tool": tool, "score": r.get("score"), "matched_in": r.get("matchedIn"), "rank": position})
+    meta = payload.get("_meta") or {}
+    total = meta.get("totalCandidates") if isinstance(meta, dict) else None
+    return rows, total
+
+
+def _search_result_tools(result_text: str) -> list[dict]:
+    """Tool definitions returned inline by shopware-tool-search, in MCP tool
+    shape ({name, description, inputSchema}) — for making them callable."""
+    rows, _ = _search_rows(result_text)
+    return [r["tool"] for r in rows]
 
 
 def _search_contains_expected(result_text: str, expected_tool: str) -> bool:
@@ -225,12 +271,23 @@ def _search_contains_expected(result_text: str, expected_tool: str) -> bool:
 
 
 def run_fixture_discovery(
-    provider: str, client, fixture: dict, model: str, system_prompt: str | None, max_steps: int, endpoint=ADMIN
+    provider: str,
+    client,
+    fixture: dict,
+    model: str,
+    system_prompt: str | None,
+    max_steps: int,
+    endpoint=ADMIN,
+    arm: str = "discovery",
 ) -> dict:
     prompt = fixture["prompt"]
-    expected_tool = fixture["expected_tool"]
+    # Absent on a negative fixture, where no tool is the right answer. The
+    # terminal set is then just `acceptable` (normally empty), which is correct:
+    # every non-meta call is already terminal, so any tool the model reaches for
+    # is recorded and graded as the over-trigger it is.
+    expected_tool = fixture.get("expected_tool")
     acceptable = set(fixture.get("acceptable_tools", []))
-    terminal_tools = {expected_tool} | acceptable
+    terminal_tools = ({expected_tool} | acceptable) if expected_tool else acceptable
     tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
     turn_fn = anthropic_turn if provider == "anthropic" else openai_turn
 
@@ -238,13 +295,40 @@ def run_fixture_discovery(
     # and would leak across fixtures on a shared session.
     session_id, _ = mcp_init(endpoint=endpoint)
 
+    # The arm decides what the model is shown before it says anything.
+    #
+    #   discovery  the default surface — three meta-tools — and the model has to
+    #              find the rest. This is what a production client sees.
+    #   isolated   only the group the answer lives in, so the question is purely
+    #              "is this description distinguishable from its siblings".
+    #   full       the whole catalogue at once: maximum collision pressure.
+    #
+    # The two diagnostic arms withhold the meta-tools. That is the fix for the
+    # bug that killed the old `baseline` mode, which left them in the catalogue
+    # and then graded a meta-call as a wrong answer — 40 of its 42 failures were
+    # models correctly following the server's own instructions. With none
+    # advertised, there is no meta-call to misgrade.
+    if arm == "isolated" and fixture.get("expected_toolset"):
+        enable_toolset(session_id, fixture["expected_toolset"], endpoint=endpoint)
+    elif arm == "full":
+        enable_all_toolsets(session_id, endpoint=endpoint)
+
     # Callable-tool catalogue by name. Starts as the advertised default surface.
     # Grows when a toolset is enabled (re-fetched tools/list) OR when
     # shopware-tool-search returns a tool inline — a search-surfaced tool is
     # directly callable because the allowlist, not advertising, is the call
     # boundary. This mirrors how a real MCP client exposes discovered tools.
     catalog = {t["name"]: t for t in mcp_tools_list_all(session_id, endpoint=endpoint)}
+    if arm != "discovery":
+        catalog = {n: t for n, t in catalog.items() if n not in META_TOOLS}
     tools = tools_fn(list(catalog.values()))
+    # What the advertised surface costs to put in front of the model. The
+    # opening figure is the price of v2's promise — a fresh session shows three
+    # meta-tools, not the catalogue — and the peak is what the model actually
+    # paid on later turns once discovery had pulled tools in. The gap between
+    # them is the discovery layer's real context bill.
+    surface_tokens = _surface_tokens(tools)
+    surface_tokens_peak = surface_tokens
 
     messages = []
     if provider == "openai" and system_prompt:
@@ -253,18 +337,34 @@ def run_fixture_discovery(
 
     selected_tool, selected_input = None, {}
     fail_reason = None
+    # Every non-meta call the model made, in order. The first is `selected_tool`
+    # (the old metric); the rest are what recovery looks like.
+    attempted_tools = []
+    first_tool_correct = None
+    resolved = False
+    steps_to_correct = None
+    dry_run_forced = False
+    execution = None
+    stop = False
     meta_calls = []
     search_hit = None
+    search_rank = None
+    search_score = None
+    search_candidates = None
     enabled_toolsets = []
-    tokens = {"input": 0, "output": 0}
+    tokens = {"input": 0, "cached_input": 0, "output": 0}
+    # Bytes of tool-result payload the model was made to read. A tool that
+    # answers correctly but returns 40k of JSON is expensive for every client,
+    # and nothing else in the suite would notice.
+    payload_bytes = 0
     steps = 0
     t0 = time.time()
 
     while steps < max_steps:
         steps += 1
         turn = turn_fn(client, model, system_prompt if provider == "anthropic" else None, messages, tools)
-        tokens["input"] += turn["tokens"]["input"]
-        tokens["output"] += turn["tokens"]["output"]
+        for bucket, count in turn["tokens"].items():
+            tokens[bucket] = tokens.get(bucket, 0) + count
 
         if not turn["tool_calls"]:
             fail_reason = "no_tool_call"
@@ -275,22 +375,65 @@ def run_fixture_discovery(
         tool_results = []
         catalog_changed = False
         for call in turn["tool_calls"]:
-            # A call is terminal (graded) when it is the expected/acceptable
-            # tool, or any non-meta tool. Meta navigation tools that are NOT the
-            # expected answer (e.g. shopware-toolsets-list on the way to
-            # toolset-enable) are executed and fed back so the model can proceed
-            # — listing toolsets before enabling one is correct discovery flow.
-            terminal = call["name"] in terminal_tools or call["name"] not in META_TOOLS
-            if terminal:
-                # Grade the selection; do NOT execute (no-mutation policy).
-                selected_tool = call["name"]
-                selected_input = call["input"]
-                break
+            # Any non-meta call is an answer. Meta navigation tools that are NOT
+            # the expected answer (e.g. shopware-toolsets-list on the way to
+            # toolset-enable) fall through and are executed as discovery flow —
+            # listing toolsets before enabling one is correct.
+            answering = call["name"] in terminal_tools or call["name"] not in META_TOOLS
+            if answering:
+                correct = call["name"] in terminal_tools
+                if selected_tool is None:
+                    # The first answer is what the old first-try metric measured;
+                    # keep it under the same name so historical reports and the
+                    # per-tool scorecard still mean what they meant.
+                    selected_tool, selected_input = call["name"], call["input"]
+                    first_tool_correct = correct
+
+                attempt = {"tool": call["name"], "correct": correct, "step": steps}
+                args, forced = prepare_call(call["name"], call["input"])
+                dry_run_forced = dry_run_forced or forced
+
+                if not is_executable(call["name"]):
+                    # Nothing safe to do with it — no dryRun to hide behind, or
+                    # a tool the snapshot has never seen. Graded on selection
+                    # alone, which is where the whole suite used to be.
+                    attempt["executed"] = False
+                    attempted_tools.append(attempt)
+                    execution = "skipped_unsafe" if classify(call["name"]) else "skipped_unclassified"
+                    if not correct:
+                        fail_reason = "wrong_tool"
+                    resolved = correct
+                    stop = True
+                    break
+
+                resp = mcp_call(session_id, call["name"], args, endpoint=endpoint)
+                err = mcp_call_error(resp)
+                result_text = mcp_result_text(resp) or ""
+                payload_bytes += len(result_text.encode("utf-8"))
+                execution = "executed"
+
+                ok, reason = check(fixture.get("expect_result"), result_text, err)
+                attempt |= {"executed": True, "ok": ok, "reason": reason}
+                attempted_tools.append(attempt)
+
+                if correct and ok:
+                    resolved = True
+                    steps_to_correct = steps
+                    stop = True
+                    break
+
+                # Wrong tool, or the right tool called badly. Hand back what the
+                # server actually said and let the model correct itself — that
+                # recovery is the thing being measured, so no hint is injected.
+                fail_reason = reason if correct else "wrong_tool"
+                tool_results.append((call["id"], result_text or f"Error: {err}"))
+                continue
 
             # Execute discovery meta-tools for real and feed results back.
             resp = mcp_call(session_id, call["name"], call["input"], endpoint=endpoint)
             err = mcp_call_error(resp)
             result_text = mcp_result_text(resp) or (f"Error: {err}" if err else "")
+            payload_bytes += len(result_text.encode("utf-8"))
             tool_results.append((call["id"], result_text))
             meta_calls.append(
                 {
@@ -300,11 +443,20 @@ def run_fixture_discovery(
                 }
             )
             if call["name"] == "shopware-tool-search":
-                found = _search_result_tools(result_text)
-                hit = any(t.get("name") == expected_tool for t in found)
+                rows, candidates = _search_rows(result_text)
+                hit = any(r["tool"].get("name") == expected_tool for r in rows)
                 search_hit = hit if search_hit is None else (search_hit or hit)
+                if candidates is not None:
+                    search_candidates = candidates
+                # A fixture may search several times with different wording.
+                # Keep the best placement the expected tool ever reached: that
+                # is the ranking the model had its best chance from, so a later
+                # vaguer query cannot make the catalogue look worse than it is.
+                for r in rows:
+                    if r["tool"].get("name") == expected_tool and (search_rank is None or r["rank"] < search_rank):
+                        search_rank, search_score = r["rank"], r["score"]
                 # Make search-surfaced tools callable next turn.
-                for t in found:
+                for t in (r["tool"] for r in rows):
                     if t["name"] not in catalog:
                         catalog[t["name"]] = t
                         catalog_changed = True
@@ -316,11 +468,14 @@ def run_fixture_discovery(
                         catalog[t["name"]] = t
                         catalog_changed = True
 
-        if selected_tool is not None:
+        # `stop` rather than "a tool was selected": a wrong first pick no longer
+        # ends the run, because whether the model recovers from it is the point.
+        if stop:
             break
 
         if catalog_changed:
             tools = tools_fn(list(catalog.values()))
+            surface_tokens_peak = max(surface_tokens_peak, _surface_tokens(tools))
 
         builder_output = turn["tool_result_builder"](tool_results)
         if isinstance(builder_output, list):
@@ -328,7 +483,12 @@ def run_fixture_discovery(
         else:
             messages.append(builder_output)
     else:
-        fail_reason = "step_cap"
+        # Running out of steps after the model reached the right tool and the
+        # call failed its assertion is still a step-cap exit, but "too_few:data"
+        # is the actionable half of that and the reason worth keeping. Only a
+        # run that never produced an answer is reported as the cap itself.
+        if not attempted_tools:
+            fail_reason = "step_cap"
 
     latency = round(time.time() - t0, 2)
 
@@ -346,9 +506,22 @@ def run_fixture_discovery(
     else:
         discovery_path = "direct"
 
-    passed = is_correct(selected_tool, fixture)
+    if is_negative(fixture) or execution is None:
+        # Nothing was executed, so the old rule is the only one available: a
+        # negative fixture passes by declining, and a fixture whose model never
+        # answered has nothing to assert on.
+        passed = is_correct(selected_tool, fixture, fail_reason)
+    else:
+        # The call has to have run and satisfied the fixture's expectation, not
+        # merely been named. `resolved` covers recovery: the model may have got
+        # there on a later attempt.
+        passed = resolved
     if not passed and fail_reason is None:
         fail_reason = "wrong_tool"
+    if passed and fail_reason == "no_tool_call":
+        # Declining IS the pass on a negative fixture. Leaving the reason set
+        # would render a passing fixture with a failure reason attached.
+        fail_reason = None
 
     expected_toolset = fixture.get("expected_toolset")
     enabled_correct_toolset = None
@@ -358,7 +531,7 @@ def run_fixture_discovery(
     return {
         "id": fixture["id"],
         "category": fixture.get("category", ""),
-        "mode": "discovery",
+        "mode": arm,
         "prompt": prompt,
         "expected_tool": expected_tool,
         "expected_toolset": expected_toolset,
@@ -366,14 +539,37 @@ def run_fixture_discovery(
         "selected_input": selected_input,
         "passed": passed,
         "fail_reason": None if passed else fail_reason,
+        # Whether the FIRST answer was the right tool. The scorecard reads this
+        # for precision rather than `passed`, which since recovery no longer
+        # implies the first pick was correct — a recovered fixture would
+        # otherwise credit the wrong tool with a good selection.
+        "first_tool_correct": first_tool_correct,
+        # Both halves: the first answer named the right tool AND that call
+        # worked. `ok` alone is only "the server accepted it", which a wrong
+        # tool called competently also satisfies.
+        "first_try": bool(attempted_tools)
+        and attempted_tools[0]["correct"]
+        and attempted_tools[0].get("ok", True) is True,
+        "recovered": passed and len(attempted_tools) > 1,
+        "attempted_tools": attempted_tools,
+        "wrong_calls": sum(1 for a in attempted_tools if not a["correct"]),
+        "steps_to_correct": steps_to_correct,
+        "execution": execution,
+        "dry_run_forced": dry_run_forced,
         "steps": steps,
         "meta_calls": meta_calls,
         "discovery_path": discovery_path,
         "search_hit": search_hit,
+        "search_rank": search_rank,
+        "search_score": search_score,
+        "search_candidates": search_candidates,
         "enabled_toolsets": enabled_toolsets,
         "enabled_correct_toolset": enabled_correct_toolset,
         "latency_s": latency,
         "tokens": tokens,
+        "payload_bytes": payload_bytes,
+        "surface_tokens": surface_tokens,
+        "surface_tokens_peak": surface_tokens_peak,
         "notes": fixture.get("notes", ""),
     }
 
@@ -445,6 +641,10 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
         # over executed() — the same exclusions as the overall rate, so the
         # per-tier numbers stay comparable with it.
         "by_tier": breakdown(executed(graded)),
+        # The row is what the consolidated summary renders from, so the cost has
+        # to travel with it — otherwise the summary would have to re-read every
+        # full report just to add one column.
+        "cost": run_cost(graded, model, load_pricing()),
     }
 
     # Also on stdout: the job summary now only appears once every eval has run,
@@ -473,7 +673,7 @@ def skipped_result(fixture: dict, mode: str) -> dict:
         "category": fixture.get("category", ""),
         "mode": mode,
         "prompt": fixture["prompt"],
-        "expected_tool": fixture["expected_tool"],
+        "expected_tool": fixture.get("expected_tool"),
         "selected_tool": None,
         "passed": False,
         "skipped": True,
@@ -488,17 +688,23 @@ def error_result(fixture: dict, mode: str, exc: Exception) -> dict:
         "category": fixture.get("category", ""),
         "mode": mode,
         "prompt": fixture["prompt"],
-        "expected_tool": fixture["expected_tool"],
+        "expected_tool": fixture.get("expected_tool"),
         "selected_tool": None,
         "passed": False,
         "error": str(exc),
     }
     if mode == "discovery":
+        # These keys are not decoration: an errored fixture is dropped from the
+        # pass rate but stays in `scored()`, so discovery_summary reads them
+        # with bracket access and a missing one is a KeyError mid-report.
         record |= {
             "steps": 0,
             "meta_calls": [],
             "discovery_path": "none",
             "search_hit": None,
+            "search_rank": None,
+            "search_score": None,
+            "search_candidates": None,
             "enabled_correct_toolset": None,
         }
     return record
@@ -547,7 +753,12 @@ def run_discovery_pass(
     print(f"  concurrency={workers}\n")
 
     def worker(fixture: dict) -> dict:
-        if fixture["expected_tool"] not in available_tools:
+        # A negative fixture names no tool, so there is nothing to be missing —
+        # it always runs. (It is easier on an instance with fewer plugins, since
+        # fewer tools exist to be wrongly picked; that is a caveat on comparing
+        # negative rates across instances, not a reason to skip.)
+        expected = fixture.get("expected_tool")
+        if expected and expected not in available_tools:
             result = skipped_result(fixture, "discovery")
             result["_line"] = _render(result)
             return result
@@ -574,6 +785,75 @@ def run_discovery_pass(
         return result
 
     return run_fixtures_concurrently(fixtures, worker, workers)
+
+
+# Categories that only make sense against the live discovery surface. `meta`
+# fixtures expect a meta-tool, which the diagnostic arms withhold; `discovery`
+# fixtures exist to exercise search and enablement, which the arms bypass; a
+# `negative` fixture asks whether anything bites, and pre-enabling a group to
+# ask that would be a different question.
+ARM_SKIP_CATEGORIES = frozenset({"meta", "discovery", "negative"})
+
+
+def triage_arms(
+    provider,
+    client,
+    discovery_results,
+    fixtures,
+    model,
+    system_prompt,
+    default_max_steps,
+    endpoint=ADMIN,
+    workers=1,
+    arms=("isolated", "full"),
+) -> dict[str, list[dict]]:
+    """Re-run the discovery arm's failures under the diagnostic arms.
+
+    Triage, not a full pass. Running every fixture through all three arms costs
+    roughly three times as much and the extra two thirds is spent confirming
+    that fixtures which already passed still pass — the matrix only says
+    anything where discovery failed. On a ~10% failure rate this is ~18 extra
+    runs instead of ~180.
+
+    What it buys: a failure stops being "the model got it wrong" and becomes a
+    location. Fails everywhere → the tool's own description. Passes isolated,
+    fails full → a collision with something in another group. Passes both, fails
+    discovery → the discovery layer itself, meaning the group description or
+    tool-search ranking.
+    """
+    by_id = {f["id"]: f for f in fixtures}
+    failed = [
+        by_id[r["id"]]
+        for r in executed(discovery_results or [])
+        if not r["passed"] and r["id"] in by_id and by_id[r["id"]].get("category") not in ARM_SKIP_CATEGORIES
+    ]
+    if not failed:
+        print(f"\n{BOLD}── Triage: no discovery failures to diagnose ──{RESET}\n")
+        return {}
+
+    out = {}
+    for arm in arms:
+        print(f"\n{BOLD}── Triage arm: {arm} ({len(failed)} discovery failures) ──{RESET}\n")
+
+        def worker(fixture, arm=arm):
+            try:
+                result = run_fixture_discovery(
+                    provider,
+                    client,
+                    fixture,
+                    model,
+                    system_prompt,
+                    int(fixture.get("max_steps", default_max_steps)),
+                    endpoint=endpoint,
+                    arm=arm,
+                )
+            except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
+                result = error_result(fixture, arm, exc)
+            result["_line"] = _render(result)
+            return result
+
+        out[arm] = run_fixtures_concurrently(failed, worker, workers)
+    return out
 
 
 class ConfigError(Exception):
@@ -604,6 +884,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-system-prompt", action="store_true", help="Skip the MCP server system prompt (ad-hoc debugging)"
+    )
+    parser.add_argument(
+        "--triage",
+        action="store_true",
+        help=(
+            "After the discovery pass, re-run ONLY its failures under the isolated and full "
+            "arms, to locate each failure (own description / cross-group collision / discovery layer). "
+            "Advisory: never affects the gate."
+        ),
     )
     # Fixtures are independent and almost entirely LLM-API-bound, so running them
     # concurrently cuts wall-clock roughly linearly. This used to be capped at 4
@@ -792,6 +1081,7 @@ def build_report(
     discovery: list[dict] | None,
     system_prompt_enabled: bool,
     max_steps: int,
+    arm_results: dict[str, list[dict]] | None = None,
 ) -> dict:
     """The JSON report. Pure: no writing, so its shape can be asserted directly."""
     report = {
@@ -812,12 +1102,26 @@ def build_report(
             "results": discovery,
         }
         report["discovery_summary"] = discovery_summary(discovery)
+    # Diagnostic arms sit alongside discovery under the same key, so
+    # compare_runs and the gate — which both read modes["discovery"] by name —
+    # are untouched by their presence.
+    for arm, records in (arm_results or {}).items():
+        report["modes"][arm] = {
+            "passed": sum(1 for r in scored(records) if r["passed"]),
+            "failed": sum(1 for r in scored(records) if not r["passed"]),
+            "skipped": sum(1 for r in records if r.get("skipped")),
+            "results": records,
+        }
     # Per-owning-repo rates, so the report answers "which codebase regressed"
     # without re-deriving attribution downstream. `or []` covers discovery not
     # having run — parse_modes rejects an empty mode list, so that is unreachable
     # via the CLI, but an empty table is the honest answer rather than a crash for
     # a direct caller.
     report["by_tier"] = breakdown(executed(discovery or []))
+    # What this run cost, in dollars and in the volume behind them. Recorded in
+    # the report rather than only printed so cost_drift.py can compare a run
+    # against its predecessor without re-deriving anything.
+    report["cost"] = run_cost(discovery or [], model, load_pricing())
     return report
 
 
@@ -898,6 +1202,23 @@ def run_suite(args) -> int:
         print_single_mode(results_discovery, "discovery")
         print_discovery_block(results_discovery)
 
+    arm_results = {}
+    if args.triage:
+        arm_results = triage_arms(
+            provider,
+            client,
+            results_discovery,
+            fixtures,
+            model,
+            system_prompt,
+            args.max_steps,
+            endpoint=endpoint,
+            workers=args.discovery_concurrency,
+        )
+        for records in arm_results.values():
+            for record in records:
+                record.pop("_line", None)
+
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     output_path = Path(args.output or BASE / "results" / f"eval-{provider}-{ts}.json")
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -910,6 +1231,7 @@ def run_suite(args) -> int:
                 results_discovery,
                 not args.no_system_prompt,
                 args.max_steps,
+                arm_results,
             ),
             indent=2,
         )

@@ -52,6 +52,15 @@ jobs:
         # what CI fails on.
         run: pytest tests -q --cov
 
+      # Static description checks over the committed catalogue snapshot. No
+      # server, no model, no tokens — so unlike the eval workflow this runs on
+      # every push. Advisory by construction: toollint exits 0 whatever it
+      # finds, because the findings are judgements about prose and a build that
+      # goes red over word choice is one people learn to bypass. It lands in the
+      # job summary so the findings are read rather than buried in a log.
+      - name: Tool catalogue lint (advisory)
+        run: python -m toollint --snapshot tool-history/latest.json | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: ShellCheck (shell lint)
         run: |
           shopt -s nullglob globstar
