@@ -208,3 +208,53 @@ def test_store_tools_that_declare_dry_run_are_not_guessed_unsafe():
     misfiled = sorted(declares & TC.UNSAFE)
 
     assert not misfiled, f"these declare dryRun and should move to DRY_RUNNABLE: {misfiled}"
+
+
+# ---------------------------------------------------------------------------
+# The agentic-commerce plugin is isolated in ucp.py
+# ---------------------------------------------------------------------------
+def test_ucp_tools_are_classified_in_their_own_module():
+    """The plugin is optional and may go away. Its specifics live in one file so
+    removing it is deleting that file, not picking entries out of three sets."""
+    import ucp
+
+    assert ucp.all_classified(), "ucp.py must own the plugin's classification"
+    assert ucp.all_classified() <= TC.all_classified(), "and toolclass must merge it in"
+    assert all(t.startswith("shopware-ucp-") for t in ucp.all_classified())
+
+
+def test_toolclass_carries_no_ucp_entries_of_its_own():
+    """The regression this split prevents: a UCP tool added straight into
+    toolclass would survive deleting ucp.py and quietly keep being executed."""
+    import ucp
+
+    for name, own in (("READ_ONLY", TC.READ_ONLY), ("DRY_RUNNABLE", TC.DRY_RUNNABLE), ("UNSAFE", TC.UNSAFE)):
+        strays = {t for t in own if t.startswith("shopware-ucp-")} - ucp.all_classified()
+        assert not strays, f"{name} has UCP tools that ucp.py does not own: {sorted(strays)}"
+
+
+def test_store_api_context_is_core_and_stays_behind():
+    """It rides the Store endpoint but is Shopware core, so dropping the plugin
+    must not take it with them."""
+    import ucp
+
+    assert "shopware-store-api-context" not in ucp.all_classified()
+    assert TC.classify("shopware-store-api-context") == "read_only"
+
+
+def test_the_agent_header_carries_a_quoted_profile_uri():
+    """The SDK reads it with /profile="([^"]+)"/ — an unquoted or absent URI is
+    rejected before the tool runs."""
+    import re
+
+    import ucp
+
+    header = ucp.agent_header("http://shop.example.com/")
+
+    assert re.search(r'profile="([^"]+)"', header).group(1) == "http://shop.example.com/.well-known/ucp"
+
+
+def test_an_explicit_profile_uri_wins():
+    import ucp
+
+    assert 'profile="https://agent.example/p"' in ucp.agent_header("http://shop.test", "https://agent.example/p")

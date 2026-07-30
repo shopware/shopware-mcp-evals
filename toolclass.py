@@ -31,7 +31,13 @@ so that guess is gone and only the three admin tools above remain.
 
 A tool in none of the three sets is not executed either — an unclassified tool
 is loud (tests/test_toolclass.py fails on it) rather than quietly assumed safe.
+
+The agentic-commerce plugin's own tools are classified in `ucp.py` and merged in
+below, so that plugin can be dropped by deleting one file rather than picking
+its entries out of three sets here.
 """
+
+import ucp
 
 # The server declares these by exposing a `dryRun` property. Kept as an explicit
 # list rather than read from the snapshot at runtime so the safety boundary is
@@ -45,17 +51,6 @@ DRY_RUNNABLE = frozenset(
         "shopware-order-state",
         "shopware-system-config-write",
         "shopware-theme-config",
-        # Store API / UCP. Read off the live catalogue rather than guessed: the
-        # plugin added dryRun to exactly its mutating tools, so these move out
-        # of UNSAFE and start being executed, asserted on, and recovered from.
-        "shopware-ucp-cart-cancel",
-        "shopware-ucp-cart-create",
-        "shopware-ucp-cart-update",
-        "shopware-ucp-checkout-cancel",
-        "shopware-ucp-checkout-complete",
-        "shopware-ucp-checkout-create",
-        "shopware-ucp-checkout-update",
-        "shopware-ucp-discount-apply",
     }
 )
 
@@ -90,18 +85,18 @@ READ_ONLY = frozenset(
         "swag-dev-tools-log-search",
         "swag-dev-tools-log-stream",
         "swag-dev-tools-notifications",
-        # Store API / UCP — reads only, safe to call for real.
-        "shopware-ucp-cart-get",
-        "shopware-ucp-catalog-lookup",
-        "shopware-ucp-catalog-search",
-        "shopware-ucp-checkout-get",
-        "shopware-ucp-order-get",
-        # Takes no parameters and returns the sales-channel context. Guessed
-        # unsafe while there was no Store schema to check; the live catalogue
-        # shows it has no arguments at all, so there is nothing to mutate with.
+        # Shopware core despite riding the Store endpoint (see the
+        # `shopware-store-api-` prefix in ownership.py), so it is classified
+        # here rather than in ucp.py and survives that plugin's removal. Takes
+        # no parameters at all, so there is nothing to mutate with.
         "shopware-store-api-context",
     }
 )
+
+# Merged rather than inlined: see the note above about dropping the plugin.
+READ_ONLY |= ucp.READ_ONLY
+DRY_RUNNABLE |= ucp.DRY_RUNNABLE
+UNSAFE |= ucp.UNSAFE
 
 DRY_RUN_KEY = "dryRun"
 

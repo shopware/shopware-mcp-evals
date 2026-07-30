@@ -179,6 +179,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `eval/runner.py` | Discovery-mode LLM eval: finds the tool, executes it, asserts the result, allows recovery |
 | `eval/scoring.py` | Results → counts, rates and the gate verdict. Pure, and what the gate is decided by |
 | `toolclass.py` | **Read before touching execution.** May a tool be called, and how to make it safe (read-only / dry-runnable / unsafe / unclassified) |
+| `ucp.py` | Everything specific to the optional `agentic-commerce` plugin — its tool classification and the `UCP-Agent` header. Isolated so the plugin can be dropped by deleting this file; `toolclass.py` merges it in. `shopware-store-api-context` is core and deliberately stays out of it |
 | `toollint.py` | Layer 0 static description checks; advisory, runs in lint.yml |
 | `eval/assertions.py` | `expect_result` tiers, and the line between a call the server rejected and one that returned nothing |
 | `eval/tool_scorecard.py` | Per-tool recall, **precision**, F1, confusion pairs. The half a pass rate cannot show |

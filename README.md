@@ -67,6 +67,7 @@ tool's own description, a cross-group collision, or the discovery layer.
 ├── mcp_client.py          # shared MCP HTTP helpers (admin + store endpoints)
 ├── ownership.py           # tool name → owning repository, and what a failure there costs
 ├── toolclass.py           # Layer 0/2: may a tool be executed, and how to make it safe
+├── ucp.py                 # optional agentic-commerce plugin, isolated so it can be deleted whole
 ├── toollint.py            # Layer 0: static description checks over the catalogue snapshot
 ├── pricing.yaml           # $/1M per model, hand-maintained with a verified date
 ├── functional/
