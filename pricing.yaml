@@ -50,6 +50,19 @@ models:
     output: 0.0
     cached_input: 0.0
 
+  # A model running on the developer's own machine via LM Studio. Genuinely
+  # free, so 0.0 is the true rate and not a placeholder — the run renders
+  # $0.00 rather than "unpriced", which is the honest reading.
+  #
+  # The name is what PROVIDER_DEFAULTS resolves for --provider lmstudio when no
+  # --model is given. A real local model name (qwen/qwen3.6-35b-a3b and the
+  # like) has no entry and will render "unpriced", which is also honest: nothing
+  # here knows it is free.
+  local-model:
+    input: 0.0
+    output: 0.0
+    cached_input: 0.0
+
 ci:
   # GitHub-hosted Linux runners are free on public repositories. Set the real
   # per-minute rate here if this repo is billed, so the summary's headline

@@ -64,7 +64,10 @@ jobs:
       - name: ShellCheck (shell lint)
         run: |
           shopt -s nullglob globstar
-          scripts=(functional/**/*.sh)
+          # Both trees. scripts/ was added later and was silently outside the
+          # glob, so the one shell script anybody runs by hand was the one not
+          # being linted.
+          scripts=(functional/**/*.sh scripts/**/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts to lint."
           else

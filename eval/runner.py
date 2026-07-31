@@ -93,6 +93,21 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_MODELS_BASE_URL = "https://models.github.ai/inference"
 
+# LM Studio: an OpenAI-compatible server on the developer's own machine. Same
+# adapter and the same turn function as `openai` and `github` — only the base URL
+# and the credential differ, which is the pattern `github` already proved.
+#
+# It exists so the whole suite can be exercised against the trunk lane for free
+# before anything reaches CI. The models are weaker than the CI ones and the
+# numbers are not comparable to them; what it validates is the harness — fixtures
+# load, tools resolve, assertions fire, the report renders — which is most of
+# what breaks.
+#
+# The key is required by the SDK and ignored by the server, so it defaults to a
+# placeholder rather than making everyone invent one.
+LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
+LMSTUDIO_API_KEY = os.environ.get("LMSTUDIO_API_KEY", "lm-studio")
+
 # ---------------------------------------------------------------------------
 # Provider adapters
 # ---------------------------------------------------------------------------
@@ -637,6 +652,11 @@ PROVIDER_DEFAULTS = {
     # being an independent implementation, so it catches tool-description
     # problems that are specific to one vendor's function-calling behaviour.
     "github": "mistral-ai/mistral-medium-2505",
+    # Whatever LM Studio has loaded. Overridden with --model or EVAL_MODEL; the
+    # server serves its loaded model regardless of the name asked for, so this is
+    # a label rather than a selector — and it is the label pricing.yaml prices at
+    # zero, because a model on your own machine genuinely is free.
+    "lmstudio": "local-model",
 }
 
 
@@ -957,9 +977,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner (v2 discovery)")
     parser.add_argument(
         "--provider",
-        choices=["anthropic", "openai", "github"],
+        choices=["anthropic", "openai", "github", "lmstudio"],
         default=os.environ.get("EVAL_PROVIDER", "anthropic"),
-        help="anthropic | openai | github (GitHub Models: free, OpenAI-compatible, auth via GITHUB_TOKEN)",
+        help=(
+            "anthropic | openai | github (GitHub Models: free, OpenAI-compatible, auth via GITHUB_TOKEN) "
+            "| lmstudio (a local OpenAI-compatible server; free, for validating the harness before CI)"
+        ),
     )
     parser.add_argument("--model", default=None)
     # Kept as a flag rather than deleted so existing invocations and the docs'
@@ -1116,6 +1139,9 @@ def require_credentials(provider: str, endpoint_name: str) -> tuple[str, str]:
         "anthropic": ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
         "openai": ("OPENAI_API_KEY", OPENAI_API_KEY),
         "github": ("GITHUB_TOKEN", GITHUB_TOKEN),
+        # Never empty, so the check below cannot fail on a server that wants no
+        # credential at all.
+        "lmstudio": ("LMSTUDIO_API_KEY", LMSTUDIO_API_KEY),
     }[provider]
     required.append(credential)
     missing = [var for var, val in required if not val]
@@ -1135,10 +1161,8 @@ def build_client(provider: str, credential: tuple[str, str]):
 
     # GitHub Models speaks the OpenAI wire format, so the same adapter and turn
     # function work — only the base URL and credential differ.
-    return OpenAI(
-        api_key=credential[1],
-        base_url=GITHUB_MODELS_BASE_URL if provider == "github" else None,
-    )
+    base_url = {"github": GITHUB_MODELS_BASE_URL, "lmstudio": LMSTUDIO_BASE_URL}.get(provider)
+    return OpenAI(api_key=credential[1], base_url=base_url)
 
 
 def fixtures_path_for(endpoint_name: str, override: str | None) -> Path:

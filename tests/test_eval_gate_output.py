@@ -211,3 +211,43 @@ def test_context_prompt_reports_the_inventory_it_fetched(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "20 chars from 2" in out
     assert "shopware-context" in out
+
+
+def test_lmstudio_points_at_the_local_server(monkeypatch):
+    """Same adapter and turn function as openai/github — only the base URL and
+    credential differ, which is the pattern the github provider already proved."""
+    captured = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+    monkeypatch.setitem(__import__("sys").modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    E.build_client("lmstudio", ("LMSTUDIO_API_KEY", "lm-studio"))
+
+    assert captured == {"api_key": "lm-studio", "base_url": E.LMSTUDIO_BASE_URL}
+
+
+def test_lmstudio_needs_no_real_credential(monkeypatch):
+    """A local server wants no key, but the SDK requires one and
+    require_credentials rejects an empty string. Defaulting it keeps a free local
+    run from failing on a secret that does not exist."""
+    monkeypatch.setattr(E, "SW_BASE_URL", "http://x")
+    monkeypatch.setattr(E, "SW_SC_ACCESS_KEY", "k")
+
+    name, value = E.require_credentials("lmstudio", "store")
+
+    assert name == "LMSTUDIO_API_KEY"
+    assert value, "an empty default would make every local run fail on credentials"
+
+
+def test_the_local_model_is_priced_at_zero_not_left_unpriced():
+    """It genuinely is free, so $0.00 is the true rate. "unpriced" would read as
+    unknown cost and put the run in the incomplete bucket."""
+    from eval.cost import load_pricing, prices_for
+
+    prices = prices_for(E.PROVIDER_DEFAULTS["lmstudio"], load_pricing())
+
+    assert prices is not None
+    assert prices["input"] == 0.0 and prices["output"] == 0.0

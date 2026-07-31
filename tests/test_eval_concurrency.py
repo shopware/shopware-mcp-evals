@@ -115,7 +115,24 @@ def test_github_provider_defaults_to_a_non_openai_publisher():
 
 
 def test_every_provider_choice_has_a_default_model():
-    assert set(E.PROVIDER_DEFAULTS) == {"anthropic", "openai", "github"}
+    """The invariant, not a hardcoded list: argparse accepts a provider, then
+    resolve_model indexes PROVIDER_DEFAULTS by it. A choice with no entry is a
+    KeyError after the run has already started — which is exactly how `lmstudio`
+    first failed, having been added to the choices and not to the defaults."""
+    choices = next(a.choices for a in E.build_parser()._actions if a.dest == "provider")
+
+    assert set(choices) == set(E.PROVIDER_DEFAULTS)
+
+
+def test_every_default_model_is_priced():
+    """An unpriced model reports "unpriced" rather than a cost, which quietly
+    turns the job total into an estimate. Free is a price; unknown is not."""
+    from eval.cost import load_pricing, prices_for
+
+    pricing = load_pricing()
+    unpriced = [m for m in E.PROVIDER_DEFAULTS.values() if prices_for(m, pricing) is None]
+
+    assert not unpriced, f"no pricing.yaml entry for {unpriced}"
 
 
 def test_render_marks_pass_fail_skip():
