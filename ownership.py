@@ -60,6 +60,35 @@ TIER_ORDER = (DISCOVERY, "core", "dev-tools", "merchant-tools", "agentic-commerc
 # workflow and the summary agree on what "optional" means.
 OPTIONAL = frozenset({"merchant-tools", "agentic-commerce"})
 
+# Context-prompt sets, named after the installations they mirror.
+#
+# Every area ships its own MCP prompt — core `shopware-context`, merchant-tools
+# `merchant-context`, dev-tools two more — and the runner used to send all of
+# them to every fixture. So a merchant-tools fixture carried 5,615 characters of
+# dev-tools instructions naming tools it must not pick, which is a plausible
+# cause of wrong-tool picks that reads as a description problem.
+#
+# These sets are deliberately real deployments rather than one-prompt-per-area
+# isolation: a shop has whichever plugins it has, so a number measured here
+# transfers to somebody's actual install. Comparing an area's rate across two
+# sets that both contain it — `core+merchant` against `all` — answers "does an
+# irrelevant prompt hurt" as a side effect, without inventing a configuration
+# nobody runs.
+#
+# CORE is in every non-empty set on purpose. `shopware-context` carries the
+# discovery procedure ("call shopware-toolsets-list, then enable"), without which
+# no area is reachable at all — withholding it would make every arm fail for a
+# reason unrelated to the prompt under test.
+PROMPT_SETS: dict[str, frozenset[str] | None] = {
+    "none": frozenset(),
+    "core": frozenset({CORE}),
+    "core+merchant": frozenset({CORE, "merchant-tools"}),
+    "core+dev-tools": frozenset({CORE, "dev-tools"}),
+    # None means "whatever the server serves", which is what a fully-installed
+    # shop gives a client.
+    "all": None,
+}
+
 
 def owner_of(tool: str | None) -> str:
     """Owning repository for a tool name, or UNKNOWN if no prefix matches.

@@ -61,11 +61,14 @@ def test_the_report_carries_the_inventory_not_just_the_flag():
 
 
 def _report(model, enabled, chars, names, passed, failed, server="http://x"):
+    inventory = {"names": names, "chars": {}, "total_chars": chars}
+    if not enabled:
+        inventory["disabled"] = True
     return {
         "server": server,
         "model": model,
         "system_prompt": enabled,
-        "context_prompt": {"names": names, "chars": {}, "total_chars": chars},
+        "context_prompt": inventory,
         "modes": {"discovery": {"passed": passed, "failed": failed}},
     }
 
@@ -147,3 +150,120 @@ def test_the_delta_never_pairs_across_endpoints():
 
     assert out.count("characters of context prompt moved") == 1
     assert "+19 points" in out
+
+
+# ---------------------------------------------------------------------------
+# Prompt sets: which prompts a run actually sends
+# ---------------------------------------------------------------------------
+def test_core_is_in_every_non_empty_set():
+    """`shopware-context` carries the discovery procedure — "call
+    shopware-toolsets-list, then enable" — without which no area is reachable at
+    all. An arm missing it would fail for a reason unrelated to the prompt under
+    test."""
+    from ownership import CORE, PROMPT_SETS
+
+    for name, owners in PROMPT_SETS.items():
+        if name in ("none", "all"):
+            continue
+        assert CORE in owners, f"{name} would withhold the discovery procedure"
+
+
+def test_all_means_whatever_the_server_serves():
+    """A fully installed shop, not a hardcoded list that goes stale when a plugin
+    adds a prompt."""
+    from ownership import PROMPT_SETS
+
+    assert PROMPT_SETS["all"] is None
+    assert PROMPT_SETS["none"] == frozenset()
+
+
+def test_every_set_is_a_real_installation():
+    """These are deployments somebody runs, not one-prompt-per-area isolation. A
+    number measured under `core` transfers to vanilla Shopware; a number measured
+    under a configuration nobody has transfers nowhere."""
+    from ownership import PROMPT_SETS
+
+    assert set(PROMPT_SETS) == {"none", "core", "core+merchant", "core+dev-tools", "all"}
+
+
+def test_prompt_names_attribute_the_same_way_tool_names_do():
+    """Reused deliberately: a prompt and the tools it describes can never end up
+    in different areas if one rule maps both."""
+    from ownership import owner_of
+
+    assert owner_of("shopware-context") == "core"
+    assert owner_of("merchant-context") == "merchant-tools"
+    assert owner_of("swag-dev-tools-suggest-tooling") == "dev-tools"
+
+
+def _entry(prompt_set, by_tier):
+    return {
+        "server": "http://x",
+        "model": "m",
+        "enabled": True,
+        "chars": 100,
+        "names": ["p"],
+        "set": prompt_set,
+        "rate": 0.5,
+        "by_tier": by_tier,
+    }
+
+
+def test_the_per_area_table_shows_each_area_under_each_set():
+    """The question the sets exist to answer: does merchant-tools do worse when
+    it also carries dev-tools instructions naming tools it must not pick?"""
+    lines = summary._contamination_table(
+        [
+            _entry("core+merchant", {"merchant-tools": {"rate": 0.9, "total": 27}}),
+            _entry("all", {"merchant-tools": {"rate": 0.7, "total": 27}}),
+        ]
+    )
+    out = "\n".join(lines)
+
+    assert "merchant-tools" in out
+    assert "90%" in out and "70%" in out
+
+
+def test_the_per_area_table_needs_at_least_two_sets_to_compare():
+    assert summary._contamination_table([_entry("all", {"core": {"rate": 1.0, "total": 3}})]) == []
+
+
+def test_an_area_absent_from_a_set_renders_a_gap_not_a_zero():
+    """A tier with no fixtures under one set has no rate — printing 0% would read
+    as a total failure rather than as an absence."""
+    lines = summary._contamination_table(
+        [
+            _entry("core", {"core": {"rate": 1.0, "total": 42}}),
+            _entry("all", {"core": {"rate": 0.9, "total": 42}, "dev-tools": {"rate": 0.8, "total": 21}}),
+        ]
+    )
+    out = "\n".join(lines)
+
+    assert "—" in out
+
+
+def test_an_endpoint_serving_nothing_is_not_labelled_as_disabled():
+    """A store run took everything the server offered; the server offered
+    nothing. That is the endpoint's problem, and labelling it `none` — the label
+    for an arm we switched off — excluded it from the note that reports it."""
+    out = summary.render_prompt_delta(
+        [
+            _report("m", True, 20606, ["shopware-context"], 84, 16, server="http://admin"),
+            _report("m", True, 460, [], 13, 87, server="http://store"),
+        ]
+    )
+
+    assert "`all`" in out and "`none`" not in out
+    assert "no context prompt at all" in out
+
+
+def test_a_deliberately_disabled_arm_does_not_trigger_the_endpoint_warning():
+    """The control arm is not evidence that an endpoint ships nothing."""
+    out = summary.render_prompt_delta(
+        [
+            _report("m", True, 20606, ["shopware-context"], 84, 16),
+            _report("m", False, 0, [], 65, 35),
+        ]
+    )
+
+    assert "no context prompt at all" not in out

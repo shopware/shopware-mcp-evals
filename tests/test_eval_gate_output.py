@@ -182,7 +182,7 @@ def test_context_prompt_can_be_disabled_for_debugging(monkeypatch, capsys):
     # "the server served nothing" are different facts, and the store endpoint
     # genuinely is the second one.
     assert inventory["disabled"] is True
-    assert "disabled (--no-system-prompt)" in capsys.readouterr().out
+    assert "Context prompt: none" in capsys.readouterr().out
 
 
 def test_context_prompt_reports_the_inventory_it_fetched(monkeypatch, capsys):
@@ -194,7 +194,13 @@ def test_context_prompt_reports_the_inventory_it_fetched(monkeypatch, capsys):
         "mcp_fetch_context_prompts",
         lambda *_a, **_k: (
             "# One\nbody\n# Two\nbody",
-            {"names": ["shopware-context", "merchant-context"], "chars": {}, "total_chars": 20, "sha256": "abc"},
+            {
+                "names": ["shopware-context", "merchant-context"],
+                "chars": {},
+                "total_chars": 20,
+                "sha256": "abc",
+                "excluded": [],
+            },
         ),
     )
 
@@ -203,5 +209,5 @@ def test_context_prompt_reports_the_inventory_it_fetched(monkeypatch, capsys):
     assert prompt.startswith("# One")
     assert inventory["names"] == ["shopware-context", "merchant-context"]
     out = capsys.readouterr().out
-    assert "20 chars from 2 prompt(s)" in out
+    assert "20 chars from 2" in out
     assert "shopware-context" in out

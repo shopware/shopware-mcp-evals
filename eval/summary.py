@@ -689,26 +689,32 @@ def render_prompt_delta(reports: list[dict]) -> str:
         if not inventory:
             continue
         rate = _discovery_rate(report)
-        key = f"{report.get('server', '?')}|{report.get('model', '?')}|{bool(report.get('system_prompt'))}"
+        # `disabled`, not "has no names": a store run took everything the server
+        # offered and the server offered nothing, which is `all` — the endpoint's
+        # problem, not the arm's. Deriving from emptiness labelled it `none` and
+        # then excluded it from the very note that exists to report it.
+        prompt_set = inventory.get("set") or ("none" if inventory.get("disabled") else "all")
+        key = f"{report.get('server', '?')}|{report.get('model', '?')}|{prompt_set}"
         seen[key] = {
             "server": report.get("server", "?"),
             "model": report.get("model", "?"),
             "enabled": bool(report.get("system_prompt")),
             "chars": inventory.get("total_chars", 0),
             "names": inventory.get("names", []),
+            "set": prompt_set,
             "rate": rate,
+            "by_tier": report.get("by_tier") or {},
         }
     if not seen:
         return ""
 
-    lines = ["### Context prompt", "", "| Model | Prompt | Chars | Prompts | Pass rate |", "|---|---|---:|---|---:|"]
-    for entry in seen.values():
+    lines = ["### Context prompt", "", "| Model | Set | Chars | Prompts | Pass rate |", "|---|---|---:|---|---:|"]
+    for entry in sorted(seen.values(), key=lambda e: -e["chars"]):
         names = ", ".join(f"`{n}`" for n in entry["names"]) or "_none_"
         rate = "—" if entry["rate"] is None else f"{round(100 * entry['rate'])}%"
-        lines.append(
-            f"| `{entry['model']}` | {'on' if entry['enabled'] else 'off'} | {entry['chars']:,} | {names} | {rate} |"
-        )
+        lines.append(f"| `{entry['model']}` | `{entry['set']}` | {entry['chars']:,} | {names} | {rate} |")
     lines.append("")
+    lines += _contamination_table(list(seen.values()))
 
     for note in _prompt_notes(list(seen.values())):
         lines += [note, ""]
@@ -744,10 +750,49 @@ def _prompt_notes(entries: list[dict]) -> list[str]:
         notes.append(
             f"**{on['chars']:,} characters of context prompt moved `{on['model']}` by {delta:+d} points — {verdict}.**"
         )
-    if any(e["chars"] == 0 or not e["names"] for e in entries) and any(e["names"] for e in entries):
+    # An arm we deliberately ran with `--context-prompts none` is not an endpoint
+    # that ships nothing — it is the control. Counting it here claimed the store
+    # endpoint's problem existed on admin too.
+    served = [e for e in entries if e["set"] != "none"]
+    if any(not e["names"] for e in served) and any(e["names"] for e in served):
         notes.append(
             "One endpoint ships **no context prompt at all** while another ships several. Their pass rates are "
             "not comparable: a model working the bare endpoint is being asked to do the same job with a fraction "
             "of the guidance."
         )
     return notes
+
+
+def _contamination_table(entries: list[dict]) -> list[str]:
+    """Each area's rate under every prompt set that contained its prompt.
+
+    This is the question the sets exist to answer. A merchant-tools fixture under
+    `core+merchant` carries the prompts it needs; under `all` it additionally
+    carries 5,615 characters of dev-tools instructions naming tools it must not
+    pick. If the rate drops between the two, the extra prompt is not neutral —
+    and that failure currently shows up in the scorecard as a description
+    problem, attributed to the wrong thing entirely.
+    """
+    by_set = {e["set"]: e for e in entries if e["set"] != "none"}
+    if len(by_set) < 2:
+        return []
+
+    areas = sorted({area for e in by_set.values() for area in e["by_tier"]})
+    if not areas:
+        return []
+
+    sets = sorted(by_set)
+    lines = [
+        "<details><summary>Per-area rate by prompt set</summary>",
+        "",
+        "| Area | " + " | ".join(f"`{s}`" for s in sets) + " |",
+        "|---" * (len(sets) + 1) + "|",
+    ]
+    for area in areas:
+        cells = []
+        for name in sets:
+            tier = by_set[name]["by_tier"].get(area)
+            cells.append(f"{round(100 * tier['rate'])}%" if tier and tier.get("total") else "—")
+        lines.append(f"| {area} | " + " | ".join(cells) + " |")
+    lines += ["", "</details>", ""]
+    return lines

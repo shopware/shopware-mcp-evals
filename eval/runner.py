@@ -81,7 +81,7 @@ from mcp_client import (
     mcp_result_text,
     mcp_tools_list_all,
 )
-from ownership import CORE, breakdown, owner_of
+from ownership import CORE, PROMPT_SETS, breakdown, owner_of
 from toolclass import classify, is_executable, prepare_call
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -971,8 +971,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=6,
         help="Max assistant turns in discovery mode (per-fixture max_steps overrides)",
     )
+    parser.add_argument("--no-system-prompt", action="store_true", help="Alias for --context-prompts none")
     parser.add_argument(
-        "--no-system-prompt", action="store_true", help="Skip the MCP server system prompt (ad-hoc debugging)"
+        "--context-prompts",
+        choices=sorted(PROMPT_SETS),
+        default="all",
+        help=(
+            "Which of the server's MCP context prompts to send, named after the installation each "
+            "mirrors. Every area ships its own, and sending all of them to every fixture puts "
+            "instructions naming another area's tools in front of the model. `all` is a fully "
+            "installed shop; `core` is vanilla Shopware. Core is always included — it carries the "
+            "discovery procedure, without which nothing is reachable."
+        ),
     )
     parser.add_argument(
         "--tool-health",
@@ -1148,7 +1158,7 @@ def load_fixtures(path: Path, category: str | None = None, fixture_id: str | Non
     return fixtures
 
 
-def fetch_system_prompt(endpoint, enabled: bool = True) -> tuple[str | None, dict]:
+def fetch_system_prompt(endpoint, enabled: bool = True, prompt_set: str = "all") -> tuple[str | None, dict]:
     """The server's instructions plus its context prompts, and what they were.
 
     Returns (prompt, inventory). The inventory travels into the report because a
@@ -1156,13 +1166,18 @@ def fetch_system_prompt(endpoint, enabled: bool = True) -> tuple[str | None, dic
     totalling ~20k characters and store serves none, so the two endpoints' pass
     rates were never comparable and nothing recorded why.
     """
-    if not enabled:
-        print("Context prompt: disabled (--no-system-prompt)")
-        return None, {"names": [], "chars": {}, "total_chars": 0, "disabled": True}
+    if not enabled or prompt_set == "none":
+        print("Context prompt: none")
+        return None, {"names": [], "chars": {}, "total_chars": 0, "set": "none", "disabled": True}
     session_id, server_instructions = mcp_init(endpoint=endpoint)
-    prompt, inventory = mcp_fetch_context_prompts(session_id, server_instructions, endpoint=endpoint)
+    prompt, inventory = mcp_fetch_context_prompts(
+        session_id, server_instructions, endpoint=endpoint, owners=PROMPT_SETS[prompt_set]
+    )
+    inventory["set"] = prompt_set
     named = ", ".join(inventory["names"]) or "none"
-    print(f"Context prompt: {inventory['total_chars']} chars from {len(inventory['names'])} prompt(s): {named}")
+    print(f"Context prompt [{prompt_set}]: {inventory['total_chars']} chars from {len(inventory['names'])}: {named}")
+    if inventory["excluded"]:
+        print(f"  withheld ({len(inventory['excluded'])}): {', '.join(inventory['excluded'])}")
     return prompt, inventory
 
 
@@ -1289,7 +1304,9 @@ def run_suite(args) -> int:
     print(f"Fixtures: {len(fixtures)}")
 
     print("\nInitializing MCP session for system prompt...")
-    system_prompt, prompt_inventory = fetch_system_prompt(endpoint, enabled=not args.no_system_prompt)
+    system_prompt, prompt_inventory = fetch_system_prompt(
+        endpoint, enabled=not args.no_system_prompt, prompt_set=args.context_prompts
+    )
 
     available_tools = probe_catalogue(endpoint)
     # `.get()`: a negative fixture names no tool, so there is nothing that could

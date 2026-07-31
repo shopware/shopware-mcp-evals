@@ -674,12 +674,29 @@ jobs:
           # Admin only. The store endpoint serves no context prompt at all (460
           # chars of server instructions against admin's 20,606), so an arm there
           # would compare a run with nothing to a run with nothing.
-          python -m eval.runner --no-system-prompt "${args[@]}" \
+          python -m eval.runner --context-prompts none "${args[@]}" \
             --output "results/eval-no-prompt.json" \
             --summary-row "results/rows/4-admin-noprompt.json" \
             --suite-label "admin · no context prompt" \
             --advisory > noprompt.log 2>&1 &
           pid_noprompt=$!
+
+          # Fourth arm: vanilla Shopware. Only core's prompt, which is what a shop
+          # with no MCP plugins installed actually serves.
+          #
+          # Together with `all` above this answers the question the single
+          # all-or-nothing comparison could not: every fixture currently carries
+          # every area's prompt, so a merchant-tools fixture arrives with 5,615
+          # characters of dev-tools instructions naming tools it must not pick.
+          # If an area scores better under the narrower set, that prompt is not
+          # neutral — and today that shows up in the scorecard as a description
+          # problem, attributed to entirely the wrong thing.
+          python -m eval.runner --context-prompts core "${args[@]}" \
+            --output "results/eval-core-prompt.json" \
+            --summary-row "results/rows/5-admin-coreprompt.json" \
+            --suite-label "admin · core prompt only" \
+            --advisory > coreprompt.log 2>&1 &
+          pid_coreprompt=$!
 
           # `|| rc=$?`, not `wait; rc=$?`. GitHub runs this with `bash -e`, which
           # the script's own `set -uo pipefail` does not undo, and a failing
@@ -694,6 +711,7 @@ jobs:
           # reaches `failed`. A prompt-off arm scoring worse is the expected
           # result, not a broken build.
           rc_noprompt=0; wait "${pid_noprompt}" || rc_noprompt=$?
+          rc_coreprompt=0; wait "${pid_coreprompt}" || rc_coreprompt=$?
 
           echo "::group::admin · primary (exit ${rc_primary})"
           cat primary.log
@@ -703,6 +721,9 @@ jobs:
           echo "::endgroup::"
           echo "::group::admin · no context prompt (advisory, exit ${rc_noprompt})"
           cat noprompt.log
+          echo "::endgroup::"
+          echo "::group::admin · core prompt only (advisory, exit ${rc_coreprompt})"
+          cat coreprompt.log
           echo "::endgroup::"
 
           echo "primary_exit=${rc_primary}" >> "$GITHUB_OUTPUT"
@@ -1074,6 +1095,7 @@ jobs:
             --reports "results/eval-primary.json" \
                       "results/eval-second-validator.json" \
                       "results/eval-no-prompt.json" \
+                      "results/eval-core-prompt.json" \
                       "results/eval-store.json"
 
       # Advisory, and non-gating by construction — cost_drift always exits 0.

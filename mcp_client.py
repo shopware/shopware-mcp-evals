@@ -29,6 +29,7 @@ from pathlib import Path
 import requests
 
 import ucp
+from ownership import owner_of
 
 # The MCP endpoint throttles bursts (HTTP 429). Retry a bounded number of times,
 # honoring the server's advertised wait, so a functional run pacing ~100 calls
@@ -362,7 +363,7 @@ def mcp_fetch_system_prompt(session_id: str, server_instructions: str, endpoint:
 
 
 def mcp_fetch_context_prompts(
-    session_id: str, server_instructions: str, endpoint: Endpoint = ADMIN
+    session_id: str, server_instructions: str, endpoint: Endpoint = ADMIN, owners: frozenset[str] | None = None
 ) -> tuple[str, dict]:
     """The context prompt, plus an inventory of what went into it.
 
@@ -376,7 +377,16 @@ def mcp_fetch_context_prompts(
     "sha256": "..."}). The digest is there so two runs can be told apart when the
     prompt *content* changes — a boolean cannot.
     """
-    inventory: dict = {"names": [], "chars": {}, "instructions_chars": len(server_instructions or "")}
+    inventory: dict = {
+        "names": [],
+        "chars": {},
+        "instructions_chars": len(server_instructions or ""),
+        # What the server offered, as distinct from what we took. Without this a
+        # narrowed run is indistinguishable from an endpoint that ships nothing —
+        # and the store endpoint really does ship nothing.
+        "available": [],
+        "excluded": [],
+    }
     try:
         result = _rpc_json("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint).get("result", {})
     except requests.HTTPError as exc:
@@ -390,7 +400,13 @@ def mcp_fetch_context_prompts(
     if server_instructions:
         parts.append(server_instructions.strip())
 
+    inventory["available"] = list(prompt_names)
     for name in prompt_names:
+        # Attribution by the same prefix rule that maps tools to owners, so a
+        # prompt and the tools it describes can never end up in different areas.
+        if owners is not None and owner_of(name) not in owners:
+            inventory["excluded"].append(name)
+            continue
         result = _rpc_json("prompts/get", {"name": name}, session_id, rpc_id=4, endpoint=endpoint).get("result", {})
         messages = result.get("messages", [])
         collected = 0
