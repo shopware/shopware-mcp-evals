@@ -267,3 +267,47 @@ def test_a_deliberately_disabled_arm_does_not_trigger_the_endpoint_warning():
     )
 
     assert "no context prompt at all" not in out
+
+
+def test_a_local_run_records_the_model_that_actually_answered(monkeypatch):
+    """LM Studio serves whatever is loaded and ignores the name in the request,
+    so a hardcoded label puts "local-model" in the report where the reader needs
+    to know it was qwen/qwen3.6-35b-a3b. Embedding models share the list and
+    cannot answer a chat request, so they are filtered out."""
+
+    class FakeResponse:
+        @staticmethod
+        def json():
+            return {"data": [{"id": "text-embedding-nomic-embed-text-v1.5"}, {"id": "qwen/qwen3.6-35b-a3b"}]}
+
+    monkeypatch.setattr(runner.requests, "get", lambda *_a, **_k: FakeResponse())
+
+    assert runner.resolve_model("lmstudio", None) == "qwen/qwen3.6-35b-a3b"
+
+
+def test_an_unreachable_local_server_falls_back_to_the_label(monkeypatch):
+    """The run fails immediately afterwards anyway; failing here would hide why."""
+    monkeypatch.setattr(
+        runner.requests, "get", lambda *_a, **_k: (_ for _ in ()).throw(runner.requests.RequestException("down"))
+    )
+
+    assert runner.resolve_model("lmstudio", None) == runner.PROVIDER_DEFAULTS["lmstudio"]
+
+
+def test_a_local_run_is_free_whatever_model_it_loaded():
+    """Priced by provider, not model name: the served model is discovered at
+    runtime and can never be enumerated in pricing.yaml. Rendering it "unpriced"
+    would drag the job total into the incomplete bucket for a run that genuinely
+    cost nothing."""
+    from eval.cost import load_pricing, run_cost
+
+    cost = run_cost([{"passed": True, "tokens": {"input": 10, "output": 2}}], "qwen/qwen3.6-35b-a3b", load_pricing())
+    local = run_cost(
+        [{"passed": True, "tokens": {"input": 10, "output": 2}}],
+        "qwen/qwen3.6-35b-a3b",
+        load_pricing(),
+        provider="lmstudio",
+    )
+
+    assert cost["priced"] is False, "an unknown model name is unpriced without the provider hint"
+    assert local["priced"] is True and local["total_usd"] == 0.0

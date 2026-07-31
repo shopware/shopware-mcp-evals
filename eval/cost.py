@@ -43,6 +43,9 @@ def load_pricing(path: str | Path | None = None) -> dict:
         return {}
 
 
+ZERO_PRICES = {"input": 0.0, "output": 0.0, "cached_input": 0.0}
+
+
 def prices_for(model: str, pricing: dict) -> dict | None:
     return (pricing.get("models") or {}).get(model)
 
@@ -86,17 +89,29 @@ def _series(results: list[dict], key: str) -> list[float]:
     return [r[key] for r in results or [] if r.get(key) is not None]
 
 
-def run_cost(results: list[dict], model: str, pricing: dict) -> dict:
+# Providers that bill nothing because the model runs on the machine doing the
+# asking. Keyed by provider rather than model name: a local server serves
+# whatever is loaded, so the model name is discovered at runtime and can never be
+# enumerated in pricing.yaml ahead of time.
+FREE_PROVIDERS = frozenset({"lmstudio"})
+
+
+def run_cost(results: list[dict], model: str, pricing: dict, provider: str | None = None) -> dict:
     """Cost and volume for one run.
 
     `priced` is False when the model has no entry in the table — the caller
     renders that as an explicit gap. Reporting $0.00 instead would be a lie that
     looks like good news.
+
+    A local provider is the one case where $0.00 is the truth rather than a gap,
+    and it has to be decided by provider: the run records the model LM Studio
+    actually served (`qwen/qwen3.6-35b-a3b`), which is the honest thing to report
+    and is never going to appear in a price table.
     """
     graded = [r for r in results or [] if not r.get("skipped")]
     passed = [r for r in graded if r.get("passed")]
     tokens = token_totals(results)
-    prices = prices_for(model, pricing)
+    prices = ZERO_PRICES if provider in FREE_PROVIDERS else prices_for(model, pricing)
 
     total = cost_usd(tokens, prices) if prices else None
     return {

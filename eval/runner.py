@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 
+import requests
 import yaml
 
 from eval.assertions import check
@@ -700,7 +701,7 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
         # The row is what the consolidated summary renders from, so the cost has
         # to travel with it — otherwise the summary would have to re-read every
         # full report just to add one column.
-        "cost": run_cost(graded, model, load_pricing()),
+        "cost": run_cost(graded, model, load_pricing(), provider),
     }
 
     # Also on stdout: the job summary now only appears once every eval has run,
@@ -1115,13 +1116,35 @@ def parse_modes(spec: str) -> list[str]:
     return modes
 
 
+def lmstudio_model() -> str:
+    """The model LM Studio currently has loaded.
+
+    Asked at runtime because a local server serves whatever is loaded and ignores
+    the name in the request — so a hardcoded label would put "local-model" in the
+    report where the reader needs "qwen/qwen3.6-35b-a3b". Falls back to the label
+    if the server is unreachable; the run will fail immediately afterwards
+    anyway, and failing here would hide why.
+    """
+    try:
+        models = requests.get(f"{LMSTUDIO_BASE_URL.rstrip('/')}/models", timeout=5).json().get("data", [])
+    except requests.RequestException, ValueError:
+        return PROVIDER_DEFAULTS["lmstudio"]
+    # Embedding models sit in the same list and cannot answer a chat request.
+    chat = [m.get("id", "") for m in models if "embed" not in m.get("id", "")]
+    return chat[0] if chat else PROVIDER_DEFAULTS["lmstudio"]
+
+
 def resolve_model(provider: str, requested: str | None) -> str:
     """CLI flag wins, then EVAL_MODEL, then the provider default.
 
     PROVIDER_DEFAULTS is what CI resolves the gating model to, so changing that
     constant changes which model gates.
     """
-    return requested or os.environ.get("EVAL_MODEL") or PROVIDER_DEFAULTS[provider]
+    if explicit := (requested or os.environ.get("EVAL_MODEL")):
+        return explicit
+    if provider == "lmstudio":
+        return lmstudio_model()
+    return PROVIDER_DEFAULTS[provider]
 
 
 def require_credentials(provider: str, endpoint_name: str) -> tuple[str, str]:
@@ -1276,7 +1299,7 @@ def build_report(
     # What this run cost, in dollars and in the volume behind them. Recorded in
     # the report rather than only printed so cost_drift.py can compare a run
     # against its predecessor without re-deriving anything.
-    report["cost"] = run_cost(discovery or [], model, load_pricing())
+    report["cost"] = run_cost(discovery or [], model, load_pricing(), provider)
     return report
 
 
