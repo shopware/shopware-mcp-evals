@@ -1,0 +1,520 @@
+name: Set up an MCP eval lane
+description: >-
+  Install Shopware with the MCP bundle and plugins, seed it, start it, and hand
+  back the credentials an eval needs. Everything up to "a live lane you can call".
+
+# Extracted so several jobs can each build their own lane. The alternative was
+# one job doing everything, which had two costs that were paid daily: a single
+# failing admin fixture short-circuited every later step, so the Store suite
+# reported `skipped` and read exactly like "the plugin is missing"; and one job
+# meant one ~1 MiB summary, which GitHub silently discards when a run goes badly.
+#
+# The lane cannot be cached or handed between jobs — it is a live MySQL plus a
+# daemonised web server, and the plugin repos track their default branches, so a
+# cache key over this repo's SHA would go stale without saying so. Each job
+# therefore pays ~140s to build its own. They run in parallel, so wall clock is
+# roughly unchanged; what it buys is isolation, independent re-runs, and a
+# summary per job instead of one that vanishes.
+
+inputs:
+  shopware_repo:
+    description: Repository to install Shopware from.
+    default: shopware/shopware
+  shopware_ref:
+    description: 'Ref to install. Empty: trunk on a schedule, else pinned shopware.sha.'
+    default: ''
+  event_name:
+    description: github.event_name, which decides trunk vs the pinned SHA.
+    required: true
+  app_url:
+    description: Where the lane is served. Must match a sales-channel domain, or UCP reads default config.
+    default: http://localhost:8000
+  run_store:
+    description: Whether to check out the agentic-commerce plugin.
+    default: 'true'
+  dev_tools_ref:
+    description: SwagMcpDevTools ref. Empty tracks its default branch.
+    default: ''
+  merchant_tools_ref:
+    description: SwagMcpMerchantTools ref. Empty tracks its default branch.
+    default: ''
+  agentic_commerce_ref:
+    description: shopware/agentic-commerce ref.
+    default: ''
+  plugins_pat:
+    description: Token that can read the private plugin repositories.
+    required: true
+  github_token:
+    description: Token for resolving refs and installing Shopware.
+    required: true
+
+outputs:
+  # These crossed step boundaries via $GITHUB_ENV and step outputs when this was
+  # one job. Neither survives a job boundary, so they are declared here instead.
+  sw_access_key:
+    description: Integration access key for the admin endpoint.
+    value: ${{ steps.integration.outputs.access_key }}
+  sw_secret_key:
+    description: Integration secret for the admin endpoint.
+    value: ${{ steps.integration.outputs.secret_key }}
+  sc_access_key:
+    description: Sales-channel access key for the Store endpoint.
+    value: ${{ steps.sc.outputs.sc_access_key }}
+  sales_channel_id:
+    description: The sales channel that owns app_url, and whose UCP config was set.
+    value: ${{ steps.sc.outputs.sales_channel_id }}
+  store_plugin_ok:
+    description: Whether agentic-commerce installed. Gates every Store step downstream.
+    value: ${{ steps.plugins.outputs.store_plugin_ok }}
+  shopware_sha:
+    description: The resolved Shopware commit, for the nightly reconciliation PR.
+    value: ${{ steps.sw-sha.outputs.sha }}
+  shopware_ref:
+    description: The ref that SHA was resolved from, for the drift summary.
+    value: ${{ steps.ref.outputs.ref }}
+
+runs:
+  using: composite
+  steps:
+    # Resolution priority:
+    #   1. workflow_dispatch input  -> manual override
+    #   2. schedule (cron)          -> trunk, so we surface upstream drift
+    #   3. anything else            -> pinned shopware.sha, so PRs are reproducible
+    - name: Determine Shopware ref
+      shell: bash
+      id: ref
+      run: |
+        set -euo pipefail
+        INPUT_REF="${{ inputs.shopware_ref }}"
+        if [ -n "$INPUT_REF" ]; then
+          REF="$INPUT_REF"
+          SOURCE="workflow_dispatch input"
+        elif [ "${{ inputs.event_name }}" = "schedule" ]; then
+          REF="trunk"
+          SOURCE="cron drift detection"
+        else
+          if [ ! -f shopware.sha ]; then
+            echo "::error::shopware.sha missing (required for PR/push runs)"
+            exit 1
+          fi
+          REF=$(tr -d '[:space:]' < shopware.sha)
+          SOURCE="pinned shopware.sha"
+        fi
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+        echo "Using Shopware ref: $REF ($SOURCE)"
+
+    # actions/checkout can't shallow-fetch branches whose name contains a slash
+    # because it builds a wildcard refspec that git rejects. Resolving the ref
+    # to a SHA via the API first sidesteps the issue entirely.
+
+    # actions/checkout can't shallow-fetch branches whose name contains a slash
+    # because it builds a wildcard refspec that git rejects. Resolving the ref
+    # to a SHA via the API first sidesteps the issue entirely.
+    - name: Resolve Shopware ref to SHA
+      shell: bash
+      id: sw-sha
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPO: ${{ inputs.shopware_repo }}
+        REF: ${{ steps.ref.outputs.ref }}
+      run: |
+        set -euo pipefail
+        # Try branch, then tag. If neither matches, assume REF is already a SHA
+        # and let checkout fail loudly downstream instead of guessing.
+        for kind in heads tags; do
+          SHA=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/refs/${kind}/${REF}" 2>/dev/null \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('object',{}).get('sha',''))" 2>/dev/null || true)
+          if [ -n "$SHA" ]; then
+            break
+          fi
+        done
+        if [ -z "$SHA" ]; then
+          # Bare SHA fallback. Must look like a hex commit id.
+          if [[ "$REF" =~ ^[0-9a-f]{7,40}$ ]]; then
+            SHA="$REF"
+          else
+            echo "::error::Could not resolve ${REF} in ${REPO} as branch, tag, or SHA"
+            exit 1
+          fi
+        fi
+        echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+        echo "Resolved ${REF} -> ${SHA}"
+
+    # Installs PHP, MySQL, composer, clones shopware/shopware @ SHA into ./shopware,
+    # and runs system:install. Org-standard primitive used across Shopware repos.
+
+    # Installs PHP, MySQL, composer, clones shopware/shopware @ SHA into ./shopware,
+    # and runs system:install. Org-standard primitive used across Shopware repos.
+    - name: Setup Shopware
+      uses: shopware/setup-shopware@main
+      with:
+        shopware-version: ${{ steps.sw-sha.outputs.sha }}
+        shopware-repository: ${{ inputs.shopware_repo }}
+        shopware-github-token: ${{ inputs.github_token }}
+        path: shopware
+        install: true
+        env: test
+        php-version: '8.3'
+
+    # SwagMcpDevTools and SwagMcpMerchantTools track their repo DEFAULT branch:
+    # an empty `ref` makes actions/checkout use it, so we always test the latest
+    # plugin code (and survive a default-branch rename) instead of pinning a
+    # feature branch. The v2 tool-group/deferral work is merged into both mains.
+    # Pass the matching *_ref dispatch input to pin a single run.
+
+    # SwagMcpDevTools and SwagMcpMerchantTools track their repo DEFAULT branch:
+    # an empty `ref` makes actions/checkout use it, so we always test the latest
+    # plugin code (and survive a default-branch rename) instead of pinning a
+    # feature branch. The v2 tool-group/deferral work is merged into both mains.
+    # Pass the matching *_ref dispatch input to pin a single run.
+    - name: Checkout SwagMcpDevTools (bundle)
+      uses: actions/checkout@v7
+      with:
+        repository: shopware/SwagMcpDevTools
+        ref: ${{ inputs.dev_tools_ref }}
+        token: ${{ inputs.plugins_pat }}
+        path: shopware/custom/bundles/SwagMcpDevTools
+        fetch-depth: 1
+
+    - name: Checkout SwagMcpMerchantTools (plugin)
+      uses: actions/checkout@v7
+      with:
+        repository: shopware/SwagMcpMerchantTools
+        ref: ${{ inputs.merchant_tools_ref }}
+        token: ${{ inputs.plugins_pat }}
+        path: shopware/custom/plugins/SwagMcpMerchantTools
+        fetch-depth: 1
+
+    # The agentic-commerce plugin (composer name shopware/agentic-commerce,
+    # plugin class Swag\AgenticCommerce\SwagAgenticCommerce) carries the 14
+    # shopware-ucp-* MCP tools under src/Ucp/Mcp/Tool. It pulls the UCP
+    # protocol layer in via ucp-php-sdk/symfony-bundle, which is public on
+    # Packagist, so composer resolves it without extra wiring. Tracks its
+    # default branch like the other plugins.
+
+    # The agentic-commerce plugin (composer name shopware/agentic-commerce,
+    # plugin class Swag\AgenticCommerce\SwagAgenticCommerce) carries the 14
+    # shopware-ucp-* MCP tools under src/Ucp/Mcp/Tool. It pulls the UCP
+    # protocol layer in via ucp-php-sdk/symfony-bundle, which is public on
+    # Packagist, so composer resolves it without extra wiring. Tracks its
+    # default branch like the other plugins.
+    - name: Checkout agentic-commerce (Store API / UCP)
+      id: agentic_checkout
+      if: inputs.run_store == 'true'
+      # Non-fatal, like the composer step below: this repo is private and
+      # PLUGINS_PAT may not be scoped to it (a 'Not Found' from the API means
+      # exactly that). An optional plugin the token cannot read must not take
+      # down the admin evals. We read steps.*.outcome, not .conclusion, so the
+      # real result is still visible to us rather than masked to success.
+      continue-on-error: true
+      uses: actions/checkout@v7
+      with:
+        repository: shopware/agentic-commerce
+        # TEMPORARY PIN — remove when shopware/agentic-commerce#154 merges.
+        #
+        # The default branch has neither in-band tool errors nor dryRun, so CI
+        # sees `-32603 Error while executing tool` with an empty body and
+        # nothing logged, where a lane with #154 gets
+        # `{"success":false,"error":{...,"violations":[...]}}`. That difference
+        # is the entire reason a local run and a CI run disagreed for a whole
+        # afternoon, and without the pin the UCP journey here reports failures
+        # nobody can act on.
+        ref: ${{ github.event.inputs.agentic_commerce_ref || 'fix/mcp-tool-error-visibility-and-catalog-lookup-ids' }}
+        token: ${{ inputs.plugins_pat }}
+        path: shopware/custom/plugins/SwagAgenticCommerce
+        fetch-depth: 1
+
+    - name: Wire up MCP bundle + plugin
+      id: plugins
+      shell: bash
+      working-directory: shopware
+      env:
+        STORE_CHECKOUT_OK: ${{ steps.agentic_checkout.outcome == 'success' }}
+      run: |
+        set -euo pipefail
+
+        # MCP Server v2: the MCP_SERVER feature flag was removed upstream —
+        # the server is always enabled, no env gating needed.
+
+        composer config repositories.swag-mcp-dev-tools       path custom/bundles/SwagMcpDevTools
+        composer config repositories.swag-mcp-merchant-tools  path custom/plugins/SwagMcpMerchantTools
+        composer require \
+          swag/mcp-dev-tools:@dev \
+          swag/mcp-merchant-tools:@dev \
+          --no-interaction --no-scripts
+
+        # Store API / UCP tools. ucp-php-sdk is public on Packagist, so composer
+        # resolves the protocol layer without extra wiring.
+        #
+        # Non-fatal on purpose: this is an optional private plugin, and a
+        # credential or resolution problem with it must not take down the admin
+        # evals, which are the main signal. It is recorded and warned about
+        # rather than swallowed — a silent skip is exactly how these 42 fixtures
+        # went unrun for so long.
+        STORE_PLUGIN_OK=false
+        STORE_SKIP_REASON=""
+        if [ "${RUN_STORE}" != "true" ]; then
+          STORE_SKIP_REASON="run_store=false"
+        elif [ "${STORE_CHECKOUT_OK}" != "true" ]; then
+          STORE_SKIP_REASON="the \`shopware/agentic-commerce\` checkout failed — \`PLUGINS_PAT\` is most likely not scoped to that repository (the API answers \`Not Found\`). Grant the token access to it."
+        else
+          composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
+          if composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts; then
+            STORE_PLUGIN_OK=true
+          else
+            STORE_SKIP_REASON="\`composer require shopware/agentic-commerce\` failed against this Shopware ref — see the step log for the resolver output."
+          fi
+        fi
+
+        if [ "${STORE_PLUGIN_OK}" != "true" ] && [ "${RUN_STORE}" = "true" ]; then
+          echo "::warning::Store/UCP suite skipped: ${STORE_SKIP_REASON}"
+          {
+            echo "### Store/UCP suite skipped"
+            echo ""
+            echo "The 42 store fixtures did not run. Reason: ${STORE_SKIP_REASON}"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+        echo "STORE_PLUGIN_OK=${STORE_PLUGIN_OK}" >> "$GITHUB_ENV"
+          echo "store_plugin_ok=${STORE_PLUGIN_OK}" >> "$GITHUB_OUTPUT"
+
+        bin/console plugin:refresh --no-interaction
+        bin/console plugin:install --activate SwagMcpMerchantTools --no-interaction
+        if [ "${STORE_PLUGIN_OK}" = "true" ]; then
+          bin/console plugin:install --activate SwagAgenticCommerce --no-interaction
+
+          # Without this every UCP runtime tool rejects every call, and the
+          # Store suite measures nothing.
+          #
+          # Each one carries a `UCP-Agent: <name> profile="<uri>"` header whose
+          # URI the SDK fetches and validates (UrlSafetyValidator). Plain http
+          # is refused unless BOTH the host is exactly localhost/127.0.0.1/::1
+          # AND this flag is on — a deliberate SSRF guard, since the server is
+          # about to fetch a URL an untrusted caller chose.
+          #
+          # APP_URL is http://localhost:8000, so the host half already holds.
+          # Written to .env.local rather than exported because the daemonized
+          # web server is what serves the calls, not this shell.
+          #
+          # This is what makes CI able to run these tools at all and a local
+          # `<shop>.localhost` dev instance not: `.localhost` subdomains are
+          # loopback by RFC 6761 but the SDK's isLocalHost() matches the bare
+          # name only, and no config setting can reach past that check.
+          echo 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' >> .env.local
+        fi
+
+        # Turn the MCP rate limiter off on this throwaway instance.
+        #
+        # It was the wall-clock ceiling and nothing said so. Shopware's test env
+        # overrides only `login` and `login_user`, so CI inherited the PRODUCTION
+        # mcp_admin_api limits (300/60s, 1000/10min) - and each eval step already
+        # issues roughly 650 MCP requests in ~155s, about 250 req/min, some 85% of
+        # the per-minute cap. That is why --discovery-concurrency sat at 4: the
+        # comment on the flag says higher throttles with HTTP 429. Making the run
+        # faster does not reduce the request count, it compresses it into a
+        # shorter window, which is precisely what a per-minute limiter punishes,
+        # so no amount of parallelism could help while this was on.
+        #
+        # Throttling is not what these fixtures measure (they measure tool
+        # selection) and the instance dies with the job. The cost is stated
+        # plainly: CI no longer exercises MCP throttling, so a regression in the
+        # limiter itself has to be caught by tests/integration in
+        # shopware/shopware, not here.
+        #
+        # Project + env-specific config is the highest-precedence layer, so this
+        # beats the bundle defaults. It has to land BEFORE the cache:clear below,
+        # and the directory must stay the env the web server actually serves
+        # (test, set by setup-shopware) or the override silently stops applying
+        # and the run silently goes back to being throttled.
+        mkdir -p config/packages/test
+        cat > config/packages/test/z-eval-no-mcp-rate-limit.yaml <<'YAML'
+        shopware:
+            api:
+                rate_limiter:
+                    mcp_admin_api:
+                        enabled: false
+                    mcp_store_api:
+                        enabled: false
+        YAML
+
+        bin/console cache:clear --no-interaction
+        bin/console cache:warmup --no-interaction
+
+        # The MCP controller must exist in the compiled container — hard fail if not.
+        bin/console debug:container "Shopware\Core\Framework\Mcp\Controller\McpServerController" 2>&1 \
+          | grep -E 'Public|private|class' | head -5 \
+          || { echo "::error::McpServerController not found in compiled container"; exit 1; }
+
+        # Restart the daemonized symfony web server so PHP-FPM workers reload
+        # the freshly compiled container (otherwise opcache serves stale bytecode).
+        symfony server:stop 2>/dev/null || true
+        SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
+          symfony server:start
+
+    - name: Wait for Shopware after plugin install
+      shell: bash
+      run: |
+        # A 2xx or 401 both prove the server is up (401 = auth middleware
+        # answering, which is what the OAuth/integration step needs next).
+        bash "$GITHUB_WORKSPACE/functional/ci/wait_for_http.sh" \
+          http://localhost:8000/api/_info/version 60 2 || {
+            echo "--- symfony server:status ---"
+            (cd shopware && symfony server:status 2>&1) || true
+            exit 1
+          }
+
+    # A fresh system:install has no products/customers/orders, so the
+    # data-dependent functional assertions (entity-read/upsert, order-state,
+    # order-summary, customer-lookup, cart flows) would SKIP. Seed demo data
+    # so they actually run. Non-fatal: if seeding fails, those assertions just
+    # skip as before — it must never turn the whole eval red.
+
+    # A fresh system:install has no products/customers/orders, so the
+    # data-dependent functional assertions (entity-read/upsert, order-state,
+    # order-summary, customer-lookup, cart flows) would SKIP. Seed demo data
+    # so they actually run. Non-fatal: if seeding fails, those assertions just
+    # skip as before — it must never turn the whole eval red.
+    - name: Seed demo data
+      shell: bash
+      working-directory: shopware
+      continue-on-error: true
+      run: |
+        # framework:demodata refuses to run under APP_ENV=test, so seed in
+        # prod. The database (DATABASE_URL) is shared across envs, so the
+        # test-env MCP server reads the seeded products/customers/orders.
+        APP_ENV=prod bin/console framework:demodata \
+          --products=20 --categories=5 --manufacturers=5 \
+          --customers=10 --orders=10 --media=10 \
+          --no-interaction || echo "::warning::framework:demodata failed; data-dependent assertions will skip"
+        APP_ENV=prod bin/console dal:refresh:index --no-interaction || true
+
+    - name: Create integration
+      shell: bash
+      id: integration
+      run: |
+        set -euo pipefail
+
+        ACCESS_KEY="SWIA$(openssl rand -hex 12 | tr 'a-f' 'A-F')"
+        SECRET_KEY="$(openssl rand -hex 32)"
+
+        TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \
+          -H 'Content-Type: application/json' \
+          -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
+          | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+        curl -fsS -X POST "${APP_URL}/api/integration" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H 'Content-Type: application/json' \
+          -d "{\"label\":\"mcp-evals\",\"accessKey\":\"${ACCESS_KEY}\",\"secretAccessKey\":\"${SECRET_KEY}\",\"admin\":true,\"writeAccess\":true}" \
+          > /dev/null
+
+        echo "::add-mask::${SECRET_KEY}"
+        {
+          echo "access_key=${ACCESS_KEY}"
+          echo "secret_key=${SECRET_KEY}"
+        } >> "$GITHUB_OUTPUT"
+
+    # -------------------------------------------------------------------
+    # Store API / UCP suite — runs by default; skip with run_store=false.
+    #
+    # Every step below carries `!cancelled()` rather than a bare condition,
+    # because a failing step short-circuits everything after it and these are
+    # independent of the admin suite. Without it, one admin fixture failing
+    # took the whole Store suite with it, reported as `skipped` — which reads
+    # exactly like "the plugin is missing" and cost a round of chasing a
+    # composer problem that did not exist. The plugin installs fine; it was
+    # the admin eval crashing first.
+    # -------------------------------------------------------------------
+    - name: Fetch sales-channel access key
+      shell: bash
+      if: ${{ !cancelled() && inputs.run_store == 'true' && env.STORE_PLUGIN_OK == 'true' }}
+      id: sc
+      run: |
+        set -euo pipefail
+        TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \
+          -H 'Content-Type: application/json' \
+          -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
+          | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+        # Pick the sales channel that OWNS ${APP_URL}, not merely the first one
+        # with an access key.
+        #
+        # UCP resolves its runtime configuration from the domain the request
+        # arrives at, not from the sw-access-key. Measured: the same key and the
+        # same configured channel answers OK through a registered domain and
+        # "Missing signature headers" through an unregistered one, because the
+        # unregistered host silently falls back to the defaults — where
+        # signaturePolicy is 'strict'.
+        #
+        # So the channel we configure below has to be the channel that owns the
+        # URL we call, or the config is written somewhere it will never be read.
+        DOM_JSON=$(curl -fsS "${APP_URL}/api/sales-channel-domain?limit=100" \
+          -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json')
+        SC_ID=$(printf '%s' "$DOM_JSON" | APP_URL="${APP_URL}" python3 -c "import os,sys,json; d=json.load(sys.stdin); u=os.environ['APP_URL'].rstrip('/'); print(next((x.get('attributes',x).get('salesChannelId','') for x in d.get('data',[]) if (x.get('attributes',x).get('url') or '').rstrip('/')==u),''))")
+        if [ -z "${SC_ID}" ]; then
+          echo "::error::No sales channel is registered for ${APP_URL}, so UCP would read default config (signaturePolicy=strict) and reject every call. Registered domains:"
+          printf '%s' "$DOM_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(' -', x.get('attributes',x).get('url')) for x in d.get('data',[])]"
+          exit 1
+        fi
+        SC_KEY=$(curl -fsS "${APP_URL}/api/sales-channel/${SC_ID}" \
+          -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+          | python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('attributes',d).get('accessKey',''))")
+        echo "::add-mask::${SC_KEY}"
+        echo "Sales channel ${SC_ID} owns ${APP_URL}"
+          echo "sales_channel_id=${SC_ID}" >> "$GITHUB_OUTPUT"
+        echo "sc_access_key=${SC_KEY}" >> "$GITHUB_OUTPUT"
+
+        # Configure UCP so the tools can actually be called.
+        #
+        # FOUR separate gates sit in front of every UCP runtime tool, all of
+        # them defaults, none of them mentioned in any tool description. Each
+        # one was found the hard way, and each one fails the whole suite:
+        #
+        #   signaturePolicy   defaults to 'strict' -> every call must carry
+        #                     RFC 9421 HTTP message signatures, which this
+        #                     suite does not send.
+        #   agentAllowlist    may this profile host act as an agent here.
+        #   platformAllowlist may the profile be hosted there.
+        #   dev mode + http   set as SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_
+        #                     DEVELOPMENT_MODE in .env.local during plugin
+        #                     install, since plain http is refused otherwise.
+        #
+        # The two allowlists are set EXPLICITLY rather than left to their
+        # fallbacks. Empty, agentAllowlist falls back to the sales-channel
+        # domains and platformAllowlist to the host of the incoming request,
+        # so it happens to work only while all three hosts agree. That is not
+        # a property to depend on, and when it broke it presented as a generic
+        # "Error while executing tool" with nothing in the log.
+        #
+        # Same trade as disabling the MCP rate limiter above: these fixtures
+        # measure tool selection, not transport security, and the instance dies
+        # with the job. Stated plainly so it is not mistaken for coverage — CI
+        # does not exercise UCP signing or host allowlisting, so a regression
+        # in either has to be caught by the plugin's own tests.
+        UCP_HOST=$(printf '%s' "${APP_URL}" | python3 -c 'import sys,urllib.parse; print(urllib.parse.urlparse(sys.stdin.read().strip()).hostname or "")')
+        echo "UCP host for profile, agent and platform allowlists: ${UCP_HOST}"
+
+        cd shopware
+        bin/console ucp:config:set --sales-channel="${SC_ID}" --no-interaction \
+          --signature-policy=off \
+          --agent-allowlist="${UCP_HOST}" \
+          --platform-allowlist="${UCP_HOST}"
+
+        # The dev-mode flag is the one gate that is not sales-channel config,
+        # so assert it rather than trusting the earlier step wrote it.
+        grep -q 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' .env.local || {
+          echo "::error::UCP profile-fetching dev mode is not set in .env.local, so plain-http profile URIs will be refused."
+          exit 1
+        }
+
+    # The Store catalogue has never been snapshotted, so everything that
+    # derives from one had to be guessed for it: toolclass could not read
+    # schemas to find dryRun, tests/test_fixtures.py could not validate
+    # expected_toolset, and drift detection did not cover it. The Store
+    # fixtures ended up declaring toolsets that do not exist ('shopware',
+    # 'store-api'; the real ones are shopware-ucp-cart / -catalog / -checkout)
+    # and nothing could catch it.
+    #
+    # Uploaded as an artifact rather than committed here: the nightly
+    # reconciliation PR is where a snapshot enters the repo.
