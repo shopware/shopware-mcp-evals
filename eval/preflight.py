@@ -21,6 +21,8 @@ import json
 import sys
 import time
 
+import requests
+
 import mcp_client as mc
 import toolclass
 
@@ -134,7 +136,63 @@ def run(endpoint_name: str) -> int:
     print(f"  result text: {(text or '(empty)')[:1000]}")
     print(f"  jsonrpc error: {json.dumps(response.get('error'), indent=2)[:1000]}")
     print(f"  full result: {json.dumps(response.get('result'), indent=2)[:1000]}")
+
+    if endpoint_name == "store":
+        print(profile_report(error))
     return 1
+
+
+def probe_profile(uri: str) -> tuple[int | None, str]:
+    """Fetch the UCP profile URI and say whether it is one.
+
+    Returns (status, verdict). A status alone is not enough: a Shopware error
+    page is served as 200 with HTML, and 404 and "valid" are both plausible.
+    """
+    try:
+        response = requests.get(uri, timeout=10)
+    except requests.RequestException as exc:
+        return None, f"unreachable ({type(exc).__name__})"
+    if response.status_code != 200:
+        return response.status_code, "not a profile — the server answered, but not with one"
+    try:
+        body = response.json()
+    except ValueError:
+        return 200, "200 but not JSON — almost certainly an error page"
+    if not isinstance(body, dict) or "ucp" not in body:
+        return 200, "200 and JSON, but no `ucp` key — not a UCP profile"
+    return 200, "valid UCP profile"
+
+
+def profile_report(error: str) -> str:
+    """Resolve the one cause the error text can never name.
+
+    `internal` means an exception escaped the tool, and the plugin reports that
+    with no message and logs nothing — so from the outside it is indistinguishable
+    from any other internal failure. Measured against a live lane, it is the
+    profile fetch: a valid profile answers in ~0.16s, a 404 fails in ~0.19s with
+    exactly this error, and CI failed in 0.14s.
+
+    The server fetches this URI itself, mid-request, which is why the URI has to
+    be one the SERVER can reach and why a published host:port is not automatically
+    it.
+    """
+    import ucp
+
+    uri = ucp.agent_header(mc.SW_BASE_URL).split('profile="', 1)[-1].rstrip('"')
+    status, verdict = probe_profile(uri)
+    lines = ["\n  --- the UCP profile the server has to fetch ---", f"  {uri} -> {status or 'no response'}: {verdict}"]
+    if verdict != "valid UCP profile":
+        lines.append(
+            "  This is the cause. The server fetches that URI while handling the call, and a "
+            "failure there escapes as a bare `internal`. Point UCP_PROFILE_URI at a URL the "
+            "SERVER can reach that serves a real profile."
+        )
+    elif "internal" in error.lower():
+        lines.append(
+            "  The profile is fine, so `internal` is something else — and the plugin logs "
+            "nothing for this path. The server log is the only place left to look."
+        )
+    return "\n".join(lines)
 
 
 def main() -> int:

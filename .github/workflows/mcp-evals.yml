@@ -98,6 +98,10 @@ jobs:
     timeout-minutes: 30
     outputs:
       store_plugin_ok: ${{ steps.lane.outputs.store_plugin_ok }}
+      # Whether the Store suite has anything to measure. Separate from the job's
+      # own success on purpose: a UCP environment problem must not block the
+      # admin gate, which is the isolation this split exists for.
+      store_ready: ${{ steps.preflight.outcome == 'success' }}
       shopware_sha: ${{ steps.lane.outputs.shopware_sha }}
       drift: ${{ steps.drift.outputs.drift }}
       snapshot_changed: ${{ steps.snapshot.outputs.changed }}
@@ -283,6 +287,11 @@ jobs:
           EOF
 
       - name: Preflight the Store endpoint
+        id: preflight
+        # Non-fatal to the JOB, decisive for the STORE suite. It failing means
+        # the UCP tools cannot run, which is a complete answer for store-eval and
+        # no reason at all to withhold the admin numbers.
+        continue-on-error: true
         if: ${{ !cancelled() && env.RUN_STORE == 'true' && steps.lane.outputs.store_plugin_ok == 'true' }}
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
@@ -322,6 +331,7 @@ jobs:
           }
 
       - name: Run Store API functional tests
+        continue-on-error: true
         if: ${{ !cancelled() && env.RUN_STORE == 'true' && steps.lane.outputs.store_plugin_ok == 'true' }}
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
@@ -394,7 +404,10 @@ jobs:
   admin-eval:
     name: Admin eval
     needs: static
-    if: ${{ !cancelled() && needs.static.result == 'success' }}
+    # `!= 'skipped'` rather than `== 'success'`: static failing on an admin check
+    # is still worth the eval's diagnosis, and the store steps inside it can no
+    # longer fail the job at all.
+    if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -679,7 +692,9 @@ jobs:
   store-eval:
     name: Store eval
     needs: static
-    if: ${{ !cancelled() && needs.static.result == 'success' && needs.static.outputs.store_plugin_ok == 'true' }}
+    # store_ready is the preflight's verdict: if one UCP tool cannot run, none of
+    # the 45 fixtures measure anything, and the run is pure spend.
+    if: ${{ !cancelled() && needs.static.result != 'skipped' && needs.static.outputs.store_plugin_ok == 'true' && needs.static.outputs.store_ready == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

@@ -71,3 +71,78 @@ def test_strict_signing_names_the_default_that_causes_it():
 
     assert "--signature-policy=off" in advice
     assert "default" in advice.lower()
+
+
+# ---------------------------------------------------------------------------
+# The profile probe: the one cause the error text can never name
+# ---------------------------------------------------------------------------
+class _Resp:
+    def __init__(self, status, payload=None, text=""):
+        self.status_code, self._payload, self.text = status, payload, text
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+def test_a_real_profile_is_recognised(monkeypatch):
+    monkeypatch.setattr(preflight.requests, "get", lambda *_a, **_k: _Resp(200, {"ucp": {"version": "2026-04-08"}}))
+
+    assert preflight.probe_profile("http://x/.well-known/ucp") == (200, "valid UCP profile")
+
+
+def test_a_404_profile_is_the_measured_cause_of_internal(monkeypatch):
+    """Measured against a live lane: a valid profile answers in ~0.16s, a 404
+    fails in ~0.19s with exactly `internal`, and CI failed in 0.14s."""
+    monkeypatch.setattr(preflight.requests, "get", lambda *_a, **_k: _Resp(404))
+
+    status, verdict = preflight.probe_profile("http://x/nope")
+
+    assert status == 404 and "not a profile" in verdict
+
+
+def test_an_error_page_served_as_200_is_not_mistaken_for_a_profile(monkeypatch):
+    """Shopware answers an unmatched sales-channel domain with a 200 HTML page,
+    so status alone would call that success."""
+    monkeypatch.setattr(preflight.requests, "get", lambda *_a, **_k: _Resp(200, None, "<!DOCTYPE html>"))
+
+    assert preflight.probe_profile("http://x")[1].startswith("200 but not JSON")
+
+
+def test_json_without_a_ucp_key_is_not_a_profile(monkeypatch):
+    monkeypatch.setattr(preflight.requests, "get", lambda *_a, **_k: _Resp(200, {"something": "else"}))
+
+    assert "no `ucp` key" in preflight.probe_profile("http://x")[1]
+
+
+def test_an_unreachable_profile_is_named_as_such(monkeypatch):
+    def boom(*_a, **_k):
+        raise preflight.requests.ConnectionError("refused")
+
+    monkeypatch.setattr(preflight.requests, "get", boom)
+    status, verdict = preflight.probe_profile("http://x")
+
+    assert status is None and "unreachable" in verdict
+
+
+def test_a_broken_profile_is_reported_as_the_cause(monkeypatch):
+    monkeypatch.setattr(preflight, "probe_profile", lambda _u: (404, "not a profile — the server answered"))
+    monkeypatch.setattr(preflight.mc, "SW_BASE_URL", "http://shop")
+
+    out = preflight.profile_report("internal: The tool call failed unexpectedly.")
+
+    assert "This is the cause" in out
+    assert "UCP_PROFILE_URI" in out
+
+
+def test_a_working_profile_sends_the_reader_to_the_server_log(monkeypatch):
+    """If the profile is fine then `internal` is something else, and the plugin
+    logs nothing — saying so beats implying the profile is still suspect."""
+    monkeypatch.setattr(preflight, "probe_profile", lambda _u: (200, "valid UCP profile"))
+    monkeypatch.setattr(preflight.mc, "SW_BASE_URL", "http://shop")
+
+    out = preflight.profile_report("internal: The tool call failed unexpectedly.")
+
+    assert "This is the cause" not in out
+    assert "server log" in out
