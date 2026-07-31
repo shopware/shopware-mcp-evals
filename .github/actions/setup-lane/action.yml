@@ -397,9 +397,20 @@ runs:
         # readers fail with "Log file not found" — again, the tools working
         # correctly against an unfinished lane. One real line is enough for them
         # to open, read and search.
+        #
+        # Named for the env the SERVER runs in, not the one the seeding commands
+        # above use. Those run APP_ENV=prod because framework:demodata refuses to
+        # run under test; the MCP endpoint being exercised is served by the
+        # test-env app, and Shopware writes var/log/<env>-<date>.log. A prod-named
+        # file would still be found — the tool lists the directory — but it would
+        # describe the wrong process, and it is the server's log a reader wants.
+        APP_ENV_NAME=$(sed -n 's/^APP_ENV=//p' .env.local 2>/dev/null | tr -d '"' | tail -1)
+        [ -n "${APP_ENV_NAME}" ] || APP_ENV_NAME=$(sed -n 's/^APP_ENV=//p' .env 2>/dev/null | tr -d '"' | tail -1)
+        APP_ENV_NAME=${APP_ENV_NAME:-test}
+        echo "Server runs in APP_ENV=${APP_ENV_NAME}; seeding var/log/${APP_ENV_NAME}-<date>.log"
         mkdir -p var/log
         printf '[%s] mcp-evals.INFO: lane ready for the eval suite [] []\n' \
-          "$(date -u +%Y-%m-%dT%H:%M:%S%z)" >> "var/log/prod-$(date -u +%Y-%m-%d).log"
+          "$(date -u +%Y-%m-%dT%H:%M:%S%z)" >> "var/log/${APP_ENV_NAME}-$(date -u +%Y-%m-%d).log"
 
     - name: Create integration
       shell: bash
