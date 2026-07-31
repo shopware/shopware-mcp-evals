@@ -29,8 +29,10 @@ FULL_CTX = {
     # silent no-op. This one comes from merchant-storefront-search.
     "cart_product_id": "p-sellable",
     # `file` has no usable default — the tool answers "Log file not found" for the
-    # empty string, and names the valid values in that error.
-    "log_file": "prod-2026-07-31.log",
+    # empty string, and names the valid values in that error. `dev.log` rather
+    # than a dated name on purpose: nothing here parses it, so a date would only
+    # look like it mattered and read as stale the day after it was written.
+    "log_file": "dev.log",
     "skill_name": "nightly-triage",
     "media_upload_enabled": True,
 }
@@ -190,3 +192,43 @@ def test_order_state_always_sends_an_action():
     args = check.args(FULL_CTX)
 
     assert any(k in args for k in ("orderAction", "transactionAction", "deliveryAction"))
+
+
+# ---------------------------------------------------------------------------
+# Picking a log file to read
+# ---------------------------------------------------------------------------
+def _log_reply(files):
+    inner = "Log file not found. Available files: " + ", ".join(files)
+    return json.dumps({"success": False, "error": inner})
+
+
+def _pick(monkeypatch, files):
+    from functional import runner as R
+
+    monkeypatch.setattr(R, "mcp_call", lambda *_a, **_k: {})
+    monkeypatch.setattr(R, "mcp_result_text", lambda _r: _log_reply(files))
+    return R.newest_log_file("sid", None)
+
+
+def test_the_newest_log_file_wins_regardless_of_the_order_returned(monkeypatch):
+    """Taking the last element made a correct-looking result depend on an
+    undocumented ordering in somebody else's response."""
+    files = ["dev.log", "prod-2026-06-01.log", "prod-2026-07-31.log"]
+
+    assert _pick(monkeypatch, files) == "prod-2026-07-31.log"
+    assert _pick(monkeypatch, list(reversed(files))) == "prod-2026-07-31.log"
+
+
+def test_an_instance_with_only_dev_log_still_gets_a_readable_file(monkeypatch):
+    assert _pick(monkeypatch, ["dev.log"]) == "dev.log"
+
+
+def test_no_log_files_yields_no_file_so_the_checks_skip(monkeypatch):
+    """Skipped-with-a-reason, not failed: an instance that has not logged
+    anything yet says nothing about whether the tool works."""
+    from functional import runner as R
+
+    monkeypatch.setattr(R, "mcp_call", lambda *_a, **_k: {})
+    monkeypatch.setattr(R, "mcp_result_text", lambda _r: json.dumps({"success": True, "data": []}))
+
+    assert R.newest_log_file("sid", None) == ""

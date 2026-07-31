@@ -566,9 +566,11 @@ def newest_log_file(session: str, endpoint: Endpoint) -> str:
         return ""
     listed = text.split(marker, 1)[1].strip().rstrip('"}').split(",")
     files = [f.strip().strip('"') for f in listed if f.strip()]
-    # Newest last: a dated name sorts chronologically, and an empty instance has
-    # only `dev.log`, which is still readable.
-    return files[-1] if files else ""
+    # max(), not files[-1]. A dated name sorts chronologically so the newest wins
+    # either way IF the server returns them ordered — and nothing promises that.
+    # Taking the last element made a correct-looking result depend on an
+    # undocumented detail of somebody else's response.
+    return max(files) if files else ""
 
 
 def first_skill_name(session: str, endpoint: Endpoint) -> str:
