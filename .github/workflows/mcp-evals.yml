@@ -269,7 +269,16 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: shopware/agentic-commerce
-          ref: ${{ github.event.inputs.agentic_commerce_ref }}
+          # TEMPORARY PIN — remove when shopware/agentic-commerce#154 merges.
+          #
+          # The default branch has neither in-band tool errors nor dryRun, so CI
+          # sees `-32603 Error while executing tool` with an empty body and
+          # nothing logged, where a lane with #154 gets
+          # `{"success":false,"error":{...,"violations":[...]}}`. That difference
+          # is the entire reason a local run and a CI run disagreed for a whole
+          # afternoon, and without the pin the UCP journey here reports failures
+          # nobody can act on.
+          ref: ${{ github.event.inputs.agentic_commerce_ref || 'fix/mcp-tool-error-visibility-and-catalog-lookup-ids' }}
           token: ${{ secrets.PLUGINS_PAT }}
           path: shopware/custom/plugins/SwagAgenticCommerce
           fetch-depth: 1
