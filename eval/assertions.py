@@ -119,7 +119,16 @@ def inband_error(result_text: str | None) -> str | None:
     if isinstance(err, dict):
         # `type` carries the classification the server already made — keeping it
         # in the string lets the markers below sort it without a second scheme.
-        return f"{err.get('type', '')}: {err.get('message', '')}".strip(": ").strip()
+        message = f"{err.get('type', '')}: {err.get('message', '')}".strip(": ").strip()
+        # `violations` is where the answer actually is. UCP's schema errors say
+        # only 'Validation failed for schema "checkout.create.request"' in the
+        # message, and carry `["$.line_items is required"]` alongside it — the
+        # difference between a dead end and a fix. Dropping it cost several
+        # rounds of guessing payload shapes by hand.
+        violations = err.get("violations")
+        if isinstance(violations, list) and violations:
+            message += f" ({'; '.join(str(v) for v in violations)})"
+        return message
     return str(err) if err else "the tool reported success: false"
 
 

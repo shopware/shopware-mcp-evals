@@ -29,6 +29,7 @@ from datetime import datetime
 
 import requests
 
+from eval.assertions import inband_error
 from functional.checks import CORE_CHECKS, DEV_CHECKS, MERCHANT_CHECKS, ToolCheck
 from functional.reporting import Reporter
 from mcp_client import (
@@ -97,18 +98,35 @@ def _first_field(session: str, endpoint: Endpoint, entity: str, field: str = "id
 # ---------------------------------------------------------------------------
 def assert_tool(
     rep: Reporter, session: str, endpoint: Endpoint, tool: str, args: dict, label: str | None = None
-) -> None:
-    """Call a tool; pass if there is no protocol error and content is present."""
+) -> dict:
+    """Call a tool; pass only if it neither errored nor reported failure in band.
+
+    Returns the parsed payload so a caller can thread an id into the next call —
+    see functional/journeys.py, where each step's result is the next step's
+    precondition.
+
+    The in-band check is the load-bearing part. This used to pass on "no protocol
+    error and some content", which is blind to the way UCP reports every failure:
+    HTTP 200, no JSON-RPC error, and `{"success": false}` in the body. All 27
+    admin checks were green over a mechanism that could not have seen a single
+    Store failure. `eval/preflight.py` already had this right; this is the same
+    `inband_error` and the same reasoning.
+    """
     label = label or tool
     resp = mcp_call(session, tool, args, endpoint=endpoint)
     error = resp.get("error", {}).get("message", "")
     content = resp.get("result", {}).get("content", [])
+    text = mcp_result_text(resp)
     if error:
         rep.tool_fail(tool, label, error)
     elif not content:
         rep.tool_fail(tool, label, "empty content in response")
+    elif in_band := inband_error(text):
+        rep.tool_fail(tool, label, in_band)
     else:
-        rep.tool_pass(tool, label, mcp_result_text(resp)[:120])
+        rep.tool_pass(tool, label, text[:120])
+        return _payload(resp)
+    return {}
 
 
 def assert_tool_error(

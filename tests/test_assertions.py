@@ -263,3 +263,28 @@ def test_an_unexecutable_tool_is_still_exempt():
 
 def test_a_success_false_body_with_no_error_detail_still_fails():
     assert A.check("accepted", json.dumps({"success": False}), None)[0] is False
+
+
+def test_violations_survive_into_the_error_string():
+    """The message alone is a dead end: UCP answers a bad payload with
+    'Validation failed for schema "checkout.create.request"' and puts the actual
+    requirement in `violations`. Dropping it cost several rounds of guessing
+    payload shapes by hand against a live server."""
+    body = json.dumps(
+        {
+            "success": False,
+            "error": {
+                "type": "validation",
+                "message": 'Validation failed for schema "checkout.create.request".',
+                "violations": ["$.line_items is required"],
+            },
+        }
+    )
+
+    assert "$.line_items is required" in A.inband_error(body)
+
+
+def test_an_error_without_violations_is_unchanged():
+    body = json.dumps({"success": False, "error": {"type": "not_found", "message": "Cart not found."}})
+
+    assert A.inband_error(body) == "not_found: Cart not found."
