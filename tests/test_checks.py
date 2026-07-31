@@ -24,6 +24,13 @@ FULL_CTX = {
     "customer_id": "c1",
     "sales_channel_id": "sc1",
     "cart_token": "tok",
+    # Distinct from product_id: entity-search returns products that are inactive,
+    # out of stock or not in the channel, and adding one of those to a cart is a
+    # silent no-op. This one comes from merchant-storefront-search.
+    "cart_product_id": "p-sellable",
+    # `file` has no usable default — the tool answers "Log file not found" for the
+    # empty string, and names the valid values in that error.
+    "log_file": "prod-2026-07-31.log",
     "skill_name": "nightly-triage",
     "media_upload_enabled": True,
 }
@@ -146,3 +153,40 @@ def test_the_table_covers_the_sections_the_runner_walks():
     assert K.ALL_CHECKS == K.CORE_CHECKS + K.MERCHANT_CHECKS + K.DEV_CHECKS
     assert all(c.tool.startswith(("shopware-", "merchant-")) for c in K.CORE_CHECKS + K.MERCHANT_CHECKS)
     assert all(c.tool.startswith("swag-dev-tools-") for c in K.DEV_CHECKS)
+
+
+def test_every_context_key_a_check_uses_is_in_the_full_context():
+    """FULL_CTX is the canonical "everything the server could provide". A check
+    reading a key that is not in it means the runner has to supply that key and
+    nothing checks that it does — which is how `log_file` shipped as a KeyError
+    waiting to happen."""
+    for check in K.ALL_CHECKS:
+        try:
+            check.args(FULL_CTX)
+        except KeyError as exc:
+            raise AssertionError(f"{check.tool} reads {exc} which FULL_CTX does not define") from exc
+
+
+def test_the_media_filename_is_unique_per_call():
+    """A fixed name uploads once and then fails with "already exists" on every
+    later run against the same instance — green in CI, broken on a trunk lane."""
+    check = next(c for c in K.ALL_CHECKS if c.tool == "shopware-media-upload")
+    names = {check.args(FULL_CTX)["fileName"] for _ in range(5)}
+
+    assert len(names) == 5
+    assert all(n.endswith(".png") for n in names), "the extension comes from fileName, not the URL"
+
+
+def test_the_phantom_uuid_is_the_form_shopware_accepts():
+    """The dashed form is rejected by the DAL outright, so the delete check would
+    assert the argument validator rather than the tool it names."""
+    assert K.ZERO_UUID == "0" * 32
+    assert "-" not in K.ZERO_UUID
+
+
+def test_order_state_always_sends_an_action():
+    """Without one the call is rejected before reaching the state machine."""
+    check = next(c for c in K.ALL_CHECKS if c.tool == "shopware-order-state")
+    args = check.args(FULL_CTX)
+
+    assert any(k in args for k in ("orderAction", "transactionAction", "deliveryAction"))
