@@ -12,8 +12,10 @@ brief for coding agents.
 
 - **No shell scripts for test logic.** Both layers are Python; the functional
   runner (`functional/runner.py`) reuses `mcp_client.py`. Don't add `.sh` runners —
-  extend the Python runner or add a helper module. The only shell that belongs
-  here is small CI glue under `functional/ci/*.sh`, which is shellcheck-linted.
+  extend the Python runner or add a helper module. The shell that belongs here is
+  CI glue under `functional/ci/*.sh` and the local-first entry point
+  `scripts/trunk-lane.sh`, which sequences existing Python commands rather than
+  implementing anything. Both trees are shellcheck-linted.
 - **Add unit tests for new logic.** New functional / eval / client behavior gets
   a pytest test under `tests/` — offline, faking the MCP server (see the existing
   tests). CI runs `ruff` + `pytest` + `shellcheck` on every push, so keep them green.
@@ -25,14 +27,22 @@ brief for coding agents.
   (plus id/prompt uniqueness and toolset correctness) against
   `tool-history/latest.json`, so a new server-side tool fails the unit tests
   until it has prompts.
-- **Two workflows.** `lint.yml` is the fast gate (ruff + format + pytest +
-  shellcheck) and runs on every PR. `mcp-evals.yml` is the heavy one: it installs
-  Shopware at the pinned `shopware.sha`, checks the plugin repos out at their
-  **default branch** (so plugin churn can turn a run red without a change here),
-  and runs the functional + LLM layers. The Store/UCP part runs by default too;
-  skip it with `run_store=false`. If `agentic-commerce` fails to resolve against
-  the pinned Shopware ref, the store steps skip with a warning rather than
-  taking down the admin evals.
+- **Two workflows, and the heavy one is four jobs.** `lint.yml` is the fast gate
+  (ruff + format + pytest + shellcheck) on every PR. `mcp-evals.yml` runs
+  `static` → (`admin-eval`, `store-eval`) → `report`, each building its own lane
+  via `.github/actions/setup-lane`. It installs Shopware at the pinned
+  `shopware.sha` and checks the plugin repos out at their **default branch**, so
+  plugin churn can turn a run red without a change here — except
+  `agentic-commerce`, temporarily pinned to the #154 branch.
+  The lane cannot be shared between jobs: it is a live MySQL plus a daemonised
+  server. Each job pays ~140s for its own, in parallel. What that buys is a
+  failure you can locate — one job failing no longer skips the rest, which used
+  to make an admin fixture failure look like "the plugin is missing".
+  The Store/UCP part runs by default; skip it with `run_store=false`.
+- **Never let a job write state you care about.** `--allow-mutations` places a
+  real order. CI sets it because the instance dies with the job; a developer's
+  shop does not. If you add anything that commits, gate it the same way and
+  record the skip rather than omitting it silently.
 - **The eval workflow is opt-in on PRs.** It runs nightly and on
   `workflow_dispatch` unconditionally, but on a pull request only when the PR
   carries the **`run-evals`** label — it costs a Shopware install and real OpenAI
@@ -77,6 +87,35 @@ brief for coding agents.
   `shopware-tool-search`, `shopware-toolsets-list`, `shopware-toolset-enable`.
 - `shopware-toolset-enable` persists per `Mcp-Session-Id`. Discovery-mode eval
   therefore opens a **fresh session per fixture** so enablement can't leak.
+- **A tool can fail while the transport succeeds.** UCP reports every failure as
+  HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
+  asserting on a tool call must go through `eval/assertions.py:inband_error`, or
+  it is blind to the entire Store failure mode — which is exactly what happened
+  to 27 admin checks for months.
+
+## UCP: four gates before a tool runs
+
+All defaults, none visible in any tool description, and each fails the whole
+Store suite. In order of when they fire:
+
+| gate | symptom | fix |
+|---|---|---|
+| `signaturePolicy` | `Missing signature headers` | defaults to `strict`; `ucp:config:set --signature-policy=off` on a throwaway lane |
+| `agentAllowlist` | `Agent profile host is not allowed` | falls back to the sales-channel domains; `--agent-allowlist=<host>` |
+| `platformAllowlist` | `Platform profile host is not allowed` | falls back to the **host of the incoming request**; `--platform-allowlist=<host>` |
+| plain http | `Plain http is only allowed for local development hosts` | needs `SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1` **and** a host `isLocalHost()` accepts — which is `localhost`/`127.0.0.1`/`::1` only, *not* `.localhost` subdomains |
+
+Two more things that look like tool bugs and are not:
+
+- **UCP resolves its config from the domain the request arrives at**, not from
+  the `sw-access-key`. Measured: one key, one configured channel, answering OK
+  through a registered domain and `Missing signature headers` through an
+  unregistered one, because the unregistered host silently reads defaults.
+- **The profile URI is fetched by the server, mid-request.** It must name a
+  host:port *the server* can reach — a host-mapped port is not one. A failure
+  there escapes as a bare `internal` with nothing logged: measured, a valid
+  profile answers in ~0.16s and a 404 fails in ~0.19s with exactly that error.
+  `eval/preflight.py` probes the URI and says which it is.
 
 ## Setup
 
@@ -93,6 +132,19 @@ pip install -e . --no-deps   # makes `from mcp_client import ...` resolve anywhe
 # Layer 0 — static: description checks over the committed catalogue snapshot.
 # No server, no model, no tokens. Advisory: always exits 0.
 python -m toollint
+
+# Everything free, against a local trunk lane, before spending CI.
+scripts/trunk-lane.sh
+scripts/trunk-lane.sh --eval
+
+# Registry: does the server's declared ACL agree with toolclass? Admin only —
+# debug:mcp has no endpoint flag and lists no Store tools (shopware/shopware#18848).
+bin/console debug:mcp --tools --no-ansi > /tmp/m.txt
+python -m eval.registry_check --from-file /tmp/m.txt
+
+# Can ONE tool actually run? ~1s, no model. Fails with a named cause, and on a
+# store failure fetches the UCP profile URI to say whether it is one.
+python -m eval.preflight --endpoint store
 
 # Layer 1 — functional: v2 discovery mechanics + per-tool dryRun-safe calls
 python -m functional.runner
@@ -128,7 +180,24 @@ python -m functional.runner --skip-dev-tools
 
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
 python -m functional.runner --endpoint store
-.venv/bin/python3 -m eval.runner --endpoint store
+
+# The UCP buyer journey. COMMITS: creates a cart and a checkout and PLACES A REAL
+# ORDER. Disposable lanes only. Without the flag every step is skipped with that
+# reason, and a test asserts no call escapes the guard.
+python -m functional.runner --endpoint store --allow-mutations
+
+# Gate the eval on what the static layer proved. A fixture whose expected tool
+# failed is skipped WITH THAT REASON rather than graded, so a plugin bug is not
+# charged to the model. An absent file grades everything.
+.venv/bin/python3 -m eval.runner --endpoint store \
+    --tool-health results/tool-health-store.json
+
+# Which context prompts to send, named after the install each mirrors.
+.venv/bin/python3 -m eval.runner --context-prompts core     # vanilla Shopware
+.venv/bin/python3 -m eval.runner --context-prompts none     # the control arm
+
+# A local model. Reads /v1/models to record which one actually answered.
+.venv/bin/python3 -m eval.runner --provider lmstudio --discovery-concurrency 1
 
 # Unit tests (offline, no server) — reporting, runner logic, throttle retry
 .venv/bin/python3 -m pytest tests -q
@@ -173,7 +242,12 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 |---|---|
 | `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
-| `functional/reporting.py` | Reusable pass/fail/skip harness + JSON report writer |
+| `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
+| `functional/journeys.py` | The UCP buyer journey. Those tools are one flow, so an isolated call mostly measures how the server words "not found". Commits, behind `--allow-mutations` |
+| `eval/preflight.py` | One read-only call, no model, ~1s. Fails with a named cause and, on the Store endpoint, probes the UCP profile URI — the one cause the error text can never name |
+| `eval/registry_check.py` | The server's declared ACL privileges against `toolclass`. Two independent sources disagreeing is what catches a tool wrongly filed as READ_ONLY, which would then be executed for real |
+| `.github/actions/setup-lane/` | Everything up to "a live lane with credentials". Values that used to cross step boundaries via `$GITHUB_ENV` are outputs here, because neither survives a job boundary |
+| `scripts/trunk-lane.sh` | The local-first path: preflight, static checks, journey, and optionally the eval via LM Studio |
 | `eval/fixtures_store.yaml` | Store API / UCP buyer-journey fixtures |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
 | `eval/runner.py` | Discovery-mode LLM eval: finds the tool, executes it, asserts the result, allows recovery |

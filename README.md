@@ -29,7 +29,22 @@ exercises both. Three things can go wrong:
    the default surface. Static tests can't catch this; only running real
    prompts through a real model does.
 
-This repo addresses all three, cheapest layer first:
+Four different questions have to be asked, and each can be green while the next
+is broken. Keeping them apart is what makes a failure mean something:
+
+| question | asked by | catches |
+|---|---|---|
+| Is the tool **registered**? | `eval/registry_check.py` over `bin/console debug:mcp` | a tool the server never wired up, and a tool whose declared ACL privileges disagree with our safety classification |
+| Is it **advertised**? | `eval/snapshot_tools.py`, `functional/runner.py` | discovery-layer breakage: a deferred tool leaking into the default surface, enablement leaking across sessions, a tool no toolset contains |
+| Is it **callable**? | `functional/runner.py`, `functional/journeys.py`, `eval/preflight.py` | a tool that is offered and rejects every call. This is the one that hid the longest |
+| Is it **chosen well**? | `eval/runner.py` | ambiguous descriptions, cross-group collisions, and whether the model recovers from a wrong first pick |
+
+The order matters and is enforced: the LLM eval is gated on the callable check
+(`--tool-health`), because grading a model on a tool that cannot run charges a
+plugin bug to the model and pays full model price per fixture to rediscover what
+one direct call already established.
+
+This repo addresses all of them, cheapest layer first:
 
 - **Layer 0 (static)**: `toollint.py` reads the committed catalogue snapshot and
   flags description problems with no server, no model and no tokens — runs on
@@ -41,6 +56,9 @@ This repo addresses all three, cheapest layer first:
   (default surface, toolsets, enable/isolation, pagination, tool-search) and
   then calls every tool with a minimal valid payload. Mutating tools use
   `dryRun=true`. Catches transport / schema / handler / discovery regressions.
+  On the Store endpoint it also walks the **UCP buyer journey** (below), because
+  those tools are one flow and an isolated call to any of them mostly measures
+  how the server words "not found".
 - **Layer 2 (LLM eval)**: natural-language prompts are sent to a real model in
   **discovery** mode — the default advertised surface only, with the runner
   executing meta-tool calls for real in an agentic loop, then executing the
@@ -196,7 +214,42 @@ python -m functional.runner --endpoint store
 ```
 
 Pass / fail / skip per check is printed to stdout. A JSON report is saved to
-`results/functional-<timestamp>.json`. Exit code is non-zero if any check fails.
+`results/functional-<timestamp>.json`, and a per-tool verdict to
+`results/tool-health-<endpoint>.json` — that file is what gates Layer 2.
+
+A check passes only if the call neither errored **nor reported failure in band**.
+That distinction is load-bearing: UCP reports every failure as HTTP 200, no
+JSON-RPC error, and `{"success": false}` in the body. Checking only the transport
+made 27 admin checks green over a mechanism that could not have seen a single
+Store failure — and hid six admin fixtures that were calling their tools wrong.
+
+### The UCP buyer journey
+
+`cart-get` needs an id only `cart-create` can produce; `checkout-*` needs a
+checkout; `order-get` needs a completed order. Calling them in isolation with
+invented ids measures almost nothing, which is most of what the Store suite used
+to report.
+
+Dry-run does not rescue it: the plugin rolls every mutating call back, so a
+dry-run `cart-create` returns a plausible id for a cart that no longer exists and
+the next step fails on a well-formed request. **A chained journey has to commit.**
+
+```bash
+# Skipped, with a recorded reason, unless you opt in:
+python -m functional.runner --endpoint store
+
+# Commits. Creates a cart and a checkout and PLACES A REAL ORDER.
+# Only for a disposable lane — CI, or a local trunk lane.
+python -m functional.runner --endpoint store --allow-mutations
+
+# discount-apply needs a promotion code; without one that step skips.
+UCP_JOURNEY_PROMO_CODE=WELCOME10 python -m functional.runner --endpoint store --allow-mutations
+```
+
+Each step's assertion is the next step's precondition, so a break is *located*
+rather than counted: a failure at `checkout-update` with `cart-create` green is a
+different bug report from both failing. Steps whose preconditions never arrived
+are skipped naming the missing key, not failed.
 
 ## Layer 2: LLM eval
 
@@ -567,6 +620,70 @@ non-meta fixtures and matching the committed snapshot, and every tool in
 drift guard: a tool added server-side fails the unit tests until someone writes
 prompts for it.
 
+## Test locally first
+
+CI takes ~8 minutes and spends real money, and a local run and a CI run can
+disagree for reasons that have nothing to do with the code. One command runs
+everything that costs nothing:
+
+```bash
+scripts/trunk-lane.sh              # preflight + static checks + UCP journey
+scripts/trunk-lane.sh --eval       # ... plus the LLM eval, via LM Studio
+```
+
+`--provider lmstudio` points the runner at a local OpenAI-compatible server
+(default `http://127.0.0.1:1234/v1`). It asks the server which model is loaded
+and records that — `qwen/qwen3.6-35b-a3b`, not a placeholder — and prices the run
+at $0.00, which is the truth rather than a gap. The numbers are not comparable to
+CI's; what it proves is that the harness works end to end, which is most of what
+breaks.
+
+Three things about a local lane, each of which cost a debugging session:
+
+- **The MCP rate limiter is ON locally and OFF in CI.** A suite pacing a few
+  hundred calls trips it, and the client's own backoff makes that look like a
+  hang. Drop the same override CI writes into
+  `config/packages/z-eval-no-mcp-rate-limit.yaml`.
+- **The UCP profile URI is fetched by the *server*.** It must name a host:port
+  the server can reach, which a host-mapped port is not: a shop published on
+  `:8088` through a proxy listens on `:8000` inside its own container. Set
+  `UCP_PROFILE_URI` accordingly.
+- **The journey commits.** Never point `--allow-mutations` at a shop you care
+  about.
+
+## Context prompts
+
+The server ships MCP **prompts** — `ShopwareContextPrompt` and its siblings — and
+the runner concatenates them with the server's own instructions. Every area ships
+its own, so sending all of them to every fixture puts instructions naming another
+area's tools in front of the model. Measured on a trunk lane:
+
+| endpoint | instructions | prompts | total |
+|---|---|---|---|
+| admin | 498 | `shopware-context`, `merchant-context`, `swag-dev-tools-context`, `swag-dev-tools-suggest-tooling` | **20,606 chars** |
+| store | 460 | *none* | **460 chars** |
+
+Two consequences worth stating plainly. **Admin and Store pass rates are not
+comparable** and never were — a Store model works the bare endpoint with no tool
+guide at all. And agentic-commerce is the only area shipping no prompt, which is
+a gap for that plugin rather than a property of its tools.
+
+`--context-prompts` selects a set named after the installation it mirrors, so a
+number measured here transfers to a real shop:
+
+```bash
+python -m eval.runner --context-prompts all             # a fully installed shop
+python -m eval.runner --context-prompts core            # vanilla Shopware
+python -m eval.runner --context-prompts core+merchant
+python -m eval.runner --context-prompts none            # the control arm
+```
+
+Core is in every non-empty set: `shopware-context` carries the discovery
+procedure, without which no area is reachable and every arm would fail for a
+reason unrelated to the prompt under test. The job summary reports what the
+prompts bought in points, and a per-area table across sets — which is where
+"does an irrelevant prompt hurt" shows up.
+
 ## Scope
 
 | Group | Tools |
@@ -632,8 +749,36 @@ When a fixture fails the LLM eval:
 
 ## CI: pinned Shopware ref + drift detection
 
-The eval workflow runs the suite against a Shopware checkout. To keep `main`
-green when descriptions change upstream, it uses two gates:
+The eval workflow builds a Shopware lane and runs the suite against it, in four
+jobs:
+
+```
+static ──┬── admin-eval ──┐
+         └── store-eval  ──┴── report
+```
+
+`static` proves the tools work and publishes `tool-health-<endpoint>.json`; the
+two eval jobs consume it and skip fixtures for tools it proved broken; `report`
+merges every job's output into one summary. `.github/actions/setup-lane` builds
+the lane and is used by all three lane-having jobs.
+
+Why four rather than one. A single failing admin fixture used to short-circuit
+every later step, so the Store steps reported `skipped` — which reads exactly
+like "the plugin is missing" and cost a round of chasing a composer problem that
+did not exist. And one job meant one summary, which GitHub silently discards
+above 1 MiB, precisely when a run goes badly enough to produce a big one.
+
+The lane cannot be cached or shared between jobs: it is a live MySQL plus a
+daemonised server, and the plugin repos track their default branches, so a cache
+key over this repo's SHA would go stale without saying so. Each job pays ~140s to
+build its own. They run in parallel, so wall clock is roughly unchanged; what it
+buys is isolation, independent re-runs, and a readable summary.
+
+A Store environment problem cannot withhold the admin numbers: the Store steps
+inside `static` are non-fatal to that job and feed a `store_ready` output that
+only `store-eval` requires.
+
+To keep `main` green when descriptions change upstream, it uses two gates:
 
 **A. Pinned SHA for PRs and `main` pushes.** The file `shopware.sha` at repo
 root holds the Shopware commit that PR/main runs check out (now a `trunk`
@@ -643,8 +788,20 @@ cannot flip the build red between commits. The plugin checkouts
 tracks its own repository default branch, so runs always exercise the latest
 plugin code. The trade-off is that plugin-side churn can turn a run red without
 a change here — pin a single run via the `dev_tools_ref` / `merchant_tools_ref`
-dispatch inputs. `shopware/agentic-commerce` tracks its default branch too, and
-is checked out unless `run_store=false`.
+dispatch inputs.
+
+`shopware/agentic-commerce` is **temporarily pinned** to
+`fix/mcp-tool-error-visibility-and-catalog-lookup-ids`
+([#154](https://github.com/shopware/agentic-commerce/pull/154)) and checked out
+unless `run_store=false`. Its default branch has neither in-band tool errors nor
+`dryRun`, so CI saw `-32603 Error while executing tool` with an empty body where
+a lane with #154 sees `{"success":false,"error":{…,"violations":[…]}}`. That
+single difference made a local run and a CI run disagree for an afternoon.
+**Remove the pin when #154 merges.**
+
+Related and also open: [shopware/shopware#18848](https://github.com/shopware/shopware/pull/18848)
+adds `debug:mcp --scope=store-api`. Until it lands, `eval/registry_check.py` sees
+the 30 admin tools and none of the Store ones.
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the
