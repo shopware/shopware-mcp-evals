@@ -51,8 +51,6 @@ from mcp_client import (
     mcp_toolsets_list,
 )
 
-# A phantom UUID that cannot exist — used for dryRun delete assertions.
-ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 # typeId of the Storefront sales-channel type (used to find a storefront channel).
 STOREFRONT_TYPE_ID = "8a243080f92e4c719546314b577cf82b"
 
@@ -528,6 +526,51 @@ def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -
     }
 
 
+def sellable_product(session: str, endpoint: Endpoint, sales_channel_id: str) -> str:
+    """A product the storefront can actually sell in this sales channel.
+
+    Not the same as "a product row exists". entity-search happily returns a
+    product that is inactive, out of stock, or not assigned to this channel, and
+    adding one of those to a cart answers `success: true` with an empty
+    lineItems array — a silent no-op that made the checkout check fail with
+    "Cart is empty" while looking like a checkout bug.
+    """
+    if not sales_channel_id:
+        return ""
+    payload = _payload(
+        mcp_call(
+            session,
+            "merchant-storefront-search",
+            {"salesChannelId": sales_channel_id, "term": "a", "limit": 5},
+            endpoint=endpoint,
+        )
+    )
+    items = payload.get("data")
+    items = items.get("products") if isinstance(items, dict) else items
+    return (items or [{}])[0].get("id", "") if isinstance(items, list) else ""
+
+
+def newest_log_file(session: str, endpoint: Endpoint) -> str:
+    """A log file the dev-tools log readers can actually open.
+
+    `file` defaults to an empty string, which is never a real filename, so both
+    log checks failed with "Log file not found" on every instance. The tool lists
+    the valid values in that very error, so ask it rather than guessing a name
+    that depends on the date and the APP_ENV.
+    """
+    text = mcp_result_text(
+        mcp_call(session, "swag-dev-tools-log-search", {"query": "x", "limit": 1}, endpoint=endpoint)
+    )
+    marker = "Available files:"
+    if marker not in (text or ""):
+        return ""
+    listed = text.split(marker, 1)[1].strip().rstrip('"}').split(",")
+    files = [f.strip().strip('"') for f in listed if f.strip()]
+    # Newest last: a dated name sorts chronologically, and an empty instance has
+    # only `dev.log`, which is still readable.
+    return files[-1] if files else ""
+
+
 def first_skill_name(session: str, endpoint: Endpoint) -> str:
     """A real skill name for load-skill, taken from list-skills.
 
@@ -542,12 +585,17 @@ def first_skill_name(session: str, endpoint: Endpoint) -> str:
     return ""
 
 
-def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str) -> str:
-    """A cart for merchant-cart-checkout to check out.
+def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str, product_id: str = "") -> str:
+    """A cart with something in it, for merchant-cart-checkout to check out.
 
     This creates one *in addition to* the cart the merchant-cart-manage check
     creates: that check has to make its own call to be a real assertion, and
     reusing this token would make the two indistinguishable on failure.
+
+    The line item is the point. An empty cart is rejected with "Cart is empty.
+    Add items with merchant-cart-manage first", so the checkout check never
+    reached checkout at all — it was asserting that an empty cart cannot be
+    ordered, which nobody doubted.
     """
     if not sales_channel_id:
         return ""
@@ -559,7 +607,21 @@ def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str) -
             endpoint=endpoint,
         )
     )
-    return payload.get("data", {}).get("token", "")
+    token = payload.get("data", {}).get("token", "")
+    if token and product_id:
+        mcp_call(
+            session,
+            "merchant-cart-manage",
+            {
+                "salesChannelId": sales_channel_id,
+                "action": "add",
+                "token": token,
+                "productId": product_id,
+                "quantity": 1,
+            },
+            endpoint=endpoint,
+        )
+    return token
 
 
 def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argparse.Namespace) -> None:
@@ -571,13 +633,19 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     run_checks(rep, session, endpoint, CORE_CHECKS, ctx)
 
     rep.section("Merchant tools")
-    ctx["cart_token"] = create_cart_token(session, endpoint, ctx["sales_channel_id"])
+    # A storefront-visible product, not just any product row. entity-search
+    # returns products that are inactive, out of stock, or not in this channel,
+    # and adding one answers `success: true` with an empty cart — so the checkout
+    # check failed with "Cart is empty" while looking like a checkout bug.
+    ctx["cart_product_id"] = sellable_product(session, endpoint, ctx["sales_channel_id"])
+    ctx["cart_token"] = create_cart_token(session, endpoint, ctx["sales_channel_id"], ctx["cart_product_id"])
     run_checks(rep, session, endpoint, MERCHANT_CHECKS, ctx)
 
     rep.section("Dev tools")
     if args.skip_dev_tools:
         rep.skip("dev tools (--skip-dev-tools)")
         return
+    ctx["log_file"] = newest_log_file(session, endpoint)
     # Needs the tool it is named after to have run, so it cannot be part of ctx.
     ctx["skill_name"] = first_skill_name(session, endpoint)
     run_checks(rep, session, endpoint, DEV_CHECKS, ctx)

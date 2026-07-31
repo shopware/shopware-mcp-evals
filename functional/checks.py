@@ -20,11 +20,20 @@ get cart token or customer ID" depending on which prerequisite actually failed.
 from __future__ import annotations
 
 import json
+import os
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # A phantom UUID that cannot exist — used for dryRun delete assertions.
-ZERO_UUID = "00000000-0000-0000-0000-000000000000"
+# 32 hex characters with NO dashes. That is the only form Shopware's DAL accepts:
+# the dashed form is rejected with "Value is not a valid UUID", so the delete
+# check was asserting the argument validator rather than the tool it names.
+#
+# Defined here and imported by the runner. It used to be declared in both, with
+# different values, and the table's copy — the one that decides the payload — was
+# the wrong one.
+ZERO_UUID = "0" * 32
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,15 @@ class ToolCheck:
             if not ctx.get(key):
                 return reason
         return None
+
+
+# A real, fetchable image. The previous value (assets.shopware.com) answers 403,
+# so every run reported the tool broken when the fixture was. Override for an
+# instance with no outbound network.
+MEDIA_UPLOAD_URL = os.environ.get(
+    "MCP_MEDIA_UPLOAD_URL",
+    "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png",
+)
 
 
 CORE_CHECKS: tuple[ToolCheck, ...] = (
@@ -94,15 +112,26 @@ CORE_CHECKS: tuple[ToolCheck, ...] = (
     ToolCheck(
         "shopware-order-state",
         "(dryRun)",
-        lambda c: {"orderId": c["order_id"], "dryRun": True},
+        # At least one action is required — the tool says so, and without it the
+        # call never reaches the state machine this check exists to exercise.
+        # `process` is a transition every order in any state can be previewed for.
+        lambda c: {"orderId": c["order_id"], "orderAction": "process", "dryRun": True},
         (("order_id", "no order found"),),
     ),
     ToolCheck(
         "shopware-media-upload",
         "",
+        # Two things were wrong here, and both read as the tool failing. The URL
+        # answers 403, so the fetch could never succeed; and the extension comes
+        # from `fileName`, not from the URL, so an extensionless name fails with
+        # 'The file extension "" ... is not supported' even for a URL that works.
+        # The name has to be unique per run. A fixed one uploads fine once and
+        # then fails with 'A file with the name "…" already exists' on every
+        # later run against the same instance — green in CI, where the instance
+        # is new each time, and broken on the trunk lane anyone tests against.
         lambda c: {
-            "url": "https://assets.shopware.com/media/shopware_signet_blue.svg",
-            "fileName": "mcp-test-logo",
+            "url": MEDIA_UPLOAD_URL,
+            "fileName": f"mcp-test-{uuid.uuid4().hex[:12]}.png",
         },
         # Set from --skip-media-upload: the only check that writes a real file.
         (("media_upload_enabled", "--skip-media-upload"),),
@@ -186,8 +215,22 @@ MERCHANT_CHECKS: tuple[ToolCheck, ...] = (
 )
 
 DEV_CHECKS: tuple[ToolCheck, ...] = (
-    ToolCheck("swag-dev-tools-log-search", "(query: error)", lambda c: {"query": "error", "limit": 5}),
-    ToolCheck("swag-dev-tools-log-stream", "(last 10)", lambda c: {"limit": 10}),
+    # `file` defaults to "", which is never a real filename — both readers
+    # failed with "Log file not found" on every instance, naming the valid
+    # values in the error. gather_context asks for that list rather than
+    # guessing a name that depends on the date and APP_ENV.
+    ToolCheck(
+        "swag-dev-tools-log-search",
+        "(query: error)",
+        lambda c: {"query": "error", "limit": 5, "file": c["log_file"]},
+        (("log_file", "no log files on this instance"),),
+    ),
+    ToolCheck(
+        "swag-dev-tools-log-stream",
+        "(last 10)",
+        lambda c: {"limit": 10, "file": c["log_file"]},
+        (("log_file", "no log files on this instance"),),
+    ),
     ToolCheck("swag-dev-tools-list-extensions", ""),
     ToolCheck("swag-dev-tools-list-skills", ""),
     # scaffold with no args lists the available types — non-destructive.
