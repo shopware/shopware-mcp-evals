@@ -393,6 +393,8 @@ runs:
     - name: Create integration
       shell: bash
       id: integration
+      env:
+        APP_URL: ${{ inputs.app_url }}
       run: |
         set -euo pipefail
 
@@ -429,8 +431,12 @@ runs:
     # -------------------------------------------------------------------
     - name: Fetch sales-channel access key
       shell: bash
+      # STORE_PLUGIN_OK is written to $GITHUB_ENV by the plugin step above and is
+      # therefore visible here, inside the same action.
       if: ${{ !cancelled() && inputs.run_store == 'true' && env.STORE_PLUGIN_OK == 'true' }}
       id: sc
+      env:
+        APP_URL: ${{ inputs.app_url }}
       run: |
         set -euo pipefail
         TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \

@@ -82,6 +82,60 @@ concurrency:
   # carries the only Store catalogue snapshot we get.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Workflow level, not job level. These were declared on the single job that used
+# to do everything; splitting it into four dropped them, and GitHub renders an
+# undefined `env.X` as an empty string rather than failing — so RUN_STORE went
+# empty, the agentic-commerce checkout silently skipped, and the lane came up
+# with 21 of 30 tools. Declaring them here means a fifth job cannot repeat that.
+env:
+  SHOPWARE_REPO: shopware/shopware
+  EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
+  EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
+  APP_URL: http://localhost:8000
+  # The 0.90/0.85 thresholds predate execution and recovery, so they were
+  # held advisory for one run to see whether they still described a
+  # meaningful bar under the stronger definition of `passed`. Measured:
+  # primary 97% (93/96), second validator 95% (91/96) — both clear their
+  # existing gate with room, so the numbers stay and the window is closed.
+  #
+  # Deliberately NOT raised to match. That is one sample, and this repo has
+  # already been bitten by a threshold set from one: the second validator
+  # scored 89% on one commit and 90% on the next with nothing changed in
+  # between. Raise them from a run of nightlies, not from this.
+  #
+  # The eval is the bulk of the wall clock: ~425s of summed fixture latency per
+  # model, which at the old 4-way concurrency was ~106s of a 155s step. It sat
+  # at 4 because the MCP endpoint answered 429 above that, and the step below
+  # now disables the MCP rate limiter on the throwaway instance, which removes
+  # that ceiling. Measured effect: the two eval steps went 314s -> ~150-170s.
+  #
+  # 12 is deliberately short of the theoretical floor. sum_latency/12 is ~35s
+  # against a slowest-single-fixture bound of ~14s, so there is still headroom,
+  # and the next ceilings (the OpenAI account's own limits and one PHP-FPM
+  # worker pool) are not measured yet. The runner reads this as the default for
+  # --discovery-concurrency, so it applies to the admin and store suites alike.
+  EVAL_DISCOVERY_CONCURRENCY: '12'
+  # Store/UCP suite: on by default, opt OUT with run_store=false.
+  # `github.event.inputs` is null on push/schedule, so `!= 'false'` resolves
+  # to true there — which is the point. It used to be `== 'true'`, meaning
+  # the whole Store suite only ever ran on a manual dispatch that nobody
+  # triggered, so its 42 fixtures had never once executed against a server.
+  RUN_STORE: ${{ github.event.inputs.run_store != 'false' }}
+  # Nightly always triages. On a PR, the `run-triage` label asks for it; on a
+  # manual dispatch, the `triage` input does. Not on by default — it re-runs
+  # failures under two more arms, which costs real money on a branch that may
+  # still be iterating.
+  #
+  # The label exists because workflow_dispatch inputs are validated against
+  # the workflow file on the DEFAULT branch, so the input below cannot be
+  # passed until this file is on main. A label is read from the event and
+  # works on the branch immediately.
+  TRIAGE: >-
+    ${{ github.event_name == 'schedule'
+        || github.event.inputs.triage == 'true'
+        || contains(github.event.pull_request.labels.*.name, 'run-triage') }}
+
+
 jobs:
   # ---------------------------------------------------------------------------
   # 1. Static proof. No model, no LLM spend.
