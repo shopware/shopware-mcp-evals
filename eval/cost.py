@@ -39,7 +39,7 @@ def load_pricing(path: str | Path | None = None) -> dict:
     which renders as "not priced" rather than as free."""
     try:
         return yaml.safe_load(Path(path or DEFAULT_PRICING).read_text()) or {}
-    except OSError, yaml.YAMLError:
+    except (OSError, yaml.YAMLError):
         return {}
 
 

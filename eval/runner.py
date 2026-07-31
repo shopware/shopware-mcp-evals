@@ -37,6 +37,7 @@ import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -55,6 +56,7 @@ from eval.report import (
     print_single_mode,
     print_tier_block,
 )
+from eval.result_schema import SCHEMA_VERSION, FixtureResult
 from eval.scoring import (
     count_rate_limited,
     discovery_summary,
@@ -264,7 +266,7 @@ def _search_rows(result_text: str) -> tuple[list[dict], int | None]:
     """
     try:
         payload = json.loads(result_text)
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return [], None
     rows = []
     for position, r in enumerate(payload.get("data", []), start=1):
@@ -287,6 +289,150 @@ def _search_contains_expected(result_text: str, expected_tool: str) -> bool:
     return any(t.get("name") == expected_tool for t in _search_result_tools(result_text))
 
 
+@dataclass
+class DiscoveryState:
+    """The accumulators for one discovery run, gathered into one object instead
+    of ~25 parallel locals. The loop reads and writes fields; `to_result` is the
+    single place the output record (see eval/result_schema.FixtureResult) is
+    assembled, so the schema and the mutation points can each be tested without
+    driving a live loop.
+
+    Loop-control values (messages, tools, catalog) stay local to the loop — they
+    do not appear in the record and carrying them here would only widen the
+    object without making anything clearer.
+    """
+
+    arm: str
+    selected_tool: str | None = None
+    selected_input: dict = field(default_factory=dict)
+    fail_reason: str | None = None
+    # Every non-meta call the model made, in order. The first is `selected_tool`
+    # (the old metric); the rest are what recovery looks like.
+    attempted_tools: list = field(default_factory=list)
+    first_tool_correct: bool | None = None
+    resolved: bool = False
+    steps_to_correct: int | None = None
+    dry_run_forced: bool = False
+    execution: str | None = None
+    stop: bool = False
+    meta_calls: list = field(default_factory=list)
+    search_hit: bool | None = None
+    search_rank: int | None = None
+    search_score: float | None = None
+    search_candidates: int | None = None
+    enabled_toolsets: list = field(default_factory=list)
+    tokens: dict = field(default_factory=lambda: {"input": 0, "cached_input": 0, "output": 0})
+    # Bytes of tool-result payload the model was made to read. A tool that
+    # answers correctly but returns 40k of JSON is expensive for every client,
+    # and nothing else in the suite would notice.
+    payload_bytes: int = 0
+    steps: int = 0
+    surface_tokens: int = 0
+    surface_tokens_peak: int = 0
+
+    def add_tokens(self, turn_tokens: dict) -> None:
+        for bucket, count in turn_tokens.items():
+            self.tokens[bucket] = self.tokens.get(bucket, 0) + count
+
+    def record_search(self, result_text: str, expected_tool: str | None, catalog: dict) -> bool:
+        """Absorb a shopware-tool-search result. Tracks whether the expected tool
+        was surfaced and the best rank it ever reached (a later, vaguer query
+        cannot make the catalogue look worse than it is), and makes any
+        search-surfaced tool callable next turn. Returns whether the catalog grew.
+        """
+        rows, candidates = _search_rows(result_text)
+        hit = any(r["tool"].get("name") == expected_tool for r in rows)
+        self.search_hit = hit if self.search_hit is None else (self.search_hit or hit)
+        if candidates is not None:
+            self.search_candidates = candidates
+        for r in rows:
+            if r["tool"].get("name") == expected_tool and (self.search_rank is None or r["rank"] < self.search_rank):
+                self.search_rank, self.search_score = r["rank"], r["score"]
+        changed = False
+        for t in (r["tool"] for r in rows):
+            if t["name"] not in catalog:
+                catalog[t["name"]] = t
+                changed = True
+        return changed
+
+    def record_enable(self, toolset: str, session_id: str, endpoint, catalog: dict) -> bool:
+        """Absorb a successful toolset-enable: record it and simulate
+        tools/list_changed by re-fetching the surface. Returns whether it grew."""
+        self.enabled_toolsets.append(toolset)
+        changed = False
+        for t in mcp_tools_list_all(session_id, endpoint=endpoint):
+            if t["name"] not in catalog:
+                catalog[t["name"]] = t
+                changed = True
+        return changed
+
+    def to_result(self, fixture: dict, *, passed: bool, latency: float) -> FixtureResult:
+        expected_toolset = fixture.get("expected_toolset")
+        enabled_correct_toolset = None
+        if expected_toolset and self.enabled_toolsets:
+            enabled_correct_toolset = expected_toolset in self.enabled_toolsets
+
+        meta_names = {m["tool"] for m in self.meta_calls}
+        used_search = "shopware-tool-search" in meta_names
+        used_toolsets = bool(meta_names & {"shopware-toolsets-list", "shopware-toolset-enable"})
+        if self.selected_tool is None:
+            discovery_path = "none"
+        elif used_search and used_toolsets:
+            discovery_path = "mixed"
+        elif used_search:
+            discovery_path = "search"
+        elif used_toolsets:
+            discovery_path = "toolsets"
+        else:
+            discovery_path = "direct"
+
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "id": fixture["id"],
+            "category": fixture.get("category", ""),
+            "mode": self.arm,
+            "prompt": fixture["prompt"],
+            "expected_tool": fixture.get("expected_tool"),
+            "expected_toolset": expected_toolset,
+            "selected_tool": self.selected_tool,
+            "selected_input": self.selected_input,
+            "passed": passed,
+            "fail_reason": None if passed else self.fail_reason,
+            # Whether the FIRST answer was the right tool. The scorecard reads
+            # this for precision rather than `passed`, which since recovery no
+            # longer implies the first pick was correct — a recovered fixture
+            # would otherwise credit the wrong tool with a good selection.
+            "first_tool_correct": self.first_tool_correct,
+            # Both halves: the first answer named the right tool AND that call
+            # worked. `ok` alone is only "the server accepted it", which a wrong
+            # tool called competently also satisfies.
+            "first_try": bool(self.attempted_tools)
+            and self.attempted_tools[0]["correct"]
+            and self.attempted_tools[0].get("ok", True) is True,
+            "recovered": passed and len(self.attempted_tools) > 1,
+            "attempted_tools": self.attempted_tools,
+            "wrong_calls": sum(1 for a in self.attempted_tools if not a["correct"]),
+            "steps_to_correct": self.steps_to_correct,
+            "execution": self.execution,
+            "dry_run_forced": self.dry_run_forced,
+            "steps": self.steps,
+            "meta_calls": self.meta_calls,
+            "discovery_path": discovery_path,
+            "search_hit": self.search_hit,
+            "search_rank": self.search_rank,
+            "search_score": self.search_score,
+            "search_candidates": self.search_candidates,
+            "enabled_toolsets": self.enabled_toolsets,
+            "enabled_correct_toolset": enabled_correct_toolset,
+            "latency_s": latency,
+            "tokens": self.tokens,
+            "payload_bytes": self.payload_bytes,
+            "surface_tokens": self.surface_tokens,
+            "surface_tokens_peak": self.surface_tokens_peak,
+            "notes": fixture.get("notes", ""),
+        }
+
+
 def run_fixture_discovery(
     provider: str,
     client,
@@ -296,7 +442,7 @@ def run_fixture_discovery(
     max_steps: int,
     endpoint=ADMIN,
     arm: str = "discovery",
-) -> dict:
+) -> FixtureResult:
     prompt = fixture["prompt"]
     # Absent on a negative fixture, where no tool is the right answer. The
     # terminal set is then just `acceptable` (normally empty), which is correct:
@@ -305,8 +451,7 @@ def run_fixture_discovery(
     expected_tool = fixture.get("expected_tool")
     acceptable = set(fixture.get("acceptable_tools", []))
     terminal_tools = ({expected_tool} | acceptable) if expected_tool else acceptable
-    tools_fn = tools_for_anthropic if provider == "anthropic" else tools_for_openai
-    turn_fn = anthropic_turn if provider == "anthropic" else openai_turn
+    prov = PROVIDERS[provider]
 
     # Fresh session per fixture: toolset enablement persists per Mcp-Session-Id
     # and would leak across fixtures on a shared session.
@@ -357,14 +502,15 @@ def run_fixture_discovery(
                 f"({len(catalog)} tools offered) — this arm cannot answer anything about it"
             )
             return record
-    tools = tools_fn(list(catalog.values()))
+    tools = prov.tools_for(list(catalog.values()))
     # What the advertised surface costs to put in front of the model. The
     # opening figure is the price of v2's promise — a fresh session shows three
     # meta-tools, not the catalogue — and the peak is what the model actually
     # paid on later turns once discovery had pulled tools in. The gap between
     # them is the discovery layer's real context bill.
-    surface_tokens = _surface_tokens(tools)
-    surface_tokens_peak = surface_tokens
+    st = DiscoveryState(arm=arm)
+    st.surface_tokens = _surface_tokens(tools)
+    st.surface_tokens_peak = st.surface_tokens
 
     messages = []
     # Every provider except Anthropic carries the context prompt as a system
@@ -372,41 +518,18 @@ def run_fixture_discovery(
     # anthropic_turn). This used to test `== "openai"`, which meant the `github`
     # arm ran with no context prompt at all while its report recorded
     # `system_prompt: true` — a whole provider silently measuring something else,
-    # and the reason the prompt inventory below is worth recording.
-    if provider != "anthropic" and system_prompt:
+    # and the reason the prompt inventory below is worth recording. It is now one
+    # flag on the Provider, so the two sites below cannot disagree.
+    if not prov.system_as_param and system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    selected_tool, selected_input = None, {}
-    fail_reason = None
-    # Every non-meta call the model made, in order. The first is `selected_tool`
-    # (the old metric); the rest are what recovery looks like.
-    attempted_tools = []
-    first_tool_correct = None
-    resolved = False
-    steps_to_correct = None
-    dry_run_forced = False
-    execution = None
-    stop = False
-    meta_calls = []
-    search_hit = None
-    search_rank = None
-    search_score = None
-    search_candidates = None
-    enabled_toolsets = []
-    tokens = {"input": 0, "cached_input": 0, "output": 0}
-    # Bytes of tool-result payload the model was made to read. A tool that
-    # answers correctly but returns 40k of JSON is expensive for every client,
-    # and nothing else in the suite would notice.
-    payload_bytes = 0
-    steps = 0
     t0 = time.time()
 
-    while steps < max_steps:
-        steps += 1
-        turn = turn_fn(client, model, system_prompt if provider == "anthropic" else None, messages, tools)
-        for bucket, count in turn["tokens"].items():
-            tokens[bucket] = tokens.get(bucket, 0) + count
+    while st.steps < max_steps:
+        st.steps += 1
+        turn = prov.turn(client, model, system_prompt if prov.system_as_param else None, messages, tools)
+        st.add_tokens(turn["tokens"])
 
         if not turn["tool_calls"]:
             # Only when nothing was ever attempted. A model that called the
@@ -415,8 +538,8 @@ def run_fixture_discovery(
             # "no_tool_call" is what hid a broken assertion tier for three
             # runs: every Store failure read as "the model called nothing"
             # when it had in fact called exactly the right tool.
-            if not attempted_tools:
-                fail_reason = "no_tool_call"
+            if not st.attempted_tools:
+                st.fail_reason = "no_tool_call"
             break
 
         messages.append(turn["assistant_message"])
@@ -430,64 +553,17 @@ def run_fixture_discovery(
             # listing toolsets before enabling one is correct.
             answering = call["name"] in terminal_tools or call["name"] not in META_TOOLS
             if answering:
-                correct = call["name"] in terminal_tools
-                if selected_tool is None:
-                    # The first answer is what the old first-try metric measured;
-                    # keep it under the same name so historical reports and the
-                    # per-tool scorecard still mean what they meant.
-                    selected_tool, selected_input = call["name"], call["input"]
-                    first_tool_correct = correct
-
-                attempt = {"tool": call["name"], "correct": correct, "step": steps}
-                args, forced = prepare_call(call["name"], call["input"])
-                dry_run_forced = dry_run_forced or forced
-
-                if not is_executable(call["name"]):
-                    # Nothing safe to do with it — no dryRun to hide behind, or
-                    # a tool the snapshot has never seen. Graded on selection
-                    # alone, which is where the whole suite used to be.
-                    attempt["executed"] = False
-                    attempted_tools.append(attempt)
-                    execution = "skipped_unsafe" if classify(call["name"]) else "skipped_unclassified"
-                    if not correct:
-                        fail_reason = "wrong_tool"
-                    resolved = correct
-                    stop = True
+                if _handle_answering_call(st, call, fixture, terminal_tools, session_id, endpoint, tool_results):
                     break
-
-                resp = mcp_call(session_id, call["name"], args, endpoint=endpoint)
-                err = mcp_call_error(resp)
-                result_text = mcp_result_text(resp) or ""
-                payload_bytes += len(result_text.encode("utf-8"))
-                execution = "executed"
-
-                ok, reason = check(fixture.get("expect_result"), result_text, err)
-                # The server's own words, truncated. Without this the report
-                # could say a call failed but never what the server said, so
-                # diagnosing it meant re-running with a debugger attached.
-                attempt |= {"executed": True, "ok": ok, "reason": reason, "error": (err or "")[:200]}
-                attempted_tools.append(attempt)
-
-                if correct and ok:
-                    resolved = True
-                    steps_to_correct = steps
-                    stop = True
-                    break
-
-                # Wrong tool, or the right tool called badly. Hand back what the
-                # server actually said and let the model correct itself — that
-                # recovery is the thing being measured, so no hint is injected.
-                fail_reason = reason if correct else "wrong_tool"
-                tool_results.append((call["id"], result_text or f"Error: {err}"))
                 continue
 
             # Execute discovery meta-tools for real and feed results back.
             resp = mcp_call(session_id, call["name"], call["input"], endpoint=endpoint)
             err = mcp_call_error(resp)
             result_text = mcp_result_text(resp) or (f"Error: {err}" if err else "")
-            payload_bytes += len(result_text.encode("utf-8"))
+            st.payload_bytes += len(result_text.encode("utf-8"))
             tool_results.append((call["id"], result_text))
-            meta_calls.append(
+            st.meta_calls.append(
                 {
                     "tool": call["name"],
                     "input": call["input"],
@@ -495,39 +571,18 @@ def run_fixture_discovery(
                 }
             )
             if call["name"] == "shopware-tool-search":
-                rows, candidates = _search_rows(result_text)
-                hit = any(r["tool"].get("name") == expected_tool for r in rows)
-                search_hit = hit if search_hit is None else (search_hit or hit)
-                if candidates is not None:
-                    search_candidates = candidates
-                # A fixture may search several times with different wording.
-                # Keep the best placement the expected tool ever reached: that
-                # is the ranking the model had its best chance from, so a later
-                # vaguer query cannot make the catalogue look worse than it is.
-                for r in rows:
-                    if r["tool"].get("name") == expected_tool and (search_rank is None or r["rank"] < search_rank):
-                        search_rank, search_score = r["rank"], r["score"]
-                # Make search-surfaced tools callable next turn.
-                for t in (r["tool"] for r in rows):
-                    if t["name"] not in catalog:
-                        catalog[t["name"]] = t
-                        catalog_changed = True
+                catalog_changed |= st.record_search(result_text, expected_tool, catalog)
             if call["name"] == "shopware-toolset-enable" and not err:
-                enabled_toolsets.append(call["input"].get("toolset", ""))
-                # Simulate tools/list_changed: re-fetch the advertised surface.
-                for t in mcp_tools_list_all(session_id, endpoint=endpoint):
-                    if t["name"] not in catalog:
-                        catalog[t["name"]] = t
-                        catalog_changed = True
+                catalog_changed |= st.record_enable(call["input"].get("toolset", ""), session_id, endpoint, catalog)
 
         # `stop` rather than "a tool was selected": a wrong first pick no longer
         # ends the run, because whether the model recovers from it is the point.
-        if stop:
+        if st.stop:
             break
 
         if catalog_changed:
-            tools = tools_fn(list(catalog.values()))
-            surface_tokens_peak = max(surface_tokens_peak, _surface_tokens(tools))
+            tools = prov.tools_for(list(catalog.values()))
+            st.surface_tokens_peak = max(st.surface_tokens_peak, _surface_tokens(tools))
 
         builder_output = turn["tool_result_builder"](tool_results)
         if isinstance(builder_output, list):
@@ -539,126 +594,249 @@ def run_fixture_discovery(
         # call failed its assertion is still a step-cap exit, but "too_few:data"
         # is the actionable half of that and the reason worth keeping. Only a
         # run that never produced an answer is reported as the cap itself.
-        if not attempted_tools:
-            fail_reason = "step_cap"
+        if not st.attempted_tools:
+            st.fail_reason = "step_cap"
 
     latency = round(time.time() - t0, 2)
 
-    meta_names = {m["tool"] for m in meta_calls}
-    used_search = "shopware-tool-search" in meta_names
-    used_toolsets = bool(meta_names & {"shopware-toolsets-list", "shopware-toolset-enable"})
-    if selected_tool is None:
-        discovery_path = "none"
-    elif used_search and used_toolsets:
-        discovery_path = "mixed"
-    elif used_search:
-        discovery_path = "search"
-    elif used_toolsets:
-        discovery_path = "toolsets"
-    else:
-        discovery_path = "direct"
-
-    if is_negative(fixture) or execution is None:
+    if is_negative(fixture) or st.execution is None:
         # Nothing was executed, so the old rule is the only one available: a
         # negative fixture passes by declining, and a fixture whose model never
         # answered has nothing to assert on.
-        passed = is_correct(selected_tool, fixture, fail_reason)
+        passed = is_correct(st.selected_tool, fixture, st.fail_reason)
     else:
         # The call has to have run and satisfied the fixture's expectation, not
         # merely been named. `resolved` covers recovery: the model may have got
         # there on a later attempt.
-        passed = resolved
-    if not passed and fail_reason is None:
-        fail_reason = "wrong_tool"
-    if passed and fail_reason == "no_tool_call":
+        passed = st.resolved
+    if not passed and st.fail_reason is None:
+        st.fail_reason = "wrong_tool"
+    if passed and st.fail_reason == "no_tool_call":
         # Declining IS the pass on a negative fixture. Leaving the reason set
         # would render a passing fixture with a failure reason attached.
-        fail_reason = None
+        st.fail_reason = None
 
-    expected_toolset = fixture.get("expected_toolset")
-    enabled_correct_toolset = None
-    if expected_toolset and enabled_toolsets:
-        enabled_correct_toolset = expected_toolset in enabled_toolsets
+    return st.to_result(fixture, passed=passed, latency=latency)
 
-    return {
-        "id": fixture["id"],
-        "category": fixture.get("category", ""),
-        "mode": arm,
-        "prompt": prompt,
-        "expected_tool": expected_tool,
-        "expected_toolset": expected_toolset,
-        "selected_tool": selected_tool,
-        "selected_input": selected_input,
-        "passed": passed,
-        "fail_reason": None if passed else fail_reason,
-        # Whether the FIRST answer was the right tool. The scorecard reads this
-        # for precision rather than `passed`, which since recovery no longer
-        # implies the first pick was correct — a recovered fixture would
-        # otherwise credit the wrong tool with a good selection.
-        "first_tool_correct": first_tool_correct,
-        # Both halves: the first answer named the right tool AND that call
-        # worked. `ok` alone is only "the server accepted it", which a wrong
-        # tool called competently also satisfies.
-        "first_try": bool(attempted_tools)
-        and attempted_tools[0]["correct"]
-        and attempted_tools[0].get("ok", True) is True,
-        "recovered": passed and len(attempted_tools) > 1,
-        "attempted_tools": attempted_tools,
-        "wrong_calls": sum(1 for a in attempted_tools if not a["correct"]),
-        "steps_to_correct": steps_to_correct,
-        "execution": execution,
-        "dry_run_forced": dry_run_forced,
-        "steps": steps,
-        "meta_calls": meta_calls,
-        "discovery_path": discovery_path,
-        "search_hit": search_hit,
-        "search_rank": search_rank,
-        "search_score": search_score,
-        "search_candidates": search_candidates,
-        "enabled_toolsets": enabled_toolsets,
-        "enabled_correct_toolset": enabled_correct_toolset,
-        "latency_s": latency,
-        "tokens": tokens,
-        "payload_bytes": payload_bytes,
-        "surface_tokens": surface_tokens,
-        "surface_tokens_peak": surface_tokens_peak,
-        "notes": fixture.get("notes", ""),
-    }
+
+def _handle_answering_call(
+    st: DiscoveryState,
+    call: dict,
+    fixture: dict,
+    terminal_tools: set,
+    session_id: str,
+    endpoint,
+    tool_results: list,
+) -> bool:
+    """One answering (non-meta) call. Mutates `st` and returns whether the loop
+    should stop — an unsafe tool or a correct-and-passing call both end the run,
+    while a wrong or badly-called tool hands the server's words back and lets the
+    model recover, so the caller continues.
+    """
+    correct = call["name"] in terminal_tools
+    if st.selected_tool is None:
+        # The first answer is what the old first-try metric measured; keep it
+        # under the same name so historical reports and the per-tool scorecard
+        # still mean what they meant.
+        st.selected_tool, st.selected_input = call["name"], call["input"]
+        st.first_tool_correct = correct
+
+    attempt = {"tool": call["name"], "correct": correct, "step": st.steps}
+    args, forced = prepare_call(call["name"], call["input"])
+    st.dry_run_forced = st.dry_run_forced or forced
+
+    if not is_executable(call["name"]):
+        # Nothing safe to do with it — no dryRun to hide behind, or a tool the
+        # snapshot has never seen. Graded on selection alone, which is where the
+        # whole suite used to be.
+        attempt["executed"] = False
+        st.attempted_tools.append(attempt)
+        st.execution = "skipped_unsafe" if classify(call["name"]) else "skipped_unclassified"
+        if not correct:
+            st.fail_reason = "wrong_tool"
+        st.resolved = correct
+        st.stop = True
+        return True
+
+    resp = mcp_call(session_id, call["name"], args, endpoint=endpoint)
+    err = mcp_call_error(resp)
+    result_text = mcp_result_text(resp) or ""
+    st.payload_bytes += len(result_text.encode("utf-8"))
+    st.execution = "executed"
+
+    ok, reason = check(fixture.get("expect_result"), result_text, err)
+    # The server's own words, truncated. Without this the report could say a call
+    # failed but never what the server said, so diagnosing it meant re-running
+    # with a debugger attached.
+    attempt |= {"executed": True, "ok": ok, "reason": reason, "error": (err or "")[:200]}
+    st.attempted_tools.append(attempt)
+
+    if correct and ok:
+        st.resolved = True
+        st.steps_to_correct = st.steps
+        st.stop = True
+        return True
+
+    # Wrong tool, or the right tool called badly. Hand back what the server
+    # actually said and let the model correct itself — that recovery is the thing
+    # being measured, so no hint is injected.
+    st.fail_reason = reason if correct else "wrong_tool"
+    tool_results.append((call["id"], result_text or f"Error: {err}"))
+    return False
 
 
 # ---------------------------------------------------------------------------
-# Reporting
+# Providers
+#
+# One registry entry per provider, so adding a fifth is a single definition
+# rather than an edit in tools_fn/turn_fn selection, two system-prompt branches,
+# build_client, resolve_model and require_credentials. That scattering is what
+# let the system-prompt check drift from `== "anthropic"` to `== "openai"` in
+# one place only, silently running the github arm prompt-less while its report
+# claimed otherwise.
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# The SDK client per provider, credential value in. Lazily imported so a run
+# with one provider does not require the other's package, and reading the base
+# URL globals at call time so a test that overrides them is honoured.
+def _anthropic_client(key: str):
+    import anthropic
 
-PROVIDER_DEFAULTS = {
-    "anthropic": "claude-sonnet-4-6",
-    # This is what CI resolves the PRIMARY eval to — the workflow's `eval_model`
-    # input defaults to empty, so changing this constant changes the gating
+    return anthropic.Anthropic(api_key=key)
+
+
+def _openai_client(key: str):
+    from openai import OpenAI
+
+    return OpenAI(api_key=key, base_url=None)
+
+
+def _github_client(key: str):
+    # GitHub Models speaks the OpenAI wire format, so the same adapter and turn
+    # function work — only the base URL and credential differ.
+    from openai import OpenAI
+
+    return OpenAI(api_key=key, base_url=GITHUB_MODELS_BASE_URL)
+
+
+def _lmstudio_client(key: str):
+    from openai import OpenAI
+
+    return OpenAI(api_key=key, base_url=LMSTUDIO_BASE_URL)
+
+
+@dataclass(frozen=True)
+class Provider:
+    """One model provider. The three per-call variations — tool-schema shape,
+    turn implementation, and where the context prompt goes — live here as one
+    object instead of `if provider == ...` in three functions.
+
+    The adapter/turn/client/dynamic-model callables are held by NAME and resolved
+    through this module's globals at call time. That decouples the registry from
+    definition order (turn functions are near the top, lmstudio_model at the
+    bottom) and, importantly, keeps late binding: the adapter test suite
+    monkeypatches `openai_turn`/`anthropic_turn` and expects the loop to pick the
+    replacement up.
+    """
+
+    name: str
+    default_model: str
+    # Doubles as the module-global that holds the credential value, which
+    # require_credentials reads (and tests override with setattr).
+    credential_env: str
+    # Anthropic takes the context prompt as a top-level `system` parameter; every
+    # OpenAI-compatible provider carries it as a system message. This one bool is
+    # what the drifted `== "openai"` check should always have been.
+    system_as_param: bool
+    tools_attr: str
+    turn_attr: str
+    client_attr: str
+    # Set only for providers whose model is discovered at runtime (LM Studio
+    # serves whatever is loaded and ignores the requested name).
+    dynamic_model_attr: str | None = None
+
+    def tools_for(self, mcp_tools: list[dict]) -> list[dict]:
+        return globals()[self.tools_attr](mcp_tools)
+
+    def turn(self, client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
+        return globals()[self.turn_attr](client, model, system_prompt, messages, tools)
+
+    def build_client(self, credential_value: str):
+        return globals()[self.client_attr](credential_value)
+
+    def resolve_model(self, requested: str | None) -> str:
+        if explicit := (requested or os.environ.get("EVAL_MODEL")):
+            return explicit
+        if self.dynamic_model_attr:
+            return globals()[self.dynamic_model_attr]()
+        return self.default_model
+
+
+PROVIDERS: dict[str, Provider] = {
+    # Kept as the documented cross-vendor option, but no ANTHROPIC_API_KEY is
+    # provisioned anywhere (CI runs OpenAI + GitHub Models), so nothing exercises
+    # it today. It is now a single registry entry: if it stays unused, dropping
+    # it is deleting this one line, _anthropic_client, the two anthropic_* adapter
+    # functions, and its pricing.yaml row — without touching the loop.
+    "anthropic": Provider(
+        name="anthropic",
+        default_model="claude-sonnet-4-6",
+        credential_env="ANTHROPIC_API_KEY",
+        system_as_param=True,
+        tools_attr="tools_for_anthropic",
+        turn_attr="anthropic_turn",
+        client_attr="_anthropic_client",
+    ),
+    # This default is what CI resolves the PRIMARY eval to — the workflow's
+    # `eval_model` input defaults to empty, so changing it changes the gating
     # model. It used to be gpt-4o, which made the primary and the gpt-4o-mini
     # second validator two variants of one model: same vendor, same generation,
     # same function-calling stack, so they tended to fail for the same reasons
-    # and the both-fail bucket carried little independent signal.
-    #
-    # gpt-5.4-mini is a generation removed from gpt-4o-mini while being cheaper
-    # than gpt-4o ($0.75 vs ~$2.50 per 1M input) at the same latency. Measured
-    # on the 24 disambiguation fixtures — the category most sensitive to
-    # description quality — it scored 19/19 against gpt-4o's 18/19.
-    "openai": "gpt-5.4-mini",
+    # and the both-fail bucket carried little independent signal. gpt-5.4-mini is
+    # a generation removed from gpt-4o-mini while being cheaper than gpt-4o
+    # ($0.75 vs ~$2.50 per 1M input) at the same latency; measured on the 24
+    # disambiguation fixtures it scored 19/19 against gpt-4o's 18/19.
+    "openai": Provider(
+        name="openai",
+        default_model="gpt-5.4-mini",
+        credential_env="OPENAI_API_KEY",
+        system_as_param=False,
+        tools_attr="tools_for_openai",
+        turn_attr="openai_turn",
+        client_attr="_openai_client",
+    ),
     # A non-OpenAI publisher on purpose: as the second validator its value is
-    # being an independent implementation, so it catches tool-description
-    # problems that are specific to one vendor's function-calling behaviour.
-    "github": "mistral-ai/mistral-medium-2505",
-    # Whatever LM Studio has loaded. Overridden with --model or EVAL_MODEL; the
-    # server serves its loaded model regardless of the name asked for, so this is
-    # a label rather than a selector — and it is the label pricing.yaml prices at
-    # zero, because a model on your own machine genuinely is free.
-    "lmstudio": "local-model",
+    # being an independent implementation, so it catches tool-description problems
+    # specific to one vendor's function-calling behaviour.
+    "github": Provider(
+        name="github",
+        default_model="mistral-ai/mistral-medium-2505",
+        credential_env="GITHUB_TOKEN",
+        system_as_param=False,
+        tools_attr="tools_for_openai",
+        turn_attr="openai_turn",
+        client_attr="_github_client",
+    ),
+    # A local OpenAI-compatible server for validating the harness for free before
+    # CI. Its model is resolved at runtime (see lmstudio_model): the server serves
+    # whatever is loaded and ignores the requested name, so default_model is only
+    # the fallback label, which pricing.yaml prices at zero.
+    "lmstudio": Provider(
+        name="lmstudio",
+        default_model="local-model",
+        credential_env="LMSTUDIO_API_KEY",
+        system_as_param=False,
+        tools_attr="tools_for_openai",
+        turn_attr="openai_turn",
+        client_attr="_lmstudio_client",
+        dynamic_model_attr="lmstudio_model",
+    ),
 }
+
+# Derived so tests and pricing that index by provider name keep one source of
+# truth; the CLI's --provider choices come from the same registry.
+PROVIDER_DEFAULTS = {name: p.default_model for name, p in PROVIDERS.items()}
 
 
 def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
@@ -721,7 +899,9 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
     return row
 
 
-def skipped_result(fixture: dict, mode: str, reason: str = "expected tool not registered on this instance") -> dict:
+def skipped_result(
+    fixture: dict, mode: str, reason: str = "expected tool not registered on this instance"
+) -> FixtureResult:
     """A fixture we decline to run, with the reason recorded.
 
     Two causes today, and they are different facts:
@@ -737,6 +917,7 @@ def skipped_result(fixture: dict, mode: str, reason: str = "expected tool not re
     honestly and one that quietly stops testing things.
     """
     return {
+        "schema_version": SCHEMA_VERSION,
         "id": fixture["id"],
         "category": fixture.get("category", ""),
         "mode": mode,
@@ -781,9 +962,10 @@ def unhealthy_reason(tool: str | None, health: dict[str, dict]) -> str:
     return f"static checks failed for this tool: {entry.get('reason', 'no reason recorded')}"
 
 
-def error_result(fixture: dict, mode: str, exc: Exception) -> dict:
+def error_result(fixture: dict, mode: str, exc: Exception) -> FixtureResult:
     """Uniform failure record for a fixture that raised."""
-    record = {
+    record: FixtureResult = {
+        "schema_version": SCHEMA_VERSION,
         "id": fixture["id"],
         "category": fixture.get("category", ""),
         "mode": mode,
@@ -797,16 +979,18 @@ def error_result(fixture: dict, mode: str, exc: Exception) -> dict:
         # These keys are not decoration: an errored fixture is dropped from the
         # pass rate but stays in `scored()`, so discovery_summary reads them
         # with bracket access and a missing one is a KeyError mid-report.
-        record |= {
-            "steps": 0,
-            "meta_calls": [],
-            "discovery_path": "none",
-            "search_hit": None,
-            "search_rank": None,
-            "search_score": None,
-            "search_candidates": None,
-            "enabled_correct_toolset": None,
-        }
+        record.update(
+            {
+                "steps": 0,
+                "meta_calls": [],
+                "discovery_path": "none",
+                "search_hit": None,
+                "search_rank": None,
+                "search_score": None,
+                "search_candidates": None,
+                "enabled_correct_toolset": None,
+            }
+        )
     return record
 
 
@@ -854,7 +1038,7 @@ def run_discovery_pass(
     print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
     print(f"  concurrency={workers}\n")
 
-    def worker(fixture: dict) -> dict:
+    def worker(fixture: dict) -> FixtureResult:
         # A negative fixture names no tool, so there is nothing to be missing —
         # it always runs. (It is easier on an instance with fewer plugins, since
         # fewer tools exist to be wrongly picked; that is a caveat on comparing
@@ -978,7 +1162,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Shopware MCP LLM Eval Runner (v2 discovery)")
     parser.add_argument(
         "--provider",
-        choices=["anthropic", "openai", "github", "lmstudio"],
+        choices=list(PROVIDERS),
         default=os.environ.get("EVAL_PROVIDER", "anthropic"),
         help=(
             "anthropic | openai | github (GitHub Models: free, OpenAI-compatible, auth via GITHUB_TOKEN) "
@@ -1127,7 +1311,7 @@ def lmstudio_model() -> str:
     """
     try:
         models = requests.get(f"{LMSTUDIO_BASE_URL.rstrip('/')}/models", timeout=5).json().get("data", [])
-    except requests.RequestException, ValueError:
+    except (requests.RequestException, ValueError):
         return PROVIDER_DEFAULTS["lmstudio"]
     # Embedding models sit in the same list and cannot answer a chat request.
     chat = [m.get("id", "") for m in models if "embed" not in m.get("id", "")]
@@ -1137,35 +1321,28 @@ def lmstudio_model() -> str:
 def resolve_model(provider: str, requested: str | None) -> str:
     """CLI flag wins, then EVAL_MODEL, then the provider default.
 
-    PROVIDER_DEFAULTS is what CI resolves the gating model to, so changing that
-    constant changes which model gates.
+    The default is what CI resolves the gating model to (see the openai entry in
+    PROVIDERS), so changing it changes which model gates.
     """
-    if explicit := (requested or os.environ.get("EVAL_MODEL")):
-        return explicit
-    if provider == "lmstudio":
-        return lmstudio_model()
-    return PROVIDER_DEFAULTS[provider]
+    return PROVIDERS[provider].resolve_model(requested)
 
 
 def require_credentials(provider: str, endpoint_name: str) -> tuple[str, str]:
     """Check the server and provider credentials this run needs.
 
     Returns the (name, value) of the provider credential, because build_client
-    needs the value and the `github` provider's differs from OpenAI's.
+    needs the value and the `github` provider's differs from OpenAI's. The value
+    is read from this module's globals at call time so tests can override it with
+    setattr — and so lmstudio's placeholder default is never empty, which would
+    otherwise fail the check on a server that wants no credential at all.
     """
     required = [("SW_BASE_URL", SW_BASE_URL)]
     if endpoint_name == "store":
         required.append(("SW_SC_ACCESS_KEY", SW_SC_ACCESS_KEY))
     else:
         required += [("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
-    credential = {
-        "anthropic": ("ANTHROPIC_API_KEY", ANTHROPIC_API_KEY),
-        "openai": ("OPENAI_API_KEY", OPENAI_API_KEY),
-        "github": ("GITHUB_TOKEN", GITHUB_TOKEN),
-        # Never empty, so the check below cannot fail on a server that wants no
-        # credential at all.
-        "lmstudio": ("LMSTUDIO_API_KEY", LMSTUDIO_API_KEY),
-    }[provider]
+    env = PROVIDERS[provider].credential_env
+    credential = (env, globals().get(env, ""))
     required.append(credential)
     missing = [var for var, val in required if not val]
     if missing:
@@ -1176,16 +1353,7 @@ def require_credentials(provider: str, endpoint_name: str) -> tuple[str, str]:
 def build_client(provider: str, credential: tuple[str, str]):
     """The provider SDK client. Imported lazily so a run with one provider does
     not require the other's package to be installed."""
-    if provider == "anthropic":
-        import anthropic
-
-        return anthropic.Anthropic(api_key=credential[1])
-    from openai import OpenAI
-
-    # GitHub Models speaks the OpenAI wire format, so the same adapter and turn
-    # function work — only the base URL and credential differ.
-    base_url = {"github": GITHUB_MODELS_BASE_URL, "lmstudio": LMSTUDIO_BASE_URL}.get(provider)
-    return OpenAI(api_key=credential[1], base_url=base_url)
+    return PROVIDERS[provider].build_client(credential[1])
 
 
 def fixtures_path_for(endpoint_name: str, override: str | None) -> Path:
@@ -1203,6 +1371,77 @@ def load_fixtures(path: Path, category: str | None = None, fixture_id: str | Non
     if not fixtures:
         raise ConfigError("No fixtures matched the filter.")
     return fixtures
+
+
+def _first_sales_channel_id(endpoint) -> str | None:
+    """A real sales-channel id off the live lane, preferring the demo
+    `Storefront` channel.
+
+    Why fixtures carry `{sales_channel_id}` and not a literal UUID: the id is
+    per-instance (demo data is generated), so hardcoding one goes stale on every
+    other lane. And why it has to be REAL rather than a plausible fake: grading
+    now executes the call, and merchant-* / theme-config reject a channel *name*
+    with `Value is not a valid UUID: Storefront`, so a fake id can never pass.
+    Resolved once here, substituted into the prompt before the model sees it.
+    """
+    session_id, _ = mcp_init(endpoint=endpoint)
+    resp = mcp_call(session_id, "shopware-entity-search", {"entity": "sales_channel", "limit": 25}, endpoint=endpoint)
+    try:
+        rows = json.loads(mcp_result_text(resp) or "")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    rows = rows.get("data") or rows.get("elements") or []
+    if isinstance(rows, dict):
+        rows = list(rows.values())
+
+    def _name(r: dict) -> str:
+        return (r.get("name") or (r.get("translated") or {}).get("name") or "") if isinstance(r, dict) else ""
+
+    # Storefront first, then any channel with an id — the tool only needs a
+    # resolvable one; the name match is for the prompt reading coherently.
+    for row in sorted(rows, key=lambda r: _name(r).lower() != "storefront"):
+        if isinstance(row, dict) and row.get("id"):
+            return row["id"]
+    return None
+
+
+# Placeholder -> resolver. A fixture prompt may contain `{name}`; the runner
+# replaces it with a value read off the live lane at startup. Add one here when a
+# tool needs a real, resolvable id to execute that the model cannot invent.
+PLACEHOLDER_RESOLVERS = {
+    "sales_channel_id": _first_sales_channel_id,
+}
+
+
+def resolve_lane_substitutions(fixtures: list[dict], endpoint) -> dict[str, str]:
+    """Values for every `{placeholder}` the loaded fixtures actually reference.
+
+    Only resolves what is used, so a run filtered to fixtures with no placeholder
+    makes no extra calls. A placeholder that cannot be resolved is warned about
+    and left in place — the fixture then fails visibly rather than silently
+    grading against a literal `{sales_channel_id}`.
+    """
+    subs: dict[str, str] = {}
+    for key, resolver in PLACEHOLDER_RESOLVERS.items():
+        token = "{" + key + "}"
+        if not any(token in f.get("prompt", "") for f in fixtures):
+            continue
+        value = resolver(endpoint)
+        if value:
+            subs[key] = value
+            print(f"Lane id: {key} = {value}")
+        else:
+            print(f"::warning::could not resolve {token} from the lane; fixtures using it will fail")
+    return subs
+
+
+def apply_substitutions(fixtures: list[dict], subs: dict[str, str]) -> None:
+    """Replace `{placeholder}` tokens in each fixture prompt, in place."""
+    for fixture in fixtures:
+        prompt = fixture.get("prompt", "")
+        for key, value in subs.items():
+            prompt = prompt.replace("{" + key + "}", value)
+        fixture["prompt"] = prompt
 
 
 def fetch_system_prompt(endpoint, enabled: bool = True, prompt_set: str = "all") -> tuple[str | None, dict]:
@@ -1367,6 +1606,11 @@ def run_suite(args) -> int:
     blocked = sorted({f["expected_tool"] for f in fixtures if unhealthy_reason(f.get("expected_tool"), tool_health)})
     if blocked:
         print(f"Tool health: skipping fixtures for {len(blocked)} broken tool(s): {', '.join(blocked)}")
+
+    # Substitute {placeholder} tokens with real ids off the live lane. A tool
+    # whose call is executed (merchant-*, theme-config) needs a resolvable
+    # sales-channel id, which the model cannot invent — see resolve_lane_substitutions.
+    apply_substitutions(fixtures, resolve_lane_substitutions(fixtures, endpoint))
 
     results_discovery = None
     if "discovery" in modes:

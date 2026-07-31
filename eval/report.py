@@ -9,6 +9,8 @@ live progress feed; the scoring they render lives in eval/scoring.py.
 """
 
 import json
+from collections.abc import Mapping
+from typing import Any
 
 from eval.scoring import discovery_summary, score, scored
 from ownership import OPTIONAL, breakdown
@@ -26,7 +28,7 @@ def pct_color(pct: int) -> str:
     return GREEN if pct >= 80 else (YELLOW if pct >= 50 else RED)
 
 
-def _render(result: dict) -> str:
+def _render(result: Mapping[str, Any]) -> str:
     """One-line progress summary for a finished fixture."""
     if result.get("skipped"):
         return f"{YELLOW}SKIP{RESET}  {result['id']}  ({result['expected_tool']} not registered)"

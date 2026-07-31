@@ -44,6 +44,13 @@ jobs:
       - name: Ruff (format check)
         run: ruff format --check .
 
+      # Static type checking. Gating, like the ruff steps: a renamed key on a
+      # TypedDict (FixtureResult is read by five modules) or a bad call now fails
+      # here instead of as a KeyError mid-run in the heavy eval workflow. Config,
+      # including why it is `standard` and not stricter, lives in pyrightconfig.json.
+      - name: Basedpyright (type check)
+        run: basedpyright
+
       - name: Pytest (unit tests)
         # --cov both reports where the gaps are AND gates. No --cov-fail-under is
         # passed here, but `fail_under` in pyproject.toml applies anyway and

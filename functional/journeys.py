@@ -245,7 +245,7 @@ def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: dict) -> tup
         return elapsed, error, {}
     try:
         payload = json.loads(text).get("data", {})
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return elapsed, "response was not readable JSON", {}
     return elapsed, "", payload if isinstance(payload, dict) else {}
 

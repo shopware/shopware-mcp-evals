@@ -163,12 +163,8 @@ jobs:
       - name: Checkout evals repo
         uses: actions/checkout@v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: .python-version
-          cache: pip
-          cache-dependency-path: eval/requirements.txt
+      - name: Bootstrap Python
+        uses: ./.github/actions/bootstrap
 
       - name: Set up the lane
         id: lane
@@ -184,15 +180,6 @@ jobs:
           agentic_commerce_ref: ${{ github.event.inputs.agentic_commerce_ref }}
           plugins_pat: ${{ secrets.PLUGINS_PAT }}
           github_token: ${{ github.token }}
-
-      - name: Install Python deps
-        run: |
-          pip install -r eval/requirements.txt
-          # Editable install so `python -m eval.runner` and the tests can
-          # import mcp_client/ownership without a sys.path prelude.
-          # --no-deps: the requirements file above is the single source of
-          # truth for versions; pyproject.toml declares none.
-          pip install -e . --no-deps
 
       - name: Snapshot MCP tool descriptions
         env:
@@ -424,27 +411,7 @@ jobs:
 
       - name: Dump symfony server logs on failure
         if: failure()
-        run: |
-          LOG_DIR="$HOME/.config/symfony-cli/log"
-          if [ ! -d "$LOG_DIR" ]; then
-            echo "No symfony log dir at $LOG_DIR"
-            exit 0
-          fi
-          # tail (not follow) every log file under the symfony-cli log dir
-          for f in "$LOG_DIR"/*.log "$LOG_DIR"/*/*.log; do
-            [ -f "$f" ] || continue
-            echo "=== $f (last 200 lines) ==="
-            tail -n 200 "$f" || true
-          done
-          # Also dump Shopware's own var/log if present
-          SW_LOG="${{ github.workspace }}/shopware/var/log"
-          if [ -d "$SW_LOG" ]; then
-            for f in "$SW_LOG"/*.log; do
-              [ -f "$f" ] || continue
-              echo "=== $f (last 200 lines) ==="
-              tail -n 200 "$f" || true
-            done
-          fi
+        uses: ./.github/actions/dump-logs
 
       - name: Stop Shopware
         if: always()
@@ -468,12 +435,8 @@ jobs:
       - name: Checkout evals repo
         uses: actions/checkout@v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: .python-version
-          cache: pip
-          cache-dependency-path: eval/requirements.txt
+      - name: Bootstrap Python
+        uses: ./.github/actions/bootstrap
 
       - name: Set up the lane
         id: lane
@@ -489,15 +452,6 @@ jobs:
           agentic_commerce_ref: ${{ github.event.inputs.agentic_commerce_ref }}
           plugins_pat: ${{ secrets.PLUGINS_PAT }}
           github_token: ${{ github.token }}
-
-      - name: Install Python deps
-        run: |
-          pip install -r eval/requirements.txt
-          # Editable install so `python -m eval.runner` and the tests can
-          # import mcp_client/ownership without a sys.path prelude.
-          # --no-deps: the requirements file above is the single source of
-          # truth for versions; pyproject.toml declares none.
-          pip install -e . --no-deps
 
       # The verdicts the static job measured. Same code and same plugins on both
       # lanes, so its findings hold here; without it every fixture is graded,
@@ -709,27 +663,7 @@ jobs:
 
       - name: Dump symfony server logs on failure
         if: failure()
-        run: |
-          LOG_DIR="$HOME/.config/symfony-cli/log"
-          if [ ! -d "$LOG_DIR" ]; then
-            echo "No symfony log dir at $LOG_DIR"
-            exit 0
-          fi
-          # tail (not follow) every log file under the symfony-cli log dir
-          for f in "$LOG_DIR"/*.log "$LOG_DIR"/*/*.log; do
-            [ -f "$f" ] || continue
-            echo "=== $f (last 200 lines) ==="
-            tail -n 200 "$f" || true
-          done
-          # Also dump Shopware's own var/log if present
-          SW_LOG="${{ github.workspace }}/shopware/var/log"
-          if [ -d "$SW_LOG" ]; then
-            for f in "$SW_LOG"/*.log; do
-              [ -f "$f" ] || continue
-              echo "=== $f (last 200 lines) ==="
-              tail -n 200 "$f" || true
-            done
-          fi
+        uses: ./.github/actions/dump-logs
 
       - name: Stop Shopware
         if: always()
@@ -755,12 +689,8 @@ jobs:
       - name: Checkout evals repo
         uses: actions/checkout@v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: .python-version
-          cache: pip
-          cache-dependency-path: eval/requirements.txt
+      - name: Bootstrap Python
+        uses: ./.github/actions/bootstrap
 
       - name: Set up the lane
         id: lane
@@ -776,15 +706,6 @@ jobs:
           agentic_commerce_ref: ${{ github.event.inputs.agentic_commerce_ref }}
           plugins_pat: ${{ secrets.PLUGINS_PAT }}
           github_token: ${{ github.token }}
-
-      - name: Install Python deps
-        run: |
-          pip install -r eval/requirements.txt
-          # Editable install so `python -m eval.runner` and the tests can
-          # import mcp_client/ownership without a sys.path prelude.
-          # --no-deps: the requirements file above is the single source of
-          # truth for versions; pyproject.toml declares none.
-          pip install -e . --no-deps
 
       # The verdicts the static job measured. Same code and same plugins on both
       # lanes, so its findings hold here; without it every fixture is graded,
@@ -844,27 +765,7 @@ jobs:
 
       - name: Dump symfony server logs on failure
         if: failure()
-        run: |
-          LOG_DIR="$HOME/.config/symfony-cli/log"
-          if [ ! -d "$LOG_DIR" ]; then
-            echo "No symfony log dir at $LOG_DIR"
-            exit 0
-          fi
-          # tail (not follow) every log file under the symfony-cli log dir
-          for f in "$LOG_DIR"/*.log "$LOG_DIR"/*/*.log; do
-            [ -f "$f" ] || continue
-            echo "=== $f (last 200 lines) ==="
-            tail -n 200 "$f" || true
-          done
-          # Also dump Shopware's own var/log if present
-          SW_LOG="${{ github.workspace }}/shopware/var/log"
-          if [ -d "$SW_LOG" ]; then
-            for f in "$SW_LOG"/*.log; do
-              [ -f "$f" ] || continue
-              echo "=== $f (last 200 lines) ==="
-              tail -n 200 "$f" || true
-            done
-          fi
+        uses: ./.github/actions/dump-logs
 
       - name: Stop Shopware
         if: always()
@@ -886,21 +787,8 @@ jobs:
       - name: Checkout evals repo
         uses: actions/checkout@v7
 
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: .python-version
-          cache: pip
-          cache-dependency-path: eval/requirements.txt
-
-      - name: Install Python deps
-        run: |
-          pip install -r eval/requirements.txt
-          # Editable install so `python -m eval.runner` and the tests can
-          # import mcp_client/ownership without a sys.path prelude.
-          # --no-deps: the requirements file above is the single source of
-          # truth for versions; pyproject.toml declares none.
-          pip install -e . --no-deps
+      - name: Bootstrap Python
+        uses: ./.github/actions/bootstrap
 
       # Every job wrote into results/. Merging them into one tree is what lets
       # the summary render a single table rather than one per job — the same

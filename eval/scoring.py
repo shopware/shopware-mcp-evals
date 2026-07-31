@@ -165,7 +165,7 @@ def discovery_summary(discovery: list[dict]) -> dict:
     # whether it returned it somewhere a model would plausibly read. Read with
     # .get() because reports written before this field existed are still
     # compared against.
-    ranks = sorted(r.get("search_rank") for r in graded if r.get("search_rank") is not None)
+    ranks = sorted(rank for r in graded if (rank := r.get("search_rank")) is not None)
     toolset_graded = [r for r in graded if r["enabled_correct_toolset"] is not None]
     toolset_correct = sum(1 for r in toolset_graded if r["enabled_correct_toolset"])
     return {

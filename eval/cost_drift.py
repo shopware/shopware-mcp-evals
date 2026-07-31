@@ -110,7 +110,7 @@ def render(findings: list[dict], threshold: float = DEFAULT_THRESHOLD) -> str:
 def _load(path: str) -> dict | None:
     try:
         return json.loads(Path(path).read_text())
-    except OSError, json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError):
         return None
 
 

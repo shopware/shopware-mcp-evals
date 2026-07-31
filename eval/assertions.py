@@ -28,6 +28,7 @@ test of the seed.
 """
 
 import json
+from typing import TypedDict
 
 # Substrings that mark a server response as a rejection of the request rather
 # than an answer to it. Matched case-insensitively against the error text.
@@ -86,7 +87,7 @@ def is_not_found(error: str | None) -> bool:
 def _payload(result_text: str | None):
     try:
         return json.loads(result_text) if result_text else None
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return None
 
 
@@ -132,13 +133,35 @@ def inband_error(result_text: str | None) -> str | None:
     return str(err) if err else "the tool reported success: false"
 
 
-def check(expect, result_text: str | None, error: str | None) -> tuple[bool, str | None]:
+class MinItems(TypedDict, total=False):
+    """The `min_items` predicate: the collection at `path` must hold >= `n`."""
+
+    path: str
+    n: int
+
+
+class ExpectSpec(TypedDict, total=False):
+    """A fixture's `expect_result` in mapping form — a tier plus the predicates
+    that tier turns on. `total=False`: a spec names only what it asserts, and the
+    runner defaults the tier to `accepted`. Modelling it (rather than a bare dict)
+    is what lets the type checker keep `min_items.get("n")` an int and reject a
+    predicate key that no branch below reads."""
+
+    tier: str
+    has_keys: list[str]
+    min_items: MinItems
+    contains: list[str]
+
+
+def check(expect: str | ExpectSpec | None, result_text: str | None, error: str | None) -> tuple[bool, str | None]:
     """Evaluate one fixture's expectation. Returns (passed, failure_reason).
 
     `expect` is the fixture's `expect_result`: a tier name, or a mapping with a
     `tier` key plus predicates.
     """
-    spec = {"tier": expect} if isinstance(expect, str) else dict(expect or {})
+    # The mapping branch aliases rather than copies the caller's spec — nothing
+    # here mutates it, so a defensive copy would only cost an allocation.
+    spec: ExpectSpec = {"tier": expect} if isinstance(expect, str) else (expect or {})
     tier = spec.get("tier", "accepted")
 
     if tier == "none":
@@ -200,9 +223,9 @@ def check(expect, result_text: str | None, error: str | None) -> tuple[bool, str
     return True, None
 
 
-def normalise(expect) -> dict:
+def normalise(expect: str | ExpectSpec | None) -> ExpectSpec:
     """A fixture's `expect_result` as a mapping, defaulting to the `accepted`
     tier — the level a fixture with no declared expectation honestly supports."""
     if expect is None:
         return {"tier": "accepted"}
-    return {"tier": expect} if isinstance(expect, str) else dict(expect)
+    return {"tier": expect} if isinstance(expect, str) else expect

@@ -152,7 +152,7 @@ def _throttle_wait(resp: requests.Response) -> float:
         match = re.search(r"(\d+)\s*second", resp.json().get("error", {}).get("message", ""))
         if match:
             return min(float(match.group(1)), THROTTLE_MAX_WAIT_S)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         pass
     return 5.0
 
@@ -173,12 +173,16 @@ def _rpc(
     if session_id is not None:
         headers["Mcp-Session-Id"] = session_id
     body = {"jsonrpc": "2.0", "method": method, "params": params, "id": rpc_id}
+    resp: requests.Response | None = None
     for attempt in range(THROTTLE_MAX_RETRIES + 1):
         resp = requests.post(endpoint.url, headers=headers, json=body, timeout=30)
         if resp.status_code == 429 and attempt < THROTTLE_MAX_RETRIES:
             time.sleep(_throttle_wait(resp))
             continue
         break
+    # range(THROTTLE_MAX_RETRIES + 1) is never empty, so the loop always assigns
+    # resp at least once; the assert states that invariant for the type checker.
+    assert resp is not None
     resp.raise_for_status()
     return resp
 

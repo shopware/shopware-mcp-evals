@@ -602,7 +602,7 @@ def main() -> int:
     if args.comparison:
         try:
             cmp_ = json.loads(Path(args.comparison).read_text())
-        except OSError, json.JSONDecodeError:
+        except (OSError, json.JSONDecodeError):
             # Expected whenever the comparison step skipped, which it does when
             # either eval run failed to produce a report. Rendered as a note in
             # the summary rather than warned about here.
@@ -641,10 +641,6 @@ def main() -> int:
         with open(summary_path, "ab") as handle:
             handle.write(encoded)
     return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
 
 
 def render_skipped(reports: list[dict]) -> str:
@@ -796,3 +792,7 @@ def _contamination_table(entries: list[dict]) -> list[str]:
         lines.append(f"| {area} | " + " | ".join(cells) + " |")
     lines += ["", "</details>", ""]
     return lines
+
+
+if __name__ == "__main__":
+    sys.exit(main())

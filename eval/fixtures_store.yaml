@@ -44,20 +44,20 @@ fixtures:
 
   - id: catalog_lookup
     category: disambiguation
-    prompt: "Load the full product details for product IDs 0a1b and 0c2d from the catalog."
+    prompt: "Load the full product details for product IDs 0a1b2c3d4e5f60718293a4b5c6d7e8f9 and 0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f from the catalog."
     expected_tool: shopware-ucp-catalog-lookup
     expected_toolset: shopware-ucp-catalog
     notes: Known IDs → catalog-lookup, not catalog-search (which is a text query).
 
   - id: catalog_lookup_price
     category: unambiguous
-    prompt: "Get the current price and availability for product 0a1b."
+    prompt: "Get the current price and availability for product 0a1b2c3d4e5f60718293a4b5c6d7e8f9."
     expected_tool: shopware-ucp-catalog-lookup
     expected_toolset: shopware-ucp-catalog
 
   - id: disambig_lookup_vs_search
     category: disambiguation
-    prompt: "Before I add it to my basket, confirm that product 0a1b is still in stock."
+    prompt: "Before I add it to my basket, confirm that product 0a1b2c3d4e5f60718293a4b5c6d7e8f9 is still in stock."
     expected_tool: shopware-ucp-catalog-lookup
     expected_toolset: shopware-ucp-catalog
     notes: >
@@ -83,7 +83,7 @@ fixtures:
 
   - id: chain_cart_create_then_add
     category: chain
-    prompt: "Create a cart for me and put product 0a1b in it."
+    prompt: "Create a cart for me and put product 0a1b2c3d4e5f60718293a4b5c6d7e8f9 in it."
     expected_tool: shopware-ucp-cart-create
     expected_toolset: shopware-ucp-cart
     max_steps: 8
@@ -93,20 +93,20 @@ fixtures:
 
   - id: cart_get
     category: unambiguous
-    prompt: "Show me the current contents of cart cart_abc123."
+    prompt: "Show me the current contents of cart abc12345d6e7f8091a2b3c4d5e6f7081."
     expected_tool: shopware-ucp-cart-get
     expected_toolset: shopware-ucp-cart
 
   - id: cart_get_total
     category: unambiguous
-    prompt: "What does cart cart_abc123 come to in total?"
+    prompt: "What does cart abc12345d6e7f8091a2b3c4d5e6f7081 come to in total?"
     expected_tool: shopware-ucp-cart-get
     expected_toolset: shopware-ucp-cart
     notes: Totals are part of the cart payload — a read, not a checkout step.
 
   - id: disambig_cart_get_vs_checkout_get
     category: disambiguation
-    prompt: "What's in my basket right now — cart_abc123? I haven't started checking out yet."
+    prompt: "What's in my basket right now — abc12345d6e7f8091a2b3c4d5e6f7081? I haven't started checking out yet."
     expected_tool: shopware-ucp-cart-get
     expected_toolset: shopware-ucp-cart
     notes: >
@@ -115,21 +115,21 @@ fixtures:
 
   - id: cart_update
     category: disambiguation
-    prompt: "Set the quantity of line item li_9 in cart cart_abc123 to 3."
+    prompt: "Set the quantity of line item 119a2b3c4d5e6f708192a3b4c5d6e7f8 in cart abc12345d6e7f8091a2b3c4d5e6f7081 to 3."
     expected_tool: shopware-ucp-cart-update
     expected_toolset: shopware-ucp-cart
     notes: Writing new line-item state to an existing cart → cart-update, not cart-get/create.
 
   - id: cart_update_add_more
     category: unambiguous
-    prompt: "Add two more of product 0a1b to cart cart_abc123."
+    prompt: "Add two more of product 0a1b2c3d4e5f60718293a4b5c6d7e8f9 to cart abc12345d6e7f8091a2b3c4d5e6f7081."
     expected_tool: shopware-ucp-cart-update
     expected_toolset: shopware-ucp-cart
     notes: Adding to an existing cart → cart-update; cart-create would discard it.
 
   - id: cart_update_remove_line
     category: unambiguous
-    prompt: "Take line item li_9 out of cart cart_abc123."
+    prompt: "Take line item 119a2b3c4d5e6f708192a3b4c5d6e7f8 out of cart abc12345d6e7f8091a2b3c4d5e6f7081."
     expected_tool: shopware-ucp-cart-update
     expected_toolset: shopware-ucp-cart
     notes: >
@@ -138,39 +138,39 @@ fixtures:
 
   - id: cart_cancel
     category: unambiguous
-    prompt: "Discard cart cart_abc123, I don't want it anymore."
+    prompt: "Discard cart abc12345d6e7f8091a2b3c4d5e6f7081, I don't want it anymore."
     expected_tool: shopware-ucp-cart-cancel
     expected_toolset: shopware-ucp-cart
 
   - id: cart_cancel_delete
     category: unambiguous
-    prompt: "Empty and abandon cart cart_abc123 completely."
+    prompt: "Empty and abandon cart abc12345d6e7f8091a2b3c4d5e6f7081 completely."
     expected_tool: shopware-ucp-cart-cancel
     expected_toolset: shopware-ucp-cart
 
   - id: disambig_cart_cancel_vs_checkout_cancel
     category: disambiguation
-    prompt: "Throw away the shopping cart cart_abc123 — I never started a checkout for it."
+    prompt: "Throw away the shopping cart abc12345d6e7f8091a2b3c4d5e6f7081 — I never started a checkout for it."
     expected_tool: shopware-ucp-cart-cancel
     expected_toolset: shopware-ucp-cart
     notes: Cart-stage abandon → cart-cancel, not checkout-cancel.
 
   - id: discount_apply
     category: unambiguous
-    prompt: "Apply the discount code SUMMER10 to cart cart_abc123."
+    prompt: "Apply the discount code SUMMER10 to cart abc12345d6e7f8091a2b3c4d5e6f7081."
     expected_tool: shopware-ucp-discount-apply
     expected_toolset: shopware-ucp
 
   - id: discount_apply_voucher
     category: unambiguous
-    prompt: "I have a voucher code WELCOME5 — use it on cart cart_abc123."
+    prompt: "I have a voucher code WELCOME5 — use it on cart abc12345d6e7f8091a2b3c4d5e6f7081."
     expected_tool: shopware-ucp-discount-apply
     expected_toolset: shopware-ucp
     notes: '"Voucher" rather than "discount code" — vocabulary coverage.'
 
   - id: disambig_discount_vs_cart_update
     category: disambiguation
-    prompt: "Redeem promotion code BLACKFRIDAY on cart cart_abc123 before I check out."
+    prompt: "Redeem promotion code BLACKFRIDAY on cart abc12345d6e7f8091a2b3c4d5e6f7081 before I check out."
     expected_tool: shopware-ucp-discount-apply
     expected_toolset: shopware-ucp
     notes: >
@@ -183,19 +183,19 @@ fixtures:
 
   - id: checkout_create
     category: unambiguous
-    prompt: "Begin checkout for cart cart_abc123."
+    prompt: "Begin checkout for cart abc12345d6e7f8091a2b3c4d5e6f7081."
     expected_tool: shopware-ucp-checkout-create
     expected_toolset: shopware-ucp-checkout
 
   - id: checkout_create_ready_to_buy
     category: unambiguous
-    prompt: "I'm ready to buy what's in cart cart_abc123 — take me to checkout."
+    prompt: "I'm ready to buy what's in cart abc12345d6e7f8091a2b3c4d5e6f7081 — take me to checkout."
     expected_tool: shopware-ucp-checkout-create
     expected_toolset: shopware-ucp-checkout
 
   - id: disambig_checkout_create_vs_complete
     category: disambiguation
-    prompt: "Convert cart cart_abc123 into a checkout session."
+    prompt: "Convert cart abc12345d6e7f8091a2b3c4d5e6f7081 into a checkout session."
     expected_tool: shopware-ucp-checkout-create
     expected_toolset: shopware-ucp-checkout
     notes: >
@@ -204,77 +204,77 @@ fixtures:
 
   - id: checkout_get
     category: unambiguous
-    prompt: "What is the current status of checkout session co_xyz789?"
+    prompt: "What is the current status of checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6?"
     expected_tool: shopware-ucp-checkout-get
     expected_toolset: shopware-ucp-checkout
 
   - id: checkout_get_paid
     category: unambiguous
-    prompt: "Has checkout co_xyz789 been paid yet?"
+    prompt: "Has checkout c078913a2b4c5d6e7f8091a2b3c4d5e6 been paid yet?"
     expected_tool: shopware-ucp-checkout-get
     expected_toolset: shopware-ucp-checkout
 
   - id: checkout_get_totals
     category: unambiguous
-    prompt: "Fetch the current state of checkout session co_xyz789 including its totals."
+    prompt: "Fetch the current state of checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6 including its totals."
     expected_tool: shopware-ucp-checkout-get
     expected_toolset: shopware-ucp-checkout
     notes: Totals at the checkout stage → checkout-get, not cart-get.
 
   - id: checkout_update
     category: disambiguation
-    prompt: "Set the shipping address on checkout session co_xyz789."
+    prompt: "Set the shipping address on checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6."
     expected_tool: shopware-ucp-checkout-update
     expected_toolset: shopware-ucp-checkout
     notes: Editing an open checkout → checkout-update, not checkout-create/complete.
 
   - id: checkout_update_email
     category: unambiguous
-    prompt: "Change the email address on checkout co_xyz789 to buyer@example.com."
+    prompt: "Change the email address on checkout c078913a2b4c5d6e7f8091a2b3c4d5e6 to buyer@example.com."
     expected_tool: shopware-ucp-checkout-update
     expected_toolset: shopware-ucp-checkout
 
   - id: checkout_update_shipping_option
     category: unambiguous
-    prompt: "Pick the express delivery option for checkout session co_xyz789."
+    prompt: "Pick the express delivery option for checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6."
     expected_tool: shopware-ucp-checkout-update
     expected_toolset: shopware-ucp-checkout
     notes: Selecting a shipping method is a checkout field write, not a new checkout.
 
   - id: checkout_complete
     category: disambiguation
-    prompt: "Everything looks good — place the order for checkout session co_xyz789."
+    prompt: "Everything looks good — place the order for checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6."
     expected_tool: shopware-ucp-checkout-complete
     expected_toolset: shopware-ucp-checkout
     notes: Finalizing/placing the order → checkout-complete, not checkout-update.
 
   - id: checkout_complete_confirm_pay
     category: unambiguous
-    prompt: "Confirm and pay for checkout co_xyz789."
+    prompt: "Confirm and pay for checkout c078913a2b4c5d6e7f8091a2b3c4d5e6."
     expected_tool: shopware-ucp-checkout-complete
     expected_toolset: shopware-ucp-checkout
 
   - id: checkout_complete_submit
     category: unambiguous
-    prompt: "Submit checkout session co_xyz789 — I authorize the payment."
+    prompt: "Submit checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6 — I authorize the payment."
     expected_tool: shopware-ucp-checkout-complete
     expected_toolset: shopware-ucp-checkout
 
   - id: checkout_cancel
     category: unambiguous
-    prompt: "Cancel checkout session co_xyz789."
+    prompt: "Cancel checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6."
     expected_tool: shopware-ucp-checkout-cancel
     expected_toolset: shopware-ucp-checkout
 
   - id: checkout_cancel_abort
     category: unambiguous
-    prompt: "Abort checkout session co_xyz789."
+    prompt: "Abort checkout session c078913a2b4c5d6e7f8091a2b3c4d5e6."
     expected_tool: shopware-ucp-checkout-cancel
     expected_toolset: shopware-ucp-checkout
 
   - id: disambig_checkout_cancel_vs_cart_cancel
     category: disambiguation
-    prompt: "Stop the checkout co_xyz789 — I don't want to complete it, but keep my cart."
+    prompt: "Stop the checkout c078913a2b4c5d6e7f8091a2b3c4d5e6 — I don't want to complete it, but keep my cart."
     expected_tool: shopware-ucp-checkout-cancel
     expected_toolset: shopware-ucp-checkout
     notes: >
@@ -287,19 +287,19 @@ fixtures:
 
   - id: order_get
     category: unambiguous
-    prompt: "Show me the details of order ord_55501."
+    prompt: "Show me the details of order 55501a2b3c4d5e6f708192a3b4c5d6e7."
     expected_tool: shopware-ucp-order-get
     expected_toolset: shopware-ucp
 
   - id: order_get_tracking
     category: unambiguous
-    prompt: "Track order ord_55501 — has it shipped yet?"
+    prompt: "Track order 55501a2b3c4d5e6f708192a3b4c5d6e7 — has it shipped yet?"
     expected_tool: shopware-ucp-order-get
     expected_toolset: shopware-ucp
 
   - id: disambig_order_get_vs_checkout_get
     category: disambiguation
-    prompt: "What did I end up paying for order ord_55501?"
+    prompt: "What did I end up paying for order 55501a2b3c4d5e6f708192a3b4c5d6e7?"
     expected_tool: shopware-ucp-order-get
     expected_toolset: shopware-ucp
     notes: >

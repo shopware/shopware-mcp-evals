@@ -682,3 +682,25 @@ def test_a_fully_unusable_triage_diagnoses_nothing():
 
     assert "1 discovery failures, 0 diagnosed" in out
     assert "the tool's own description" not in out
+
+
+def test_module_runs_as_a_script_without_nameerror(tmp_path):
+    """The entrypoint must resolve every renderer it calls.
+
+    Importing the module defines every function regardless of order, so the
+    other tests here never exercise `main()`. Running it as `python -m
+    eval.summary` does, and a renderer defined below the `__main__` guard was
+    undefined at that point — a NameError that only ever surfaced in CI, with
+    the whole job summary as the cost. This runs the real entrypoint in a
+    subprocess so that ordering regression fails a unit test instead.
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "eval.summary", "--rows", str(tmp_path / "absent")],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "NameError" not in proc.stderr
+    assert "## MCP evals" in proc.stdout

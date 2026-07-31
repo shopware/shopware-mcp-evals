@@ -1,0 +1,27 @@
+name: Bootstrap Python
+description: >
+  Python toolchain + the eval package, the way every job in mcp-evals.yml needs
+  it. Kept next to setup-lane because it is the other half of "a job that can run
+  this repo": setup-lane brings up Shopware, this brings up the Python that talks
+  to it. The initial `actions/checkout` still has to run in the job before this
+  is referenced — a local composite cannot check out the repo it lives in.
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v6
+      with:
+        python-version-file: .python-version
+        cache: pip
+        cache-dependency-path: eval/requirements.txt
+
+    - name: Install Python deps
+      shell: bash
+      run: |
+        pip install -r eval/requirements.txt
+        # Editable install so `python -m eval.runner` and the tests can
+        # import mcp_client/ownership without a sys.path prelude.
+        # --no-deps: the requirements file above is the single source of
+        # truth for versions; pyproject.toml declares none.
+        pip install -e . --no-deps

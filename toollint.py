@@ -148,7 +148,7 @@ def similar_pairs(tools: list[dict], limit: int = 10) -> list[dict]:
     for left, right in combinations(sorted(tools, key=lambda t: t.get("name", "")), 2):
         if not (left.get("name") and right.get("name")):
             continue
-        score = similarity(left.get("description"), right.get("description"))
+        score = similarity(left.get("description") or "", right.get("description") or "")
         if score:
             scored.append({"pair": (left["name"], right["name"]), "similarity": round(score, 3)})
     return sorted(scored, key=lambda s: -s["similarity"])[:limit]

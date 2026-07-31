@@ -21,13 +21,18 @@ def test_only_anthropic_takes_the_prompt_out_of_band():
     """The bug this file was opened for: the guard tested `== "openai"`, so the
     `github` arm ran with no context prompt at all while its report recorded
     `system_prompt: true`. A whole provider was silently measuring something
-    else, and any new provider inherited it."""
-    source = (runner.__file__).replace(".pyc", ".py")
-    with open(source) as handle:
-        body = handle.read()
+    else, and any new provider inherited it.
 
-    assert 'if provider != "anthropic" and system_prompt:' in body
-    assert 'if provider == "openai" and system_prompt:' not in body
+    Routing is now one `system_as_param` flag per provider, so the invariant is
+    checkable directly: exactly one provider carries the prompt out of band, and
+    it is Anthropic. Every OpenAI-compatible provider must carry it in the
+    messages. The behavioural half (that run_fixture_discovery honours the flag)
+    lives in test_eval_adapters.py."""
+    out_of_band = {name for name, p in runner.PROVIDERS.items() if p.system_as_param}
+
+    assert out_of_band == {"anthropic"}
+    # And no provider can drift silently, because a new one has to declare the flag.
+    assert all(isinstance(p.system_as_param, bool) for p in runner.PROVIDERS.values())
 
 
 def test_the_inventory_distinguishes_off_from_empty(monkeypatch):

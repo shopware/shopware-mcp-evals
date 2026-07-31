@@ -54,37 +54,49 @@
 #
 # Values inside a prompt — the rule that two broken fixtures cost us:
 #
-# The runner grades the tool the model *chose* and never executes it, so no value
-# in a prompt is ever sent anywhere. Synthetic ones are therefore fine, and
-# preferable to real ones: a real skill name or sales-channel id goes stale when
-# its source repo changes, for no gain. What matters is only that a value is
-# SHAPED like the thing it stands for, because that is what the model reasons
-# about when picking a tool.
+# Grading now EXECUTES the tool the model chose and asserts the result (recovery
+# allowed), so a value in a prompt IS sent to the server. What a fake value costs
+# therefore depends on how the tool rejects it:
 #
-#   fine       'abc123' as a cart token, a phantom UUID, 'storefront-controller'
-#              as a skill name — each reads as an identifier of its kind. None of
-#              the three skill names any load-skill fixture uses exists, and two
-#              of them pass consistently, which is the point: the value only has
-#              to be plausible, not real.
+#   fine       a phantom 32-char hex id whose only failure mode is "not found".
+#              On the `accepted` tier a well-formed call that finds nothing PASSES
+#              — the point being that the call was valid, which is all the model
+#              could control without knowing a real id. Shopware keys are
+#              Uuid::randomHex (32 lowercase hex, no dashes) and cart tokens share
+#              that shape, so a fake must too: 'abc123' or a Stripe-style
+#              'ord_55501' is the wrong shape and reads as a different platform.
+#              Skill names ('storefront-controller') are the same — none of the
+#              three any load-skill fixture uses exists, and they pass regardless.
+#   {placeholder}
+#              a value the tool rejects by SHAPE, not by absence, so a fake can
+#              never pass. merchant-* and theme-config reject a non-UUID
+#              salesChannelId with "Value is not a valid UUID" — an
+#              invalid_arguments failure, not a not-found the `accepted` tier
+#              forgives. These prompts carry `{sales_channel_id}`, which the
+#              runner substitutes with a REAL id read off the live lane at startup
+#              (see resolve_lane_substitutions in eval/runner.py). It stays a
+#              placeholder in the file because the id is per-instance and a
+#              hardcoded UUID goes stale on every other lane.
 #   NOT fine   a vague reference the model must resolve before it can call the
 #              expected tool: "our main sales channel", "the default warehouse".
 #              The lookup is correct behaviour, so the model reaches for
-#              entity-search and the fixture scores it as the wrong tool.
+#              entity-search and the fixture scores it as the wrong tool. The
+#              {placeholder} above is the fix: hand over the concrete id instead
+#              of a phrase the model has to turn into one.
 #
-# `checkout_methods_shipping` was graded wrong for exactly that: it said "our main
-# sales channel" while merchant-checkout-methods requires a salesChannelId, and
-# both models' trails showed them searching for the channel first.
+# `checkout_methods_shipping` cost us both mistakes in turn. It first said "our
+# main sales channel" (a NOT-fine vague reference); both models went looking for
+# the channel and were graded wrong for a forced lookup. Rewriting it to name the
+# channel ("the Storefront sales channel") only moved the failure downstream —
+# under execution grading the model dutifully passed "Storefront" and the tool
+# rejected it as an invalid UUID. The durable fix is the {placeholder}: a real,
+# resolvable id handed straight to the model, so the fixture tests its actual
+# subject (the "delivery options" vocabulary gap) and nothing else.
 #
-# The obvious next thought is to keep that wording as a `chain` fixture asserting
-# the lookup. That was tried (checkout_methods_needs_channel_lookup) and removed
-# one run later, because there is no single correct first tool: the runner never
-# executes anything, so calling merchant-checkout-methods straight away is a
-# perfectly gradeable selection even though it would fail at runtime without an
-# id. The primary resolved the channel first on one instance and went direct in
-# CI, and the fixture turned that coin flip into a both-fail — i.e. into the
-# "actionable description problem" signal, for a fixture artefact. A prompt with
-# two defensible first moves does not belong in this suite at all; the rule above
-# is the durable form of the lesson.
+# Keeping it as a `chain` fixture asserting the lookup was tried
+# (checkout_methods_needs_channel_lookup) and removed: a prompt with two
+# defensible first moves — resolve the channel, or call the tool directly — has
+# no single correct first call to grade, and turned a coin flip into a both-fail.
 #
 # Two habits that would have caught all of this earlier:
 #
@@ -207,27 +219,27 @@ fixtures:
 
   - id: checkout_methods
     category: unambiguous
-    prompt: "What payment and shipping methods are available in the Storefront sales channel?"
+    prompt: "What payment and shipping methods are available in sales channel {sales_channel_id}?"
     expected_tool: merchant-checkout-methods
     expected_toolset: merchant-sales
 
   - id: checkout_methods_payment
     category: unambiguous
-    prompt: "Can customers pay by invoice in the Storefront sales channel?"
+    prompt: "Can customers pay by invoice in sales channel {sales_channel_id}?"
     expected_tool: merchant-checkout-methods
     expected_toolset: merchant-sales
     notes: A yes/no question about one method rather than a request to list them all.
 
   - id: checkout_methods_shipping
     category: unambiguous
-    # Names the channel, like its two siblings above. It used to say "our main
-    # sales channel", which is not a channel name — merchant-checkout-methods
-    # requires salesChannelId, so both models correctly went looking for one
-    # (trail: enable(merchant-sales) → tool-search "sales channels" →
-    # entity-search) and were graded wrong for a lookup the prompt forced. That
-    # made the fixture test channel resolution instead of the vocabulary gap
-    # below, which is the thing it exists for.
-    prompt: "Which delivery options does a buyer get to choose from at checkout in the Storefront sales channel?"
+    # Carries {sales_channel_id}, like its two siblings above. It once said "our
+    # main sales channel" and then "the Storefront sales channel" — neither is a
+    # salesChannelId, and merchant-checkout-methods rejects a name with "Value is
+    # not a valid UUID". Both forms made the fixture test channel resolution (the
+    # model went looking for an id) instead of the vocabulary gap below, which is
+    # the thing it exists for. The runtime-substituted real id removes that
+    # detour so the prompt tests only "delivery options" == the shipping half.
+    prompt: "Which delivery options does a buyer get to choose from at checkout in sales channel {sales_channel_id}?"
     expected_tool: merchant-checkout-methods
     expected_toolset: merchant-sales
     notes: '"Delivery options" rather than "shipping methods" — the shipping half of the same tool.'
@@ -247,7 +259,7 @@ fixtures:
 
   - id: storefront_search
     category: unambiguous
-    prompt: "Search for 'running shoes' in the Storefront sales channel and return the results with pricing."
+    prompt: "Search for 'running shoes' in sales channel {sales_channel_id} and return the results with pricing."
     expected_tool: merchant-storefront-search
     expected_toolset: merchant-sales
     notes: Sales channel aware product search → storefront-search, not entity-search.
@@ -281,13 +293,13 @@ fixtures:
 
   - id: theme_config_read
     category: unambiguous
-    prompt: "What are the current theme settings for the Storefront sales channel?"
+    prompt: "What are the current theme settings for sales channel {sales_channel_id}?"
     expected_tool: shopware-theme-config
     expected_toolset: theme
 
   - id: theme_config_font
     category: unambiguous
-    prompt: "Which font family is my Storefront theme using?"
+    prompt: "Which font family is the theme for sales channel {sales_channel_id} using?"
     expected_tool: shopware-theme-config
     expected_toolset: theme
     notes: One specific theme variable rather than the whole config — no "theme settings" keyword handed over.
@@ -339,28 +351,28 @@ fixtures:
 
   - id: cart_manage_add
     category: unambiguous
-    prompt: "Add 2 units of product 001cd6c6df7e42c38530de7b53dfcf25 to cart token abc123 in the Storefront sales channel."
+    prompt: "Add 2 units of product 001cd6c6df7e42c38530de7b53dfcf25 to cart token abc12345d6e7f8091a2b3c4d5e6f7081 in the Storefront sales channel."
     expected_tool: merchant-cart-manage
     expected_toolset: merchant-sales
     notes: Modifying an existing cart's line items → cart-manage (action=add).
 
   - id: cart_manage_remove
     category: unambiguous
-    prompt: "Take line item li_44 out of cart token abc123 in the Storefront sales channel."
+    prompt: "Take line item 44f9e8d7c6b5a4938271605f4e3d2c1b out of cart token abc12345d6e7f8091a2b3c4d5e6f7081 in the Storefront sales channel."
     expected_tool: merchant-cart-manage
     expected_toolset: merchant-sales
     notes: The remove action of the same tool.
 
   - id: cart_checkout_place
     category: unambiguous
-    prompt: "Place the order for cart token abc123 for customer 11111111111111111111111111111111 in the Storefront sales channel."
+    prompt: "Place the order for cart token abc12345d6e7f8091a2b3c4d5e6f7081 for customer 11111111111111111111111111111111 in sales channel {sales_channel_id}."
     expected_tool: merchant-cart-checkout
     expected_toolset: merchant-sales
     notes: Converting a cart into an order → cart-checkout (dryRun preview first).
 
   - id: cart_checkout_convert
     category: unambiguous
-    prompt: "Turn cart token abc123 into a real order for customer 11111111111111111111111111111111 in the Storefront sales channel."
+    prompt: "Turn cart token abc12345d6e7f8091a2b3c4d5e6f7081 into a real order for customer 11111111111111111111111111111111 in sales channel {sales_channel_id}."
     expected_tool: merchant-cart-checkout
     expected_toolset: merchant-sales
 
@@ -489,7 +501,7 @@ fixtures:
 
   - id: disambig_storefront_vs_entity_search
     category: disambiguation
-    prompt: "Search for 'red shoes' with correct pricing for the Storefront sales channel."
+    prompt: "Search for 'red shoes' with correct pricing for sales channel {sales_channel_id}."
     expected_tool: merchant-storefront-search
     expected_toolset: merchant-sales
     notes: >
@@ -498,13 +510,15 @@ fixtures:
 
   - id: disambig_storefront_shopper_view
     category: disambiguation
-    prompt: "What would a shopper actually see if they searched our shop for 'winter jacket', including the prices they'd be charged?"
+    prompt: "What would a shopper in sales channel {sales_channel_id} actually see if they searched for 'winter jacket', including the prices they'd be charged?"
     expected_tool: merchant-storefront-search
     expected_toolset: merchant-sales
     notes: >
-      Framed from the buyer's point of view with no sales-channel keyword.
-      Visibility + calculated price is exactly what separates storefront-search
-      from entity-search.
+      The discriminator is the buyer's point of view — visibility + calculated
+      price — which is what separates storefront-search from entity-search. The
+      sales-channel id is present only so the chosen tool can execute (it rejects
+      a name); the prompt still hands over no "storefront"/"sales channel search"
+      vocabulary that would give the answer away.
 
   - id: disambig_read_vs_search
     category: disambiguation
@@ -608,14 +622,14 @@ fixtures:
 
   - id: disambig_cart_manage_quantity
     category: disambiguation
-    prompt: "Change the quantity of line item li_44 in cart abc123 to 5 in the Storefront sales channel."
+    prompt: "Change the quantity of line item 44f9e8d7c6b5a4938271605f4e3d2c1b in cart abc12345d6e7f8091a2b3c4d5e6f7081 to 5 in the Storefront sales channel."
     expected_tool: merchant-cart-manage
     expected_toolset: merchant-sales
     notes: Editing an existing cart's line items → cart-manage (action=update), not cart-checkout.
 
   - id: disambig_checkout_vs_cart_manage
     category: disambiguation
-    prompt: "Everything in cart abc123 is final — complete the purchase for customer 11111111111111111111111111111111."
+    prompt: "Everything in cart abc12345d6e7f8091a2b3c4d5e6f7081 is final — complete the purchase for customer 11111111111111111111111111111111 in sales channel {sales_channel_id}."
     expected_tool: merchant-cart-checkout
     expected_toolset: merchant-sales
     notes: Finalizing a cart into an order → cart-checkout; cart-manage only edits line items.
@@ -805,7 +819,7 @@ fixtures:
 
   - id: discovery_theme_color
     category: discovery
-    prompt: "Change the primary color of my storefront theme to #ff0000."
+    prompt: "Change the primary color of the theme for sales channel {sales_channel_id} to #ff0000."
     expected_tool: shopware-theme-config
     expected_toolset: theme
     notes: >

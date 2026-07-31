@@ -63,7 +63,7 @@ def _payload(resp: dict) -> dict:
     try:
         parsed = json.loads(mcp_result_text(resp) or "{}")
         return parsed if isinstance(parsed, dict) else {}
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return {}
 
 
@@ -151,7 +151,7 @@ def assert_tool_error(
     if not is_error:
         try:
             is_error = json.loads(text).get("success") is False
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
     if not is_error:
         rep.check_fail(label, "expected an error response, got: NO_ERROR")
@@ -279,7 +279,7 @@ def _search_payload_tools(session: str, endpoint: Endpoint) -> list[dict]:
         payload = mcp_result_text(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint))
         try:
             data = json.loads(payload).get("data", [])
-        except json.JSONDecodeError, TypeError, AttributeError:
+        except (json.JSONDecodeError, TypeError, AttributeError):
             continue
         for row in data:
             tool = row.get("tool") if isinstance(row, dict) else None

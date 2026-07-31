@@ -6,7 +6,10 @@
 # all. Floating those means the build can break while nobody touched the repo.
 #
 # ruff is pre-1.0 and ships lint rules in minor releases, so it takes ==.
-# Bumping either is a deliberate PR, the same way shopware.sha is.
+# basedpyright bundles a pyright build and adds checks in minor releases, so it
+# takes == for the same reason: a new release must not turn CI red with no code
+# change. Bumping any of these is a deliberate PR, the same way shopware.sha is.
 pytest>=8,<10
 pytest-cov>=6,<8
 ruff==0.16.0
+basedpyright==1.39.9

@@ -50,6 +50,74 @@ def test_an_empty_mode_list_is_rejected():
 
 
 # ---------------------------------------------------------------------------
+# placeholder substitution ({sales_channel_id} -> a real lane id)
+# ---------------------------------------------------------------------------
+def test_apply_substitutions_replaces_known_tokens_in_place():
+    fixtures = [
+        {"id": "a", "prompt": "settings for sales channel {sales_channel_id}?"},
+        {"id": "b", "prompt": "no placeholder here"},
+    ]
+    E.apply_substitutions(fixtures, {"sales_channel_id": "019e7d92e72d71739401ee2989a47026"})
+
+    assert fixtures[0]["prompt"] == "settings for sales channel 019e7d92e72d71739401ee2989a47026?"
+    assert fixtures[1]["prompt"] == "no placeholder here"
+
+
+def test_resolve_only_probes_placeholders_the_fixtures_use(monkeypatch):
+    """A run filtered to fixtures with no placeholder must make no lane calls —
+    otherwise every `--id` run pays for a sales_channel lookup it never uses."""
+    calls = []
+    monkeypatch.setitem(E.PLACEHOLDER_RESOLVERS, "sales_channel_id", lambda ep: calls.append(ep) or "sc-id")
+
+    subs = E.resolve_lane_substitutions([{"id": "x", "prompt": "plain prompt"}], endpoint="EP")
+
+    assert subs == {} and calls == []
+
+
+def test_resolve_calls_the_resolver_when_the_token_is_present(monkeypatch):
+    monkeypatch.setitem(E.PLACEHOLDER_RESOLVERS, "sales_channel_id", lambda ep: "sc-id")
+
+    subs = E.resolve_lane_substitutions([{"id": "x", "prompt": "for {sales_channel_id}"}], endpoint="EP")
+
+    assert subs == {"sales_channel_id": "sc-id"}
+
+
+def test_an_unresolvable_placeholder_is_left_in_place_not_guessed(monkeypatch):
+    """Resolver returns None (no lane / empty shop): the token stays, so the
+    fixture fails visibly rather than grading against a literal brace string."""
+    monkeypatch.setitem(E.PLACEHOLDER_RESOLVERS, "sales_channel_id", lambda ep: None)
+    fixtures = [{"id": "x", "prompt": "for {sales_channel_id}"}]
+
+    E.apply_substitutions(fixtures, E.resolve_lane_substitutions(fixtures, endpoint="EP"))
+
+    assert fixtures[0]["prompt"] == "for {sales_channel_id}"
+
+
+def _fake_lane(monkeypatch, payload):
+    monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: ("sid", ""))
+    monkeypatch.setattr(E, "mcp_call", lambda *a, **k: {})
+    monkeypatch.setattr(E, "mcp_result_text", lambda resp: payload if isinstance(payload, str) else json.dumps(payload))
+
+
+def test_first_sales_channel_prefers_the_storefront_channel(monkeypatch):
+    _fake_lane(monkeypatch, {"data": [{"id": "aaa", "name": "Headless"}, {"id": "bbb", "name": "Storefront"}]})
+
+    assert E._first_sales_channel_id("EP") == "bbb"
+
+
+def test_first_sales_channel_falls_back_to_the_first_with_an_id(monkeypatch):
+    _fake_lane(monkeypatch, {"data": [{"name": "no id here"}, {"id": "ccc", "name": "Music"}]})
+
+    assert E._first_sales_channel_id("EP") == "ccc"
+
+
+def test_first_sales_channel_is_none_when_the_response_is_not_json(monkeypatch):
+    _fake_lane(monkeypatch, "<html>gateway timeout</html>")
+
+    assert E._first_sales_channel_id("EP") is None
+
+
+# ---------------------------------------------------------------------------
 # resolve_model
 # ---------------------------------------------------------------------------
 def test_explicit_model_wins_over_everything(monkeypatch):

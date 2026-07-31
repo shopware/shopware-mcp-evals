@@ -14,6 +14,9 @@ def test_every_probe_tool_is_read_only():
 
     for endpoint, (tool, _args) in preflight.PROBES.items():
         assert toolclass.classify(tool) == "read_only", f"{endpoint} probes with {tool}"
+    # The store path adds a second probe that is not in PROBES: it looks a
+    # product up by the id search returned. It must be read-only for the same reason.
+    assert toolclass.classify(preflight.STORE_LOOKUP_TOOL) == "read_only"
 
 
 def test_the_missing_header_is_named_as_a_client_bug():
@@ -85,6 +88,10 @@ class _Resp:
             raise ValueError("not json")
         return self._payload
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise preflight.requests.HTTPError(f"status {self.status_code}")
+
 
 def test_a_real_profile_is_recognised(monkeypatch):
     monkeypatch.setattr(preflight.requests, "get", lambda *_a, **_k: _Resp(200, {"ucp": {"version": "2026-04-08"}}))
@@ -146,3 +153,84 @@ def test_a_working_profile_sends_the_reader_to_the_server_log(monkeypatch):
 
     assert "This is the cause" not in out
     assert "server log" in out
+
+
+# ---------------------------------------------------------------------------
+# Grounding the catalog-search probe in a product the shop actually has
+# ---------------------------------------------------------------------------
+def test_a_real_product_name_becomes_the_probe_query(monkeypatch):
+    monkeypatch.setattr(preflight.mc, "SW_SC_ACCESS_KEY", "SWSC")
+    monkeypatch.setattr(preflight.mc, "SW_BASE_URL", "http://shop")
+    monkeypatch.setattr(
+        preflight.requests, "post", lambda *_a, **_k: _Resp(200, {"elements": [{"name": "Gorgeous Cotton Shirt"}]})
+    )
+
+    query, note = preflight.discover_store_query("test")
+
+    assert query == "Gorgeous Cotton Shirt"
+    assert "real product" in note
+
+
+def test_no_sales_channel_key_falls_back_to_the_default(monkeypatch):
+    """No key means no Store API call to make — degrade, do not crash."""
+    monkeypatch.setattr(preflight.mc, "SW_SC_ACCESS_KEY", "")
+
+    query, note = preflight.discover_store_query("test")
+
+    assert query == "test"
+    assert "SW_SC_ACCESS_KEY" in note
+
+
+def test_a_store_api_error_falls_back_rather_than_blocking_the_probe(monkeypatch):
+    monkeypatch.setattr(preflight.mc, "SW_SC_ACCESS_KEY", "SWSC")
+
+    def boom(*_a, **_k):
+        raise preflight.requests.ConnectionError("refused")
+
+    monkeypatch.setattr(preflight.requests, "post", boom)
+
+    query, note = preflight.discover_store_query("test")
+
+    assert query == "test"
+    assert "failed" in note
+
+
+def test_an_empty_catalog_falls_back_to_the_default(monkeypatch):
+    """A shop with no products is a data problem, not a reason to skip the probe."""
+    monkeypatch.setattr(preflight.mc, "SW_SC_ACCESS_KEY", "SWSC")
+    monkeypatch.setattr(preflight.requests, "post", lambda *_a, **_k: _Resp(200, {"elements": []}))
+
+    query, note = preflight.discover_store_query("test")
+
+    assert query == "test"
+    assert "no product" in note
+
+
+def test_first_product_name_tolerates_a_dict_of_elements():
+    """store-api usually lists `elements` as an array; a keyed object is handled
+    too rather than assuming the one shape."""
+    body = {"elements": {"id-1": {"name": "Boxed Set"}}}
+
+    assert preflight._first_product_name(body) == "Boxed Set"
+
+
+def test_first_product_name_is_empty_when_the_shape_is_unexpected():
+    assert preflight._first_product_name({}) == ""
+    assert preflight._first_product_name({"elements": [{"noName": 1}]}) == ""
+
+
+def test_a_real_product_id_is_taken_from_the_search_result():
+    """catalog-lookup is probed with the id search returned, not an invented one,
+    so the id is one UCP itself can resolve (see functional/journeys.py)."""
+    text = '{"data": {"products": [{"id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9", "title": "Thing"}]}}'
+
+    assert preflight._product_id_from_search(text) == "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+
+
+def test_no_product_id_degrades_so_the_lookup_probe_is_skipped():
+    """A malformed or empty search result yields "", and run() then skips the
+    lookup rather than sending an id nothing can resolve."""
+    assert preflight._product_id_from_search("not json") == ""
+    assert preflight._product_id_from_search('{"data": {"products": []}}') == ""
+    assert preflight._product_id_from_search('{"data": {}}') == ""
+    assert preflight._product_id_from_search('{"data": {"products": [{"noId": 1}]}}') == ""
