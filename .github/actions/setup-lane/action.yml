@@ -409,7 +409,11 @@ runs:
         APP_ENV_NAME=${APP_ENV_NAME:-test}
         echo "Server runs in APP_ENV=${APP_ENV_NAME}; seeding var/log/${APP_ENV_NAME}-<date>.log"
         mkdir -p var/log
-        printf '[%s] mcp-evals.INFO: lane ready for the eval suite [] []\n' \
+        # The text has to match functional/checks.py:LOG_PROBE_TEXT exactly — the
+        # log readers are asserted on finding *this line*, not on answering. A
+        # reader pointed at the wrong file returns an empty result and would
+        # otherwise pass.
+        printf '[%s] mcp-evals.INFO: mcp-evals lane probe 4f21a7 [] []\n' \
           "$(date -u +%Y-%m-%dT%H:%M:%S%z)" >> "var/log/${APP_ENV_NAME}-$(date -u +%Y-%m-%d).log"
 
     - name: Create integration

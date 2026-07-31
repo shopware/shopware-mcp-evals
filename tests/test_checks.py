@@ -7,6 +7,7 @@ silently wrong: a payload shape, and which reason a blocked check reports.
 """
 
 import json
+import pathlib
 
 import pytest
 
@@ -232,3 +233,47 @@ def test_no_log_files_yields_no_file_so_the_checks_skip(monkeypatch):
     monkeypatch.setattr(R, "mcp_result_text", lambda _r: json.dumps({"success": True, "data": []}))
 
     assert R.newest_log_file("sid", None) == ""
+
+
+# ---------------------------------------------------------------------------
+# The log probe: a known line, so "the reader works" is distinguishable from
+# "the file happened to have something in it"
+# ---------------------------------------------------------------------------
+def test_the_lane_seeds_exactly_the_text_the_check_looks_for():
+    """Two files have to agree on one string. If the composite action drifts from
+    LOG_PROBE_TEXT the check silently falls back to its weak form and nobody
+    notices, which is the failure this whole probe exists to prevent."""
+    action = pathlib.Path(".github/actions/setup-lane/action.yml").read_text()
+
+    assert K.LOG_PROBE_TEXT in action, "the lane no longer writes the line the check asserts on"
+
+
+def test_the_probe_text_cannot_collide_with_shopware_output():
+    """A hit has to prove the reader opened our file rather than matching
+    something the framework happens to log."""
+    assert "mcp-evals" in K.LOG_PROBE_TEXT
+    assert any(ch.isdigit() for ch in K.LOG_PROBE_TEXT), "needs a distinctive token, not just words"
+
+
+def test_log_search_asserts_on_content_not_just_a_reply():
+    check = by_name("swag-dev-tools-log-search")
+
+    assert check.contains == K.LOG_PROBE_TEXT
+
+
+def test_log_search_looks_for_the_probe_when_the_lane_seeded_one():
+    check = by_name("swag-dev-tools-log-search")
+
+    seeded = check.args(FULL_CTX | {"log_probe": True})
+    assert seeded["query"] == K.LOG_PROBE_TEXT
+    assert "seeded line" in check.label(FULL_CTX | {"log_probe": True})
+
+
+def test_log_search_falls_back_where_no_lane_seeded_one():
+    """Someone else's shop has no probe, and demanding one would fail every
+    instance this suite did not build."""
+    check = by_name("swag-dev-tools-log-search")
+
+    fallback = check.args(FULL_CTX | {"log_probe": False})
+    assert fallback["query"] == "error"
+    assert "seeded line" not in check.label(FULL_CTX | {"log_probe": False})

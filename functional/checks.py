@@ -46,6 +46,11 @@ class ToolCheck:
     detail: str | Callable[[dict], str] = ""
     args: Callable[[dict], dict] = field(default=lambda _ctx: {})
     requires: tuple[tuple[str, str], ...] = ()
+    # Text the response must contain. Without it a check only asserts that the
+    # tool answered *something*, which for a reader is satisfied by an empty
+    # result — the tool can be pointed at the wrong file, find nothing, and pass.
+    # With it, the check proves the tool returned the thing we know is there.
+    contains: str = ""
 
     def label(self, ctx: dict) -> str:
         detail = self.detail(ctx) if callable(self.detail) else self.detail
@@ -69,6 +74,15 @@ MEDIA_UPLOAD_URL = os.environ.get(
     "MCP_MEDIA_UPLOAD_URL",
     "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png",
 )
+
+# The line the lane writes into the server's log during setup, and the thing the
+# log readers are then asked to find. Static on both sides on purpose: a check
+# that searches for whatever happens to be in the file cannot tell "the reader
+# works" from "the file had something in it".
+#
+# Distinctive enough that it cannot match anything Shopware itself logs, so a
+# hit is proof the reader opened the file we seeded rather than a coincidence.
+LOG_PROBE_TEXT = "mcp-evals lane probe 4f21a7"
 
 
 CORE_CHECKS: tuple[ToolCheck, ...] = (
@@ -215,20 +229,27 @@ MERCHANT_CHECKS: tuple[ToolCheck, ...] = (
 )
 
 DEV_CHECKS: tuple[ToolCheck, ...] = (
-    # `file` defaults to "", which is never a real filename — both readers
-    # failed with "Log file not found" on every instance, naming the valid
-    # values in the error. gather_context asks for that list rather than
-    # guessing a name that depends on the date and APP_ENV.
+    # A known line in a known file, so these assert that the reader *found what
+    # we put there* rather than that it answered. "The tool returned something"
+    # is satisfied by an empty result — a reader pointed at the wrong file finds
+    # nothing and passes, which is how both of these looked healthy while
+    # failing.
+    #
+    # The lane writes LOG_PROBE_TEXT during setup; gather_context finds the file
+    # containing it. Where no lane seeded one — someone else's shop — the checks
+    # fall back to the newest real log and assert only that the call worked,
+    # because there is nothing known to look for.
     ToolCheck(
         "swag-dev-tools-log-search",
-        "(query: error)",
-        lambda c: {"query": "error", "limit": 5, "file": c["log_file"]},
+        lambda c: f"(finds the seeded line in {c['log_file']})" if c.get("log_probe") else "(query: error)",
+        lambda c: {"query": LOG_PROBE_TEXT if c.get("log_probe") else "error", "limit": 5, "file": c["log_file"]},
         (("log_file", "no log files on this instance"),),
+        contains=LOG_PROBE_TEXT,
     ),
     ToolCheck(
         "swag-dev-tools-log-stream",
         "(last 10)",
-        lambda c: {"limit": 10, "file": c["log_file"]},
+        lambda c: {"limit": 50, "file": c["log_file"]},
         (("log_file", "no log files on this instance"),),
     ),
     ToolCheck("swag-dev-tools-list-extensions", ""),

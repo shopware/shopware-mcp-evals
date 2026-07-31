@@ -30,7 +30,7 @@ from datetime import datetime
 import requests
 
 from eval.assertions import inband_error
-from functional.checks import CORE_CHECKS, DEV_CHECKS, MERCHANT_CHECKS, ToolCheck
+from functional.checks import CORE_CHECKS, DEV_CHECKS, LOG_PROBE_TEXT, MERCHANT_CHECKS, ToolCheck
 from functional.journeys import run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
@@ -96,7 +96,13 @@ def _first_field(session: str, endpoint: Endpoint, entity: str, field: str = "id
 # Tool assertions
 # ---------------------------------------------------------------------------
 def assert_tool(
-    rep: Reporter, session: str, endpoint: Endpoint, tool: str, args: dict, label: str | None = None
+    rep: Reporter,
+    session: str,
+    endpoint: Endpoint,
+    tool: str,
+    args: dict,
+    label: str | None = None,
+    contains: str = "",
 ) -> dict:
     """Call a tool; pass only if it neither errored nor reported failure in band.
 
@@ -122,6 +128,10 @@ def assert_tool(
         rep.tool_fail(tool, label, "empty content in response")
     elif in_band := inband_error(text):
         rep.tool_fail(tool, label, in_band)
+    elif contains and contains not in (text or ""):
+        # The tool answered, and answered with the wrong thing. A reader pointed
+        # at the wrong file returns an empty result and would otherwise pass.
+        rep.tool_fail(tool, label, f"response did not contain {contains!r}")
     else:
         rep.tool_pass(tool, label, text[:120])
         return _payload(resp)
@@ -499,7 +509,18 @@ def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[To
         if reason:
             rep.skip(check.skip_label(reason))
         else:
-            assert_tool(rep, session, endpoint, check.tool, check.args(ctx), check.label(ctx))
+            assert_tool(
+                rep,
+                session,
+                endpoint,
+                check.tool,
+                check.args(ctx),
+                check.label(ctx),
+                # Only assert on content the lane actually seeded. Elsewhere
+                # there is nothing known to look for, and demanding it would
+                # fail every shop this suite did not build.
+                contains=check.contains if ctx.get("log_probe", True) else "",
+            )
 
 
 def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -> dict:
@@ -571,6 +592,31 @@ def newest_log_file(session: str, endpoint: Endpoint) -> str:
     # Taking the last element made a correct-looking result depend on an
     # undocumented detail of somebody else's response.
     return max(files) if files else ""
+
+
+def find_log_probe(session: str, endpoint: Endpoint, files_hint: str) -> tuple[str, bool]:
+    """The log file holding the line the lane seeded, and whether it was found.
+
+    Returns (file, seeded). A seeded file lets the readers be asserted properly:
+    they have to return a line we know is there, which "the tool answered" does
+    not establish — a reader pointed at the wrong file returns an empty result
+    and passes.
+
+    Falls back to the newest real log where no lane seeded one, because someone
+    else's shop has no probe and demanding it would fail every instance this
+    suite did not build.
+    """
+    probe = mcp_result_text(
+        mcp_call(
+            session,
+            "swag-dev-tools-log-search",
+            {"query": LOG_PROBE_TEXT, "limit": 1, "file": files_hint},
+            endpoint=endpoint,
+        )
+    )
+    if LOG_PROBE_TEXT in (probe or ""):
+        return files_hint, True
+    return files_hint, False
 
 
 def first_skill_name(session: str, endpoint: Endpoint) -> str:
@@ -648,6 +694,7 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
         rep.skip("dev tools (--skip-dev-tools)")
         return
     ctx["log_file"] = newest_log_file(session, endpoint)
+    ctx["log_file"], ctx["log_probe"] = find_log_probe(session, endpoint, ctx["log_file"])
     # Needs the tool it is named after to have run, so it cannot be part of ctx.
     ctx["skill_name"] = first_skill_name(session, endpoint)
     run_checks(rep, session, endpoint, DEV_CHECKS, ctx)
