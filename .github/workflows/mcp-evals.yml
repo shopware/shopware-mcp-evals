@@ -984,7 +984,12 @@ jobs:
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.sc.outputs.sc_access_key }}
-        run: python -m functional.runner --endpoint store
+        run: |
+          # --allow-mutations: the UCP journey commits, because the plugin rolls
+          # every dry run back and a rolled-back cart cannot be the next step's
+          # precondition. Safe here and nowhere else — this instance is destroyed
+          # with the job.
+          python -m functional.runner --endpoint store --allow-mutations
 
       - name: Run Store API LLM eval (advisory)
         if: ${{ !cancelled() && env.RUN_STORE == 'true' && env.STORE_PLUGIN_OK == 'true' }}

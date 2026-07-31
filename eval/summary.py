@@ -559,6 +559,9 @@ def render(
             "",
             render_runs(rows),
             render_cost(rows),
+            # Directly under the rates, deliberately: the denominator they are
+            # computed over belongs next to them, not in an appendix.
+            render_skipped(reports or []),
             render_tiers(rows),
             render_tool_scorecard(results or [], catalog or {}),
             render_arm_matrix(reports or []),
@@ -641,3 +644,27 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def render_skipped(reports: list[dict]) -> str:
+    """Fixtures that were not graded, grouped by reason.
+
+    Rendered even when empty is pointless, but rendered *only* when non-empty is
+    the point: a suite that stops testing something should have to say so in the
+    same place it reports its rate. Otherwise the rate improves because the hard
+    cases left, and the summary reads like progress.
+    """
+    by_reason: dict[str, list[str]] = collections.defaultdict(list)
+    for report in reports:
+        for skip in report.get("skipped_fixtures") or []:
+            by_reason[skip.get("reason", "no reason recorded")].append(skip.get("expected_tool") or skip["id"])
+    if not by_reason:
+        return ""
+
+    total = sum(len(items) for items in by_reason.values())
+    lines = [f"### Not graded ({total} fixtures)", ""]
+    for reason, items in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
+        tools = ", ".join(f"`{t}`" for t in sorted(set(items)))
+        lines.append(f"- **{len(items)}** — {reason}<br><sub>{tools}</sub>")
+    lines.append("")
+    return "\n".join(lines)

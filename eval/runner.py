@@ -694,10 +694,21 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
     return row
 
 
-def skipped_result(fixture: dict, mode: str) -> dict:
-    """A fixture whose expected tool is not registered on this instance is
-    skipped, not failed — e.g. a dev-tools fixture on an instance without the
-    SwagMcpDevTools bundle. Skipped fixtures are excluded from scoring."""
+def skipped_result(fixture: dict, mode: str, reason: str = "expected tool not registered on this instance") -> dict:
+    """A fixture we decline to run, with the reason recorded.
+
+    Two causes today, and they are different facts:
+
+      * the expected tool is not registered on this instance — e.g. a dev-tools
+        fixture on an instance without the SwagMcpDevTools bundle;
+      * the tool is registered but the static layer proved it does not work, so
+        grading a model on finding it would charge a plugin bug to the model.
+
+    Either way it is skipped rather than failed, and excluded from scoring. The
+    reason travels into the report because a shrinking denominator has to be
+    explainable — that is the difference between a suite that scopes itself
+    honestly and one that quietly stops testing things.
+    """
     return {
         "id": fixture["id"],
         "category": fixture.get("category", ""),
@@ -707,8 +718,40 @@ def skipped_result(fixture: dict, mode: str) -> dict:
         "selected_tool": None,
         "passed": False,
         "skipped": True,
-        "skip_reason": "expected tool not registered on this instance",
+        "skip_reason": reason,
     }
+
+
+def load_tool_health(path: str | None) -> dict[str, dict]:
+    """The static layer's per-tool verdict, or an empty map.
+
+    Absent by design rather than by accident: a local run without the functional
+    suite should still grade everything, so a missing file means "no evidence",
+    not "nothing works". An unreadable one is reported and treated the same way —
+    the gate must never be the thing that stops a run.
+    """
+    if not path:
+        return {}
+    try:
+        health = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"::warning::could not read tool health from {path}: {exc}")
+        return {}
+    return health if isinstance(health, dict) else {}
+
+
+def unhealthy_reason(tool: str | None, health: dict[str, dict]) -> str:
+    """Why this tool's fixtures should not be graded, or '' if they should.
+
+    Only `fail` blocks. A tool the static layer skipped is *unproven*, not
+    broken — it may be unsafe to call, or its journey step never ran — and
+    withholding its fixtures on that basis would shrink the suite every time the
+    static layer got more cautious.
+    """
+    entry = health.get(tool or "") or {}
+    if entry.get("status") != "fail":
+        return ""
+    return f"static checks failed for this tool: {entry.get('reason', 'no reason recorded')}"
 
 
 def error_result(fixture: dict, mode: str, exc: Exception) -> dict:
@@ -778,7 +821,9 @@ def run_discovery_pass(
     available_tools,
     endpoint=ADMIN,
     workers=1,
+    tool_health=None,
 ):
+    tool_health = tool_health or {}
     print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
     print(f"  concurrency={workers}\n")
 
@@ -790,6 +835,14 @@ def run_discovery_pass(
         expected = fixture.get("expected_tool")
         if expected and expected not in available_tools:
             result = skipped_result(fixture, "discovery")
+            result["_line"] = _render(result)
+            return result
+        # Registered but proven broken by the static layer. Grading a model on
+        # finding a tool that cannot run charges a plugin bug to the model, and
+        # pays full model price to learn something one direct call already
+        # established.
+        if reason := unhealthy_reason(expected, tool_health):
+            result = skipped_result(fixture, "discovery", reason)
             result["_line"] = _render(result)
             return result
         max_steps = int(fixture.get("max_steps", default_max_steps))
@@ -914,6 +967,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-system-prompt", action="store_true", help="Skip the MCP server system prompt (ad-hoc debugging)"
+    )
+    parser.add_argument(
+        "--tool-health",
+        help=(
+            "results/tool-health-<endpoint>.json from the functional suite. Fixtures whose expected "
+            "tool it proved broken are skipped with that reason instead of graded, so a plugin bug "
+            "does not read as a description problem and does not cost a model pass to rediscover. "
+            "An absent file grades everything."
+        ),
     )
     parser.add_argument(
         "--triage",
@@ -1132,6 +1194,14 @@ def build_report(
             "results": discovery,
         }
         report["discovery_summary"] = discovery_summary(discovery)
+        # What was NOT graded, and why. A pass rate over a denominator that
+        # silently shrank is the failure mode this guards: the number goes up
+        # because the hard cases stopped being asked, and nothing says so.
+        report["skipped_fixtures"] = [
+            {"id": r["id"], "expected_tool": r.get("expected_tool"), "reason": r.get("skip_reason", "")}
+            for r in discovery
+            if r.get("skipped")
+        ]
     # Diagnostic arms sit alongside discovery under the same key, so
     # compare_runs and the gate — which both read modes["discovery"] by name —
     # are untouched by their presence.
@@ -1213,6 +1283,11 @@ def run_suite(args) -> int:
     if absent:
         print(f"Catalogue: {len(available_tools)} tools; will skip fixtures for absent: {', '.join(absent)}")
 
+    tool_health = load_tool_health(args.tool_health)
+    blocked = sorted({f["expected_tool"] for f in fixtures if unhealthy_reason(f.get("expected_tool"), tool_health)})
+    if blocked:
+        print(f"Tool health: skipping fixtures for {len(blocked)} broken tool(s): {', '.join(blocked)}")
+
     results_discovery = None
     if "discovery" in modes:
         results_discovery = run_discovery_pass(
@@ -1225,6 +1300,7 @@ def run_suite(args) -> int:
             available_tools,
             endpoint=endpoint,
             workers=args.discovery_concurrency,
+            tool_health=tool_health,
         )
 
     # `_line` is progress-display scaffolding, not part of the report contract.
