@@ -68,11 +68,25 @@ ADDRESS = {
 # instead of failing on a code that was never going to exist.
 PROMO_CODE_ENV = "UCP_JOURNEY_PROMO_CODE"
 
-# checkout.complete refuses a checkout without `payment`, and checkout-complete
-# takes only an id — so this has to be set during update or the order can never
-# be placed. Measured: the contents are not validated at all, an empty object is
-# accepted, and no payment_handlers are advertised in discovery. So this is the
-# shape an agent would plausibly send, not a value the server recognises.
+# checkout.update accepts `payment` and the checkout reaches ready_for_complete,
+# but checkout-get shows it was never persisted — and it would not help anyway.
+# UcpCheckoutCompleteTool builds its request with a hardcoded empty payload:
+#
+#     new ShoppingOperationRequest('checkout.complete', [], $context, $id)
+#
+# against checkout-update's `$requestPayload` in the same slot. That empty array
+# is validated against checkout.complete.request, which requires `$.payment`, so
+# the call fails every time regardless of what the checkout holds or which
+# payment method is chosen.
+#
+# Worth knowing for the fix: a no-input handler already exists —
+# ShopwareInvoicePaymentHandler, `com.shopware.invoice`, tokenization false, "the
+# sales channel default invoice/offline payment flow". Nothing needs to be
+# collected from the buyer. It is simply never sent, and discovery advertises
+# `payment_handlers: {}`, so an agent cannot discover it either.
+#
+# This block is kept because it is what an agent would plausibly send, and it is
+# what gets the checkout to ready_for_complete — the last state reachable today.
 PAYMENT = {"method": "invoice"}
 
 # A step that takes longer than this is reported as slow. Not a failure on its
