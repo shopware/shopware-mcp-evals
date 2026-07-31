@@ -77,10 +77,23 @@ class Reporter:
             {"tool": tool, "label": label, "status": "fail", "error": error},
         )
 
-    # -- skips (counted, not recorded, matching the bash runner) ------------
+    # -- skips --------------------------------------------------------------
     def skip(self, label: str) -> None:
+        """A structural check that did not run. Counted, not attributed."""
         print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}")
         self.skipped += 1
+
+    def tool_skip(self, tool: str, label: str, reason: str) -> None:
+        """A tool that did not run, and why.
+
+        Recorded rather than merely counted, because the eval gate downstream has
+        to tell three states apart: a tool proven to work, one proven broken, and
+        one nobody tried. A skip that leaves no record reads as the first, which
+        is how a suite starts overstating its own coverage.
+        """
+        print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}: {reason}")
+        self.skipped += 1
+        self.records.append({"tool": tool, "label": label, "status": "skipped", "reason": reason})
 
     # -- internals ----------------------------------------------------------
     def _pass(self, label: str, record: dict) -> None:
@@ -110,6 +123,32 @@ class Reporter:
             f"{c.YELLOW}{self.skipped} skipped{c.RESET} / {self.total} total"
         )
 
+    def tool_health(self) -> dict[str, dict]:
+        """Per-tool verdict, for the gate that decides where LLM budget goes.
+
+        One entry per tool, worst status wins: a tool asserted several times is
+        only healthy if every assertion held. `fail` beats `skipped` beats `pass`,
+        because the question the gate asks is "is there any reason not to trust
+        this tool", not "did it ever work once".
+
+        Structural checks (`tool == "check"`) are excluded — they describe the
+        server, not a tool, and have no fixtures to gate.
+        """
+        rank = {"pass": 0, "skipped": 1, "fail": 2}
+        health: dict[str, dict] = {}
+        for record in self.records:
+            tool = record.get("tool", "")
+            if not tool or tool == "check":
+                continue
+            status = record.get("status", "fail")
+            current = health.get(tool)
+            if current is None or rank[status] > rank[current["status"]]:
+                entry = {"status": status}
+                if reason := record.get("error") or record.get("reason"):
+                    entry["reason"] = reason
+                health[tool] = entry
+        return health
+
     def write_report(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         report = {
@@ -120,6 +159,13 @@ class Reporter:
             "skip": self.skipped,
             "total": self.total,
             "tools": self.records,
+            "health": self.tool_health(),
         }
         path.write_text(json.dumps(report, indent=2))
         print(f"Report: {path}")
+
+    def write_health(self, path: Path) -> None:
+        """The health map on its own, for the eval job to consume as an artifact."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.tool_health(), indent=2, sort_keys=True))
+        print(f"Tool health: {path}")

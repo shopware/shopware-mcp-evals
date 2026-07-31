@@ -31,6 +31,7 @@ import requests
 
 from eval.assertions import inband_error
 from functional.checks import CORE_CHECKS, DEV_CHECKS, MERCHANT_CHECKS, ToolCheck
+from functional.journeys import run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
     BASE,
@@ -594,10 +595,13 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
 # ---------------------------------------------------------------------------
 # Store API endpoint
 # ---------------------------------------------------------------------------
-def run_store(rep: Reporter, endpoint: Endpoint, session: str) -> None:
-    """The Store API endpoint uses the same v2 discovery mechanics, but does not
-    execute the UCP cart/checkout/catalog tools (those need provisioned state;
-    tool selection for them is covered by the LLM eval)."""
+def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: bool = False) -> None:
+    """The Store API endpoint: v2 discovery mechanics, then the buyer journey.
+
+    It used to stop before calling any UCP tool, on the grounds that they need
+    provisioned state. They do — which is why the journey provisions it, rather
+    than leaving thirteen tools untested and their fixtures graded on the tool
+    name alone."""
     verify_default_surface(rep, session, endpoint)
 
     # --- toolset taxonomy ---
@@ -660,6 +664,17 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str) -> None:
     else:
         rep.check_fail("shopware-tool-search", "no UCP cart tool in results")
 
+    # --- the buyer journey ---
+    #
+    # This is where the UCP tools are actually exercised. Everything above tests
+    # the discovery layer around them; only the journey tests the tools, because
+    # they are one flow and an isolated call to any of them mostly proves how the
+    # server words "not found".
+    rep.section("UCP buyer journey")
+    journey_session, _ = mcp_init(endpoint=endpoint)
+    enable_all_toolsets(journey_session, endpoint=endpoint)
+    run_ucp_journey(rep, journey_session, endpoint, allow_mutations=allow_mutations)
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -674,6 +689,15 @@ def main() -> int:
     parser.add_argument("--endpoint", choices=["admin", "store"], default="admin")
     parser.add_argument("--skip-media-upload", action="store_true")
     parser.add_argument("--skip-dev-tools", action="store_true")
+    parser.add_argument(
+        "--allow-mutations",
+        action="store_true",
+        help=(
+            "Let the UCP buyer journey commit: it creates a cart and a checkout and PLACES A REAL "
+            "ORDER. Only for a disposable lane (CI, a local trunk lane) — never a shop you care "
+            "about. Without it the journey is skipped and says so."
+        ),
+    )
     args = parser.parse_args()
 
     require("SW_BASE_URL", SW_BASE_URL)
@@ -702,7 +726,7 @@ def main() -> int:
         if args.endpoint == "admin":
             run_admin(rep, endpoint, args, session)
         else:
-            run_store(rep, endpoint, session)
+            run_store(rep, endpoint, session, allow_mutations=args.allow_mutations)
     except requests.exceptions.RequestException as exc:
         # A transport failure that survived the client's throttle retries — record
         # it and still emit a summary + report rather than crashing mid-suite.
@@ -711,6 +735,9 @@ def main() -> int:
     rep.summary()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     rep.write_report(BASE / "results" / f"functional-{args.endpoint}-{timestamp}.json")
+    # Stable filename: the eval job consumes this as an artifact, so it cannot
+    # be timestamped like the report.
+    rep.write_health(BASE / "results" / f"tool-health-{args.endpoint}.json")
     return rep.exit_code
 
 

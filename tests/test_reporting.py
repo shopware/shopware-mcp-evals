@@ -46,10 +46,52 @@ def test_write_report_roundtrip(tmp_path):
     out = tmp_path / "sub" / "report.json"
     rep.write_report(out)  # also creates the parent directory
     report = json.loads(out.read_text())
-    assert set(report) == {"timestamp", "server", "pass", "fail", "skip", "total", "tools"}
+    assert set(report) == {"timestamp", "server", "pass", "fail", "skip", "total", "tools", "health"}
     assert (report["pass"], report["fail"], report["skip"], report["total"]) == (1, 1, 1, 3)
     assert report["server"] == "srv"
     assert len(report["tools"]) == 2
+    # Structural checks describe the server, not a tool, so they contribute no
+    # health entries — there are no fixtures to gate on them.
+    assert report["health"] == {}
+
+
+def test_tool_health_takes_the_worst_status_per_tool():
+    """A tool asserted several times is healthy only if every assertion held. The
+    gate asks "is there any reason not to trust this tool", not "did it ever work
+    once" — a tool that passes one payload and fails another is not safe to spend
+    LLM budget on."""
+    rep = Reporter("srv", color=False)
+    rep.tool_pass("shopware-x", "first payload")
+    rep.tool_fail("shopware-x", "second payload", "boom")
+    rep.tool_pass("shopware-y", "only payload")
+    rep.tool_skip("shopware-z", "unsafe tool", "no dryRun")
+
+    health = rep.tool_health()
+
+    assert health["shopware-x"] == {"status": "fail", "reason": "boom"}
+    assert health["shopware-y"] == {"status": "pass"}
+    assert health["shopware-z"] == {"status": "skipped", "reason": "no dryRun"}
+
+
+def test_a_skip_is_recorded_rather_than_only_counted():
+    """A skip that leaves no record is indistinguishable from a pass downstream,
+    which is how a suite starts overstating its own coverage."""
+    rep = Reporter("srv", color=False)
+    rep.tool_skip("shopware-x", "label", "because")
+
+    assert rep.skipped == 1
+    assert rep.records == [{"tool": "shopware-x", "label": "label", "status": "skipped", "reason": "because"}]
+
+
+def test_write_health_is_a_standalone_artifact(tmp_path):
+    """The eval job consumes this across a job boundary, so it needs its own
+    stable file rather than a field inside a timestamped report."""
+    rep = Reporter("srv", color=False)
+    rep.tool_fail("shopware-x", "label", "boom")
+    out = tmp_path / "nested" / "tool-health.json"
+    rep.write_health(out)
+
+    assert json.loads(out.read_text()) == {"shopware-x": {"status": "fail", "reason": "boom"}}
 
 
 def test_color_disabled_emits_no_ansi(capsys):
