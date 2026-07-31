@@ -18,6 +18,7 @@ MCP Server v2 notes:
   - Deferred tools stay callable directly; the allowlist is the call boundary.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -357,11 +358,32 @@ def mcp_fetch_system_prompt(session_id: str, server_instructions: str, endpoint:
     instructions instead, and say so, so a genuinely missing prompt set is
     visible without being fatal.
     """
+    return mcp_fetch_context_prompts(session_id, server_instructions, endpoint=endpoint)[0]
+
+
+def mcp_fetch_context_prompts(
+    session_id: str, server_instructions: str, endpoint: Endpoint = ADMIN
+) -> tuple[str, dict]:
+    """The context prompt, plus an inventory of what went into it.
+
+    The inventory is the point. The two endpoints are not comparable and nothing
+    said so: admin serves four prompts totalling ~20k characters — a guide naming
+    every tool and its parameters — while store serves none at all and gets ~460
+    characters of server instructions. A pass rate from each was being read side
+    by side as if they were the same measurement.
+
+    Returns (prompt_text, {"names": [...], "chars": {name: n}, "total_chars": n,
+    "sha256": "..."}). The digest is there so two runs can be told apart when the
+    prompt *content* changes — a boolean cannot.
+    """
+    inventory: dict = {"names": [], "chars": {}, "instructions_chars": len(server_instructions or "")}
     try:
         result = _rpc_json("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint).get("result", {})
     except requests.HTTPError as exc:
         print(f"WARNING: {endpoint.name} endpoint does not serve prompts/list ({exc}); using server instructions only")
-        return server_instructions.strip()
+        text = server_instructions.strip()
+        inventory |= {"total_chars": len(text), "sha256": hashlib.sha256(text.encode()).hexdigest()[:12]}
+        return text, inventory
     prompt_names = [p["name"] for p in result.get("prompts", [])]
 
     parts = []
@@ -371,13 +393,19 @@ def mcp_fetch_system_prompt(session_id: str, server_instructions: str, endpoint:
     for name in prompt_names:
         result = _rpc_json("prompts/get", {"name": name}, session_id, rpc_id=4, endpoint=endpoint).get("result", {})
         messages = result.get("messages", [])
+        collected = 0
         for msg in messages:
             content = msg.get("content", {})
             text = content.get("text", "") if isinstance(content, dict) else str(content)
             if text.strip():
                 parts.append(text.strip())
+                collected += len(text.strip())
+        inventory["names"].append(name)
+        inventory["chars"][name] = collected
 
-    return "\n\n---\n\n".join(parts)
+    prompt = "\n\n---\n\n".join(parts)
+    inventory |= {"total_chars": len(prompt), "sha256": hashlib.sha256(prompt.encode()).hexdigest()[:12]}
+    return prompt, inventory
 
 
 def endpoint_by_name(name: str) -> Endpoint:

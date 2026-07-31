@@ -76,7 +76,7 @@ from mcp_client import (
     endpoint_by_name,
     mcp_call,
     mcp_call_error,
-    mcp_fetch_system_prompt,
+    mcp_fetch_context_prompts,
     mcp_init,
     mcp_result_text,
     mcp_tools_list_all,
@@ -351,7 +351,13 @@ def run_fixture_discovery(
     surface_tokens_peak = surface_tokens
 
     messages = []
-    if provider == "openai" and system_prompt:
+    # Every provider except Anthropic carries the context prompt as a system
+    # message; Anthropic takes it as a top-level parameter instead (see
+    # anthropic_turn). This used to test `== "openai"`, which meant the `github`
+    # arm ran with no context prompt at all while its report recorded
+    # `system_prompt: true` — a whole provider silently measuring something else,
+    # and the reason the prompt inventory below is worth recording.
+    if provider != "anthropic" and system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
@@ -1142,17 +1148,22 @@ def load_fixtures(path: Path, category: str | None = None, fixture_id: str | Non
     return fixtures
 
 
-def fetch_system_prompt(endpoint, enabled: bool = True) -> str | None:
-    """The server's own instructions plus its context prompts, as the model sees
-    them. Disabled by --no-system-prompt for ad-hoc debugging."""
+def fetch_system_prompt(endpoint, enabled: bool = True) -> tuple[str | None, dict]:
+    """The server's instructions plus its context prompts, and what they were.
+
+    Returns (prompt, inventory). The inventory travels into the report because a
+    boolean cannot answer the question that matters: admin serves four prompts
+    totalling ~20k characters and store serves none, so the two endpoints' pass
+    rates were never comparable and nothing recorded why.
+    """
     if not enabled:
-        print("System prompt: disabled (--no-system-prompt)")
-        return None
+        print("Context prompt: disabled (--no-system-prompt)")
+        return None, {"names": [], "chars": {}, "total_chars": 0, "disabled": True}
     session_id, server_instructions = mcp_init(endpoint=endpoint)
-    prompt = mcp_fetch_system_prompt(session_id, server_instructions, endpoint=endpoint)
-    sections = [line for line in prompt.split("\n") if line.startswith("# ")]
-    print(f"System prompt: {len(sections)} sections, {len(prompt)} chars")
-    return prompt
+    prompt, inventory = mcp_fetch_context_prompts(session_id, server_instructions, endpoint=endpoint)
+    named = ", ".join(inventory["names"]) or "none"
+    print(f"Context prompt: {inventory['total_chars']} chars from {len(inventory['names'])} prompt(s): {named}")
+    return prompt, inventory
 
 
 def probe_catalogue(endpoint) -> set[str]:
@@ -1174,6 +1185,7 @@ def build_report(
     system_prompt_enabled: bool,
     max_steps: int,
     arm_results: dict[str, list[dict]] | None = None,
+    prompt_inventory: dict | None = None,
 ) -> dict:
     """The JSON report. Pure: no writing, so its shape can be asserted directly."""
     report = {
@@ -1184,6 +1196,10 @@ def build_report(
         "modes": {},
         "fixtures": len(fixtures),
         "system_prompt": system_prompt_enabled,
+        # The inventory, not just the flag: two runs with the same boolean can
+        # have had different prompts, and the admin/store gap is invisible
+        # without it.
+        "context_prompt": prompt_inventory or {},
         "max_steps": max_steps,
     }
     if discovery is not None:
@@ -1273,7 +1289,7 @@ def run_suite(args) -> int:
     print(f"Fixtures: {len(fixtures)}")
 
     print("\nInitializing MCP session for system prompt...")
-    system_prompt = fetch_system_prompt(endpoint, enabled=not args.no_system_prompt)
+    system_prompt, prompt_inventory = fetch_system_prompt(endpoint, enabled=not args.no_system_prompt)
 
     available_tools = probe_catalogue(endpoint)
     # `.get()`: a negative fixture names no tool, so there is nothing that could
@@ -1341,6 +1357,7 @@ def run_suite(args) -> int:
                 not args.no_system_prompt,
                 args.max_steps,
                 arm_results,
+                prompt_inventory,
             ),
             indent=2,
         )

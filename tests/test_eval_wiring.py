@@ -254,7 +254,11 @@ def test_startup_survives_the_real_fixtures_including_negatives(monkeypatch, tmp
     for name in ("SW_ACCESS_KEY", "SW_SECRET_ACCESS_KEY", "OPENAI_API_KEY"):
         monkeypatch.setattr(E, name, "test-value")
     monkeypatch.setattr(E, "build_client", lambda provider, credential: object())
-    monkeypatch.setattr(E, "fetch_system_prompt", lambda endpoint, enabled=True: "SYSTEM")
+    monkeypatch.setattr(
+        E,
+        "fetch_system_prompt",
+        lambda endpoint, enabled=True: ("SYSTEM", {"names": [], "chars": {}, "total_chars": 6}),
+    )
     # Deliberately a partial catalogue: the absent-tool report is the code under
     # test, so it has to actually have something to report.
     monkeypatch.setattr(E, "probe_catalogue", lambda endpoint: {"shopware-entity-search"})
@@ -279,7 +283,11 @@ def test_startup_survives_the_real_store_fixtures(monkeypatch, tmp_path, capsys)
     for name in ("SW_SC_ACCESS_KEY", "OPENAI_API_KEY"):
         monkeypatch.setattr(E, name, "test-value")
     monkeypatch.setattr(E, "build_client", lambda provider, credential: object())
-    monkeypatch.setattr(E, "fetch_system_prompt", lambda endpoint, enabled=True: "SYSTEM")
+    monkeypatch.setattr(
+        E,
+        "fetch_system_prompt",
+        lambda endpoint, enabled=True: ("SYSTEM", {"names": [], "chars": {}, "total_chars": 6}),
+    )
     monkeypatch.setattr(E, "probe_catalogue", lambda endpoint: set())
     monkeypatch.setattr(E, "run_discovery_pass", lambda p, c, fixtures, *a, **kw: [])
 

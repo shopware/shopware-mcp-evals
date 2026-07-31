@@ -172,18 +172,36 @@ def test_probe_catalogue_enables_everything_before_listing(monkeypatch):
     assert order == ["enable", "list"]
 
 
-def test_system_prompt_can_be_disabled_for_debugging(monkeypatch, capsys):
+def test_context_prompt_can_be_disabled_for_debugging(monkeypatch, capsys):
     monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: pytest.fail("must not open a session"))
 
-    assert E.fetch_system_prompt(None, enabled=False) is None
+    prompt, inventory = E.fetch_system_prompt(None, enabled=False)
+
+    assert prompt is None
+    # Recorded as disabled rather than as an empty prompt: "we turned it off" and
+    # "the server served nothing" are different facts, and the store endpoint
+    # genuinely is the second one.
+    assert inventory["disabled"] is True
     assert "disabled (--no-system-prompt)" in capsys.readouterr().out
 
 
-def test_system_prompt_reports_how_many_sections_it_found(monkeypatch, capsys):
+def test_context_prompt_reports_the_inventory_it_fetched(monkeypatch, capsys):
+    """A boolean cannot distinguish two runs whose prompt *content* differs, and
+    it cannot show that admin serves four prompts while store serves none."""
     monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: ("sid", "instructions"))
-    monkeypatch.setattr(E, "mcp_fetch_system_prompt", lambda *_a, **_k: "# One\nbody\n# Two\nbody")
+    monkeypatch.setattr(
+        E,
+        "mcp_fetch_context_prompts",
+        lambda *_a, **_k: (
+            "# One\nbody\n# Two\nbody",
+            {"names": ["shopware-context", "merchant-context"], "chars": {}, "total_chars": 20, "sha256": "abc"},
+        ),
+    )
 
-    prompt = E.fetch_system_prompt(None, enabled=True)
+    prompt, inventory = E.fetch_system_prompt(None, enabled=True)
 
     assert prompt.startswith("# One")
-    assert "System prompt: 2 sections" in capsys.readouterr().out
+    assert inventory["names"] == ["shopware-context", "merchant-context"]
+    out = capsys.readouterr().out
+    assert "20 chars from 2 prompt(s)" in out
+    assert "shopware-context" in out

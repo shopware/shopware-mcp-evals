@@ -666,6 +666,21 @@ jobs:
             --suite-label "admin · second validator" > second.log 2>&1 &
           pid_second=$!
 
+          # Third arm: the same primary model on the same fixtures with the
+          # server's context prompts withheld. It answers the one question the
+          # ~20k characters of tool guide have never been asked — whether they
+          # earn their place — and it is advisory, so it never gates.
+          #
+          # Admin only. The store endpoint serves no context prompt at all (460
+          # chars of server instructions against admin's 20,606), so an arm there
+          # would compare a run with nothing to a run with nothing.
+          python -m eval.runner --no-system-prompt "${args[@]}" \
+            --output "results/eval-no-prompt.json" \
+            --summary-row "results/rows/4-admin-noprompt.json" \
+            --suite-label "admin · no context prompt" \
+            --advisory > noprompt.log 2>&1 &
+          pid_noprompt=$!
+
           # `|| rc=$?`, not `wait; rc=$?`. GitHub runs this with `bash -e`, which
           # the script's own `set -uo pipefail` does not undo, and a failing
           # `wait` is a simple command — so the shell exited *at the wait* the
@@ -675,12 +690,19 @@ jobs:
           # take effect. The step just failed with a bare exit code.
           rc_primary=0; wait "${pid_primary}" || rc_primary=$?
           rc_second=0; wait "${pid_second}" || rc_second=$?
+          # Advisory: waited on so the log is complete, but its exit code never
+          # reaches `failed`. A prompt-off arm scoring worse is the expected
+          # result, not a broken build.
+          rc_noprompt=0; wait "${pid_noprompt}" || rc_noprompt=$?
 
           echo "::group::admin · primary (exit ${rc_primary})"
           cat primary.log
           echo "::endgroup::"
           echo "::group::admin · second validator (exit ${rc_second})"
           cat second.log
+          echo "::endgroup::"
+          echo "::group::admin · no context prompt (advisory, exit ${rc_noprompt})"
+          cat noprompt.log
           echo "::endgroup::"
 
           echo "primary_exit=${rc_primary}" >> "$GITHUB_OUTPUT"
@@ -1051,6 +1073,7 @@ jobs:
             --comparison "results/eval-comparison.json" \
             --reports "results/eval-primary.json" \
                       "results/eval-second-validator.json" \
+                      "results/eval-no-prompt.json" \
                       "results/eval-store.json"
 
       # Advisory, and non-gating by construction — cost_drift always exits 0.

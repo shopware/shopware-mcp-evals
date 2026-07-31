@@ -562,6 +562,7 @@ def render(
             # Directly under the rates, deliberately: the denominator they are
             # computed over belongs next to them, not in an appendix.
             render_skipped(reports or []),
+            render_prompt_delta(reports or []),
             render_tiers(rows),
             render_tool_scorecard(results or [], catalog or {}),
             render_arm_matrix(reports or []),
@@ -668,3 +669,85 @@ def render_skipped(reports: list[dict]) -> str:
         lines.append(f"- **{len(items)}** — {reason}<br><sub>{tools}</sub>")
     lines.append("")
     return "\n".join(lines)
+
+
+def render_prompt_delta(reports: list[dict]) -> str:
+    """What the context prompt is worth, and what each suite actually got.
+
+    Two questions, one table. The first is the A/B: the same model on the same
+    fixtures with the server's context prompts on and off, which is the only way
+    to say whether ~20k characters of tool guide earn their place.
+
+    The second matters more and is easy to miss — the suites do not get the same
+    prompt. The admin endpoint serves four prompts; the store endpoint serves
+    none. Their pass rates were being read side by side as though they were the
+    same measurement, and nothing in any report said otherwise.
+    """
+    seen: dict[str, dict] = {}
+    for report in reports:
+        inventory = report.get("context_prompt") or {}
+        if not inventory:
+            continue
+        rate = _discovery_rate(report)
+        key = f"{report.get('server', '?')}|{report.get('model', '?')}|{bool(report.get('system_prompt'))}"
+        seen[key] = {
+            "server": report.get("server", "?"),
+            "model": report.get("model", "?"),
+            "enabled": bool(report.get("system_prompt")),
+            "chars": inventory.get("total_chars", 0),
+            "names": inventory.get("names", []),
+            "rate": rate,
+        }
+    if not seen:
+        return ""
+
+    lines = ["### Context prompt", "", "| Model | Prompt | Chars | Prompts | Pass rate |", "|---|---|---:|---|---:|"]
+    for entry in seen.values():
+        names = ", ".join(f"`{n}`" for n in entry["names"]) or "_none_"
+        rate = "—" if entry["rate"] is None else f"{round(100 * entry['rate'])}%"
+        lines.append(
+            f"| `{entry['model']}` | {'on' if entry['enabled'] else 'off'} | {entry['chars']:,} | {names} | {rate} |"
+        )
+    lines.append("")
+
+    for note in _prompt_notes(list(seen.values())):
+        lines += [note, ""]
+    return "\n".join(lines)
+
+
+def _discovery_rate(report: dict) -> float | None:
+    mode = (report.get("modes") or {}).get("discovery") or {}
+    passed, failed = mode.get("passed"), mode.get("failed")
+    if passed is None or failed is None or (passed + failed) == 0:
+        return None
+    return passed / (passed + failed)
+
+
+def _prompt_notes(entries: list[dict]) -> list[str]:
+    """The two readings worth spelling out rather than leaving to inference."""
+    notes = []
+    # Same model AND same server. Matching on the model alone paired the store
+    # suite's prompt-on run against admin's prompt-off run and reported the gap
+    # between two different endpoints as what the prompt was worth — a confident,
+    # completely wrong number.
+    pairs = [
+        (a, b)
+        for a in entries
+        for b in entries
+        if a["model"] == b["model"] and a["server"] == b["server"] and a["enabled"] and not b["enabled"]
+    ]
+    for on, off in pairs:
+        if on["rate"] is None or off["rate"] is None:
+            continue
+        delta = round(100 * (on["rate"] - off["rate"]))
+        verdict = "worth it" if delta > 0 else ("no measurable effect" if delta == 0 else "actively hurting")
+        notes.append(
+            f"**{on['chars']:,} characters of context prompt moved `{on['model']}` by {delta:+d} points — {verdict}.**"
+        )
+    if any(e["chars"] == 0 or not e["names"] for e in entries) and any(e["names"] for e in entries):
+        notes.append(
+            "One endpoint ships **no context prompt at all** while another ships several. Their pass rates are "
+            "not comparable: a model working the bare endpoint is being asked to do the same job with a fraction "
+            "of the guidance."
+        )
+    return notes
