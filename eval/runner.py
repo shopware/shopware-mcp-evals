@@ -1508,23 +1508,34 @@ def _referenced(fixtures: list[dict], key: str) -> bool:
 LANE_LOOKUP_ERRORS = (OSError, RuntimeError, ValueError)
 
 
-def _resolved_or_none(key: str, resolver, endpoint) -> str | dict[str, str] | None:
-    """One resolver's value, or None with the reason printed.
+def _lane_lookup_failed(key: str, exc: Exception) -> None:
+    print(f"::warning::resolving {{{key}}} off the lane failed ({type(exc).__name__}: {exc})")
 
-    `str` for a read-only resolver, `dict` for a seeding one that fills several
-    placeholders from a single cart — the caller knows which it asked for.
 
-    Wrapped because a failed lookup must not be the thing that ends a run. The
-    unresolved placeholder already has a defined meaning — the fixtures naming it
-    are skipped — so degrading to that is strictly better than dying at startup
-    before a single fixture has been graded, which is the exact failure this
-    file's own regression test was written for.
-    """
+# Two wrappers rather than one returning `str | dict`. The union needed a cast or
+# an isinstance at both call sites to say something each caller already knows:
+# a read-only resolver yields one id, a seeding resolver yields the several it
+# filled from one cart. Splitting them keeps each precisely typed.
+#
+# Both swallow, because a failed lookup must not be the thing that ends a run.
+# The unresolved placeholder already has a defined meaning — the fixtures naming
+# it are skipped — so degrading to that is strictly better than dying at startup
+# before a single fixture has been graded, which is the exact failure this file's
+# own regression test was written for.
+def _resolve_one(key: str, resolver, endpoint) -> str | None:
     try:
         return resolver(endpoint)
     except LANE_LOOKUP_ERRORS as exc:
-        print(f"::warning::resolving {{{key}}} off the lane failed ({type(exc).__name__}: {exc})")
+        _lane_lookup_failed(key, exc)
         return None
+
+
+def _resolve_many(key: str, resolver, endpoint) -> dict[str, str]:
+    try:
+        return resolver(endpoint)
+    except LANE_LOOKUP_ERRORS as exc:
+        _lane_lookup_failed(key, exc)
+        return {}
 
 
 def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool = False) -> dict[str, str]:
@@ -1539,7 +1550,7 @@ def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool =
     for key, resolver in PLACEHOLDER_RESOLVERS.items():
         if not _referenced(fixtures, key):
             continue
-        value = _resolved_or_none(key, resolver, endpoint)
+        value = _resolve_one(key, resolver, endpoint)
         if value:
             subs[key] = value
             print(f"Lane id: {key} = {value}")
@@ -1556,7 +1567,7 @@ def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool =
                 "to the shop, so their fixtures are skipped."
             )
             continue
-        for key, value in (_resolved_or_none("/".join(wanted), resolver, endpoint) or {}).items():
+        for key, value in _resolve_many("/".join(wanted), resolver, endpoint).items():
             if value:
                 subs[key] = value
                 print(f"Lane id (seeded): {key} = {value}")
