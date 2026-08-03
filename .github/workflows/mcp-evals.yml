@@ -402,9 +402,16 @@ jobs:
             # agree; if they ever stop agreeing, this is the line that says so.
             echo "--- addresses in play ---"
             echo "  runner -> shop:                  ${APP_URL}"
-            server_app_url=$(grep -hE '^APP_URL=' shopware/.env.local shopware/.env 2>/dev/null \
-              | tail -1 | cut -d= -f2- | tr -d '"' || true)
-            echo "  APP_URL as the SERVER sees it:   ${server_app_url:-(not set in shopware/.env*)}"
+            # setup-lane passes APP_URL to the steps that call the shop; it never
+            # writes it into the checkout, so on a CI lane these files usually do
+            # not carry it and "not found" is the normal answer rather than a
+            # finding. Said that way round on purpose: the first version printed
+            # "unset", which reads as "the server has no APP_URL" and is a
+            # different claim from "I did not find it here".
+            server_app_url=$(grep -hE '^APP_URL=' \
+              shopware/.env.local shopware/.env shopware/.env.local.php 2>/dev/null \
+              | tail -1 | sed -e "s/^APP_URL=//" -e "s/^['\"]//" -e "s/['\",;]*$//" || true)
+            echo "  APP_URL as the SERVER sees it:   ${server_app_url:-(not written into shopware/.env*; inherited from the environment)}"
             profile_uri=$(sed -n 's/.*profile="\([^"]*\)".*/\1/p' /tmp/preflight.log | head -1)
             echo "  profile URI the server fetches:  ${profile_uri:-(not printed)}"
             if [ -n "${server_app_url}" ] && [ "${server_app_url%/}" != "${APP_URL%/}" ]; then
@@ -473,7 +480,7 @@ jobs:
             err=$(sed -n 's/^  error: //p' /tmp/preflight.log | head -1)
             rest_status=$(printf '%s' "${rest_out}" | tail -1)
             rest_code=$(printf '%s' "${rest_out}" | sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p' | head -1)
-            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AAddresses: runner=${APP_URL} server-APP_URL=${server_app_url:-unset} profile=${profile_uri:-unknown}%0AFull diagnosis in the Static checks log."
+            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AAddresses: runner=${APP_URL} profile=${profile_uri:-unknown}${server_app_url:+ server-APP_URL=${server_app_url}}%0AFull diagnosis in the Static checks log."
           fi
 
       - name: Run Store API functional tests
