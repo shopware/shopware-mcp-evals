@@ -21,8 +21,15 @@ dependencies = []
 # of workaround across the repo — and the two modules both named `run` resolved
 # by search-path order, which put eval/run.py in front of functional/run.py for
 # anything that guessed wrong. They are `runner.py` under their own packages now.
+#
+# This list is exhaustive and NOT inferred: a new top-level module that is not
+# named here is simply absent from the install, and CI is where you find out.
+# `lane` was added and omitted, so a fresh `pip install -e . --no-deps` gave
+# `ModuleNotFoundError: No module named 'lane'` on 14 test modules while a stale
+# local editable install kept resolving it. After touching this line, re-run
+# `pip install -e . --no-deps` locally, or your environment stops matching CI's.
 [tool.setuptools]
-py-modules = ["mcp_client", "ownership", "toolclass", "toollint", "ucp"]
+py-modules = ["lane", "mcp_client", "ownership", "toolclass", "toollint", "ucp"]
 
 [tool.setuptools.packages.find]
 include = ["eval*", "functional*"]
