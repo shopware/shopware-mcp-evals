@@ -388,11 +388,39 @@ jobs:
             echo "GET ${profile} -> ${code}"
             [ "${code}" = "200" ] && head -c 300 /tmp/profile.json && echo
 
+            # The step that makes the log dump below worth reading. The MCP tool
+            # catches the throwable and answers `internal` with nothing logged, so
+            # up to now the grep had nothing to find and faithfully reported
+            # "(nothing matched)" on every run. The REST route for the SAME
+            # operation does not swallow it: the exception reaches Symfony's
+            # handler and is written to var/log. That is how this class of failure
+            # was finally diagnosed locally, and doing it here means a run
+            # diagnoses itself instead of waiting for someone to reproduce it.
+            #
+            # Non-fatal throughout: this whole block runs only because preflight
+            # already failed, and it reports through an output rather than an exit
+            # code (see above).
+            echo "--- the same operation over REST, which does not swallow the exception ---"
+            rest="${APP_URL}/ucp/v1/catalog/search"
+            echo "POST ${rest}"
+            curl -sS -X POST "${rest}" \
+              -H 'Content-Type: application/json' \
+              -H "sw-access-key: ${SW_SC_ACCESS_KEY}" \
+              -H "UCP-Agent: shopware-mcp-evals profile=\"${APP_URL}/.well-known/ucp\"" \
+              -d '{"query":"test","limit":5}' \
+              -w '\n  HTTP %{http_code}\n' --max-time 20 2>&1 | head -c 800 || true
+            echo
+
             echo "--- shopware logs ---"
             logdir=$(find shopware/var -maxdepth 2 -type d -name log 2>/dev/null | head -1)
             if [ -n "${logdir}" ]; then
               ls -la "${logdir}"
-              hits=$(grep -hE 'mcp\.|ucp|Ucp\\|Unhandled error' "${logdir}"/*.log 2>/dev/null | tail -n 20 || true)
+              # Match on SEVERITY, not on the message mentioning UCP. The previous
+              # pattern only caught the profile-fetch exception because its message
+              # happens to contain the profile URL — an exception from inside a
+              # capability (a DAL error, say) mentions no UCP at all and was
+              # invisible. Verified against both shapes.
+              hits=$(grep -hiE 'app\.(ERROR|CRITICAL)|request\.CRITICAL|Unhandled|ucp' "${logdir}"/*.log 2>/dev/null | tail -n 20 || true)
               # `grep | tail` exits 0 on empty input, so `|| echo` never fires.
               if [ -n "${hits}" ]; then echo "${hits}"; else echo "  (nothing matched)"; fi
             else
