@@ -446,22 +446,19 @@ runs:
           echo "::warning::log probe not written to ${PROBE_LOG}; the dev-tools log readers will SKIP"
         fi
 
-        # An image for shopware-media-upload to fetch, served by the shop itself.
-        # The check used to point at upload.wikimedia.org, which made a green run
-        # depend on a third party being reachable from the runner — and on
-        # 2026-08-03 it answered "Cannot open source stream", failing the whole
-        # static job over somebody else's rate limiter. The tool fetches the URL
-        # server-side, and the server can always reach its own public/ directory,
-        # so this asks the same question with nothing else in the way.
-        #
-        # 16x16 RGBA PNG, inline so nothing has to be downloaded to set up the
-        # thing that tests downloading.
-        printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOklEQVR42u3OMQEAAAgDoJnc/9GxhwcgUDvXlrYFAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwtQ+cKQGB1z0LRwAAAABJRU5ErkJggg==' \
-          | base64 -d > public/mcp-evals-probe.png
+        # The image shopware-media-upload fetches, served by the shop itself.
+        # The check used to name a URL on somebody else's host: assets.shopware.com
+        # answered 403, then upload.wikimedia.org 404'd once the file was removed
+        # and failed the whole static job with 47 of 48 checks passing. Neither
+        # said anything about the tool. The file is committed at
+        # functional/assets/ now (see its README) and the tool fetches URLs
+        # server-side, so a server reaching its own public/ is the whole
+        # dependency.
+        cp "$GITHUB_WORKSPACE/functional/assets/media-upload-probe.png" public/mcp-evals-probe.png
         if curl -fsS -o /dev/null "${{ inputs.app_url }}/mcp-evals-probe.png"; then
           echo "Serving the media-upload probe at ${{ inputs.app_url }}/mcp-evals-probe.png"
         else
-          echo "::warning::the media-upload probe is not being served; shopware-media-upload will fail on the fetch"
+          echo "::warning::the media-upload probe is not being served; shopware-media-upload will SKIP"
         fi
 
     - name: Create integration

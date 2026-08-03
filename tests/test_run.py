@@ -3,16 +3,18 @@ admin/store flows driven through a stateful fake MCP server."""
 
 import argparse
 import json
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
+import requests
 
 import lane
 from eval.result_schema import JsonObject, McpResponse, ToolDef, Toolset
 from functional import runner as R
 from functional.reporting import Reporter
 from mcp_client import Endpoint
-from tests.stubs import const
+from tests.stubs import const, raiser
 
 ADMIN = R.endpoint_by_name("admin")
 STORE = R.endpoint_by_name("store")
@@ -127,6 +129,39 @@ def test_first_field_returns_value(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_first_field_empty_when_no_items(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(R, "mcp_call", const(call_resp({"data": []})))
     assert R._first_field("s", ADMIN, "product") == ""
+
+
+# ---------------------------------------------------------------------------
+# The media-upload probe: served, or the check skips
+# ---------------------------------------------------------------------------
+def test_a_served_probe_url_is_returned_as_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(R.requests, "head", const(SimpleNamespace(status_code=200)))
+
+    assert R._served("http://shop.test/probe.png") == "http://shop.test/probe.png"
+
+
+def test_a_head_rejecting_server_falls_back_to_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    """405 to HEAD is common enough that treating it as absent would skip the
+    check on a lane that was seeded correctly."""
+    monkeypatch.setattr(R.requests, "head", const(SimpleNamespace(status_code=405)))
+    monkeypatch.setattr(R.requests, "get", const(SimpleNamespace(status_code=200)))
+
+    assert R._served("http://shop.test/probe.png") == "http://shop.test/probe.png"
+
+
+def test_a_missing_probe_is_empty_not_the_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(R.requests, "head", const(SimpleNamespace(status_code=404)))
+    monkeypatch.setattr(R.requests, "get", const(SimpleNamespace(status_code=404)))
+
+    assert R._served("http://shop.test/gone.png") == ""
+
+
+def test_an_unreachable_host_is_empty_rather_than_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gather_context runs this before any check; letting it propagate would end
+    the run instead of skipping one check."""
+    monkeypatch.setattr(R.requests, "head", raiser(requests.exceptions.ConnectionError("refused")))
+
+    assert R._served("http://nowhere.invalid/probe.png") == ""
 
 
 # ---------------------------------------------------------------------------

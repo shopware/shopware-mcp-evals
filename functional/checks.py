@@ -26,6 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from eval.result_schema import JsonObject
+from mcp_client import SW_BASE_URL
 
 # The live ids and flags gather_context assembles, keyed by the names `requires`
 # refers to. Values are heterogeneous (ids are strings, --skip flags are bools),
@@ -74,19 +75,18 @@ class ToolCheck:
         return None
 
 
-# A real, fetchable image. The previous value (assets.shopware.com) answers 403,
-# so every run reported the tool broken when the fixture was.
+# The image shopware-media-upload fetches. Served by the shop itself, from a file
+# committed at functional/assets/ — see its README.
 #
-# CI does not use this default: setup-lane serves a PNG out of the shop's own
-# public/ directory and points MCP_MEDIA_UPLOAD_URL at it, because a third-party
-# host is a way for a green run to depend on somebody else's rate limiter —
-# upload.wikimedia.org answered "Cannot open source stream" once and failed the
-# whole static job. This default is for a local run against a shop with outbound
-# network; override it for one without.
-MEDIA_UPLOAD_URL = os.environ.get(
-    "MCP_MEDIA_UPLOAD_URL",
-    "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png",
-)
+# Both previous values were URLs on somebody else's host, and both broke in a way
+# that read as a tool bug: assets.shopware.com answered 403, then
+# upload.wikimedia.org 404'd once the file was removed and failed the whole static
+# job with 47 of 48 checks passing. Neither said anything about the tool.
+#
+# A local run has to put the file where its shop serves it (the README has the one
+# command) or point MCP_MEDIA_UPLOAD_URL elsewhere. Without either, the check
+# SKIPs rather than failing — see `media_upload_url` below.
+MEDIA_UPLOAD_URL = os.environ.get("MCP_MEDIA_UPLOAD_URL", f"{SW_BASE_URL}/mcp-evals-probe.png")
 
 # The line the lane writes into the server's log during setup, and the thing the
 # log readers are then asked to find. Static on both sides on purpose: a check
@@ -157,11 +157,18 @@ CORE_CHECKS: tuple[ToolCheck, ...] = (
         # later run against the same instance — green in CI, where the instance
         # is new each time, and broken on the trunk lane anyone tests against.
         lambda c: {
-            "url": MEDIA_UPLOAD_URL,
+            "url": c["media_upload_url"],
             "fileName": f"mcp-test-{uuid.uuid4().hex[:12]}.png",
         },
-        # Set from --skip-media-upload: the only check that writes a real file.
-        (("media_upload_enabled", "--skip-media-upload"),),
+        # `media_upload_enabled` is set from --skip-media-upload: this is the only
+        # check that writes a real file. `media_upload_url` is the URL only if
+        # something is actually served there, so an unseeded lane SKIPs with the
+        # reason instead of reporting the tool broken over a 404 it could not have
+        # avoided.
+        (
+            ("media_upload_enabled", "--skip-media-upload"),
+            ("media_upload_url", f"no image served at {MEDIA_UPLOAD_URL}; see functional/assets/README.md"),
+        ),
     ),
     ToolCheck(
         "shopware-theme-config",

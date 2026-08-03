@@ -44,6 +44,7 @@ FULL_CTX: Context = {
     "log_file": "dev.log",
     "skill_name": "nightly-triage",
     "media_upload_enabled": True,
+    "media_upload_url": "http://localhost:8000/mcp-evals-probe.png",
 }
 
 
@@ -104,6 +105,30 @@ def test_media_upload_is_gated_like_any_other_prerequisite() -> None:
 
     assert upload.blocked_by(FULL_CTX | {"media_upload_enabled": False}) == "--skip-media-upload"
     assert upload.blocked_by(FULL_CTX) is None
+
+
+def test_an_unserved_probe_image_skips_rather_than_failing() -> None:
+    """The regression this closes twice over: the check named a URL on somebody
+    else's host, and when that host answered 403 (assets.shopware.com) and later
+    404 (upload.wikimedia.org) the report said shopware-media-upload was broken.
+    An image the lane does not serve is missing setup."""
+    upload = by_name("shopware-media-upload")
+
+    reason = upload.blocked_by(FULL_CTX | {"media_upload_url": ""})
+
+    assert reason is not None
+    assert "no image served at" in reason
+    assert "functional/assets" in reason, "the reason has to say how to fix it"
+
+
+def test_the_upload_payload_takes_the_url_from_the_lane() -> None:
+    """Not from the module constant: the context holds the URL only once something
+    is actually served there, so reading the constant would bypass the check."""
+    upload = by_name("shopware-media-upload")
+
+    args = upload.args(FULL_CTX | {"media_upload_url": "http://shop.test/probe.png"})
+
+    assert args["url"] == "http://shop.test/probe.png"
 
 
 def test_skip_labels_name_the_tool_and_the_reason() -> None:

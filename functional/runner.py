@@ -34,7 +34,15 @@ import requests
 import lane
 from eval.assertions import inband_error
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
-from functional.checks import CORE_CHECKS, DEV_CHECKS, LOG_PROBE_TEXT, MERCHANT_CHECKS, Context, ToolCheck
+from functional.checks import (
+    CORE_CHECKS,
+    DEV_CHECKS,
+    LOG_PROBE_TEXT,
+    MEDIA_UPLOAD_URL,
+    MERCHANT_CHECKS,
+    Context,
+    ToolCheck,
+)
 from functional.journeys import run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
@@ -533,6 +541,28 @@ def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[To
             )
 
 
+def _served(url: str) -> str:
+    """`url` if something is actually served there, else "".
+
+    HEAD first, GET as the fallback — a server that answers 405 to HEAD is
+    common enough that treating it as absent would skip the check on a lane
+    that was seeded correctly.
+
+    Probed from HERE, while the tool fetches it from the SHOP. Those are the same
+    machine in CI, and on any lane this suite can talk to they agree about the
+    shop's own URL. Where they do not, the FAIL is the informative outcome and
+    eval/preflight.py already names that class of problem — a server that cannot
+    reach its own published address.
+    """
+    for request in (requests.head, requests.get):
+        try:
+            if request(url, timeout=5, allow_redirects=True).status_code < 400:
+                return url
+        except requests.RequestException:
+            return ""
+    return ""
+
+
 def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -> Context:
     """The live ids the check payloads need.
 
@@ -554,6 +584,10 @@ def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -
         ),
         # Inverted so the check table can treat it like any other prerequisite.
         "media_upload_enabled": not cast(bool, args.skip_media_upload),
+        # Empty when nothing is served there, which the check declares a
+        # prerequisite: an image the lane never seeded is missing setup, not
+        # evidence that shopware-media-upload is broken.
+        "media_upload_url": _served(MEDIA_UPLOAD_URL),
     }
 
 
