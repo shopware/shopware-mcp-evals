@@ -56,6 +56,22 @@ def test_the_swallowed_internal_error_explains_where_to_actually_look() -> None:
     assert "container" in advice.lower()
 
 
+def test_the_typed_profile_fetch_failure_is_diagnosed() -> None:
+    """ucp-php-sdk#108 gave this failure a typed exception, so it arrives as a real
+    UCP error naming the URI instead of a bare `internal`. The table has to match the
+    new wording, or the single most common cause reports "No known diagnosis" —
+    which is what it did the first time the typed error reached us.
+    """
+    advice = preflight.diagnose(
+        'ucp: Platform profile at "http://trunk.localhost:8088/.well-known/ucp" could not be '
+        "fetched: Failed to connect to trunk.localhost port 8088 after 0 ms."
+    )
+
+    assert "SERVER could not fetch" in advice
+    assert "UCP_PROFILE_URI" in advice, "it has to say which knob to turn"
+    assert "localhost" in advice, "and that a <shop>.localhost host is rejected outright"
+
+
 def test_an_unknown_error_admits_it_rather_than_guessing() -> None:
     """A confidently wrong diagnosis is worse than none: it sends someone to fix
     something that was never broken."""

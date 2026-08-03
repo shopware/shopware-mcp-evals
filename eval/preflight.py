@@ -57,6 +57,23 @@ STORE_PRODUCT_ROUTE = "/store-api/product"
 # cost at least one debugging round to identify the first time.
 DIAGNOSES = (
     (
+        # ucp-php-sdk#108 gave this failure a typed exception, so it now arrives as
+        # a real UCP error naming the URI instead of a bare `internal`. Matching it
+        # here is what turns "No known diagnosis" into the one thing worth knowing:
+        # the SERVER has to reach that URI, and it does not share this machine's
+        # network. Measured on a proxied lane — the runner fetched the profile fine
+        # while the server got "Failed to connect to trunk.localhost port 8088".
+        "could not be fetched",
+        "The SERVER could not fetch the profile URI. It does that mid-request over "
+        "its own network, so a containerised or proxied instance does not share this "
+        "machine's view: inside a container the shop is usually its own "
+        "http://localhost:<internal-port>, not the published host:port. Point "
+        "UCP_PROFILE_URI at a URL the server can reach — and note the SDK's "
+        "development-mode check accepts only bare localhost/127.0.0.1/::1, so a "
+        "`<shop>.localhost` host is rejected before any fetch is attempted "
+        "(ucp-php-sdk#108 documents that half as unfixed).",
+    ),
+    (
         "ucp-agent header",
         "The client sent no UCP-Agent header. See ucp.agent_header — mcp_client "
         "should be building one for every store endpoint.",
