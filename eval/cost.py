@@ -25,8 +25,19 @@ load_pricing, no printing.
 
 import math
 from pathlib import Path
+from typing import cast
 
 import yaml
+
+from eval.result_schema import (
+    CombinedCost,
+    CostBlock,
+    FixtureResult,
+    ModelPrice,
+    Pricing,
+    TokenCounts,
+    as_object,
+)
 
 # Prices are quoted per million tokens; usage is counted in tokens.
 PER_TOKENS = 1_000_000
@@ -34,38 +45,48 @@ PER_TOKENS = 1_000_000
 DEFAULT_PRICING = Path(__file__).resolve().parents[1] / "pricing.yaml"
 
 
-def load_pricing(path: str | Path | None = None) -> dict:
+def load_pricing(path: str | Path | None = None) -> Pricing:
     """Read the price table. A missing or broken file yields an empty table,
     which renders as "not priced" rather than as free."""
     try:
-        return yaml.safe_load(Path(path or DEFAULT_PRICING).read_text()) or {}
+        loaded = cast(object, yaml.safe_load(Path(path or DEFAULT_PRICING).read_text()))
+        # Through `object`, which is what pyright asks for: a plain dict and a
+        # TypedDict do not overlap structurally, so the intent has to be explicit.
+        return cast(Pricing, cast(object, as_object(loaded)))
     except (OSError, yaml.YAMLError):
         return {}
 
 
-ZERO_PRICES = {"input": 0.0, "output": 0.0, "cached_input": 0.0}
+ZERO_PRICES = ModelPrice(input=0.0, output=0.0, cached_input=0.0)
 
 
-def prices_for(model: str, pricing: dict) -> dict | None:
+def prices_for(model: str, pricing: Pricing) -> ModelPrice | None:
     return (pricing.get("models") or {}).get(model)
 
 
-def token_totals(results: list[dict]) -> dict:
+def token_totals(results: list[FixtureResult]) -> TokenCounts:
     """Sum the three token buckets across every fixture that reached the model.
 
     Skipped and errored fixtures carry no `tokens` key — they never got that
     far — so they contribute nothing rather than needing to be filtered out.
     """
-    totals = {"input": 0, "cached_input": 0, "output": 0}
+    totals = TokenCounts(input=0, cached_input=0, output=0)
     for r in results or []:
-        for bucket, count in (r.get("tokens") or {}).items():
-            totals[bucket] = totals.get(bucket, 0) + count
+        tokens = r.get("tokens") or EMPTY_TOKENS
+        totals["input"] += tokens.get("input", 0)
+        totals["cached_input"] = totals.get("cached_input", 0) + tokens.get("cached_input", 0)
+        totals["output"] += tokens.get("output", 0)
     return totals
 
 
-def cost_usd(tokens: dict, prices: dict) -> float:
+def cost_usd(tokens: TokenCounts, prices: ModelPrice) -> float:
     """Dollar cost of one token bucket set at the given rates."""
-    return sum(count * (prices.get(bucket) or 0.0) for bucket, count in (tokens or {}).items()) / PER_TOKENS
+    billed = (
+        tokens.get("input", 0) * (prices.get("input") or 0.0)
+        + tokens.get("cached_input", 0) * (prices.get("cached_input") or 0.0)
+        + tokens.get("output", 0) * (prices.get("output") or 0.0)
+    )
+    return billed / PER_TOKENS
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -85,8 +106,11 @@ def percentile(values: list[float], p: float) -> float | None:
     return ordered[min(max(rank, 1), len(ordered)) - 1]
 
 
-def _series(results: list[dict], key: str) -> list[float]:
-    return [r[key] for r in results or [] if r.get(key) is not None]
+def _series(results: list[FixtureResult], key: str) -> list[float]:
+    # A variable key cannot index a TypedDict; these are all numeric fields and
+    # the caller only ever asks for four of them.
+    values = (cast(float | None, r.get(key)) for r in results or [])
+    return [v for v in values if v is not None]
 
 
 # Providers that bill nothing because the model runs on the machine doing the
@@ -96,7 +120,7 @@ def _series(results: list[dict], key: str) -> list[float]:
 FREE_PROVIDERS = frozenset({"lmstudio"})
 
 
-def run_cost(results: list[dict], model: str, pricing: dict, provider: str | None = None) -> dict:
+def run_cost(results: list[FixtureResult], model: str, pricing: Pricing, provider: str | None = None) -> CostBlock:
     """Cost and volume for one run.
 
     `priced` is False when the model has no entry in the table — the caller
@@ -118,7 +142,7 @@ def run_cost(results: list[dict], model: str, pricing: dict, provider: str | Non
         "model": model,
         "priced": prices is not None,
         "unverified": bool(prices.get("unverified")) if prices else False,
-        "verified": pricing.get("verified"),
+        "verified": pricing.get("verified", ""),
         "tokens": tokens,
         "total_usd": total,
         "graded": len(graded),
@@ -137,7 +161,7 @@ def run_cost(results: list[dict], model: str, pricing: dict, provider: str | Non
     }
 
 
-def ci_cost_usd(minutes: float | None, pricing: dict) -> float | None:
+def ci_cost_usd(minutes: float | None, pricing: Pricing) -> float | None:
     """Runner cost for the job, or None when no duration was supplied.
 
     Free on public repositories, so the configured rate is 0.0 and this
@@ -146,26 +170,31 @@ def ci_cost_usd(minutes: float | None, pricing: dict) -> float | None:
     """
     if minutes is None:
         return None
-    return minutes * float((pricing.get("ci") or {}).get("runner_usd_per_minute", 0.0) or 0.0)
+    ci = as_object(pricing.get("ci"))
+    rate = ci.get("runner_usd_per_minute") or 0.0
+    return minutes * float(cast(float, rate))
 
 
-def combine(runs: list[dict]) -> dict:
+def combine(runs: list[CostBlock]) -> CombinedCost:
     """Roll several runs' costs into the job-level headline.
 
     Unpriced runs still contribute their token volume — tokens are always
     known — but leave the dollar total incomplete, which the caller says out
     loud rather than rounding away.
     """
-    tokens = {"input": 0, "cached_input": 0, "output": 0}
+    tokens = TokenCounts(input=0, cached_input=0, output=0)
     total = 0.0
-    unpriced = []
+    unpriced: list[str] = []
     for run in runs or []:
-        for bucket, count in (run.get("tokens") or {}).items():
-            tokens[bucket] = tokens.get(bucket, 0) + count
-        if run.get("total_usd") is None:
-            unpriced.append(run.get("model"))
+        run_tokens = run.get("tokens") or EMPTY_TOKENS
+        tokens["input"] += run_tokens.get("input", 0)
+        tokens["cached_input"] = tokens.get("cached_input", 0) + run_tokens.get("cached_input", 0)
+        tokens["output"] += run_tokens.get("output", 0)
+        run_total = run.get("total_usd")
+        if run_total is None:
+            unpriced.append(run.get("model", ""))
         else:
-            total += run["total_usd"]
+            total += run_total
     # Deduped, order preserved: the same model runs more than once per job (the
     # primary grades both the admin and the Store suite), and naming it twice in
     # a warning reads as two separate problems.
@@ -176,3 +205,8 @@ def combine(runs: list[dict]) -> dict:
         "unpriced_models": list(dict.fromkeys(unpriced)),
         "unverified_models": list(dict.fromkeys(r["model"] for r in runs or [] if r.get("unverified"))),
     }
+
+
+# A TypedDict with Required members cannot be constructed empty; this is the
+# stand-in for "no tokens recorded", which is what a skipped fixture carries.
+EMPTY_TOKENS = TokenCounts(input=0, output=0, cached_input=0)

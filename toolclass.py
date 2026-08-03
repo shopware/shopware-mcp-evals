@@ -38,11 +38,12 @@ its entries out of three sets here.
 """
 
 import ucp
+from eval.result_schema import JsonObject
 
 # The server declares these by exposing a `dryRun` property. Kept as an explicit
 # list rather than read from the snapshot at runtime so the safety boundary is
 # reviewable in a diff, and cross-checked against the snapshot in the tests.
-DRY_RUNNABLE = frozenset(
+CORE_DRY_RUNNABLE = frozenset(
     {
         "merchant-cart-checkout",
         "merchant-product-create",
@@ -55,7 +56,7 @@ DRY_RUNNABLE = frozenset(
 )
 
 # Mutating with no dryRun to hide behind.
-UNSAFE = frozenset(
+CORE_UNSAFE = frozenset(
     {
         "merchant-cart-manage",  # creates and mutates carts
         "shopware-media-upload",  # creates a media entity from an upload
@@ -63,7 +64,7 @@ UNSAFE = frozenset(
     }
 )
 
-READ_ONLY = frozenset(
+CORE_READ_ONLY = frozenset(
     {
         "merchant-bestseller-report",
         "merchant-checkout-methods",
@@ -94,9 +95,14 @@ READ_ONLY = frozenset(
 )
 
 # Merged rather than inlined: see the note above about dropping the plugin.
-READ_ONLY |= ucp.READ_ONLY
-DRY_RUNNABLE |= ucp.DRY_RUNNABLE
-UNSAFE |= ucp.UNSAFE
+#
+# One assignment each, rather than `READ_ONLY |= ucp.READ_ONLY` after the literal.
+# Rebinding an upper-case name reads as reassigning a constant — the type checker
+# says so, and it is right: the sets above are the core catalogue and these are
+# the whole catalogue, which is a different thing worth its own name.
+READ_ONLY = CORE_READ_ONLY | ucp.READ_ONLY
+DRY_RUNNABLE = CORE_DRY_RUNNABLE | ucp.DRY_RUNNABLE
+UNSAFE = CORE_UNSAFE | ucp.UNSAFE
 
 DRY_RUN_KEY = "dryRun"
 
@@ -122,7 +128,7 @@ def is_executable(name: str) -> bool:
     return classify(name) in ("read_only", "dry_runnable")
 
 
-def prepare_call(name: str, args: dict) -> tuple[dict, bool]:
+def prepare_call(name: str, args: JsonObject) -> tuple[JsonObject, bool]:
     """Arguments to send, and whether dryRun had to be forced on.
 
     A model that passes `dryRun: false` is overridden rather than obeyed. It is

@@ -36,10 +36,12 @@ import os
 import sys
 import time
 import traceback
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol, TypedDict, cast
 
 import requests
 import yaml
@@ -52,12 +54,30 @@ from eval.report import (
     DIM,
     RED,
     RESET,
-    _render,
     print_discovery_block,
     print_single_mode,
     print_tier_block,
+    render_line,
 )
-from eval.result_schema import SCHEMA_VERSION, FixtureResult
+from eval.result_schema import (
+    SCHEMA_VERSION,
+    AttemptRecord,
+    Fixture,
+    FixtureResult,
+    GateVerdict,
+    JsonObject,
+    MetaCall,
+    ModeBlock,
+    PromptInventory,
+    Report,
+    SkippedFixture,
+    SummaryRow,
+    TokenCounts,
+    ToolDef,
+    ToolHealth,
+    as_list,
+    as_object,
+)
 from eval.scoring import (
     count_rate_limited,
     discovery_summary,
@@ -75,6 +95,7 @@ from mcp_client import (
     SW_BASE_URL,
     SW_SC_ACCESS_KEY,
     SW_SECRET_ACCESS_KEY,
+    Endpoint,
     enable_all_toolsets,
     enable_toolset,
     endpoint_by_name,
@@ -87,6 +108,11 @@ from mcp_client import (
 )
 from ownership import CORE, PROMPT_SETS, breakdown, owner_of
 from toolclass import classify, is_executable, prepare_call
+
+# A placeholder resolver reads one id off the live lane; a seeding resolver
+# WRITES and yields the several ids it filled from one cart.
+type LaneResolver = Callable[[Endpoint], str | None]
+type SeedingResolver = Callable[[Endpoint], dict[str, str]]
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -114,10 +140,126 @@ LMSTUDIO_API_KEY = os.environ.get("LMSTUDIO_API_KEY", "lm-studio")
 
 # ---------------------------------------------------------------------------
 # Provider adapters
+#
+# The clients are described structurally rather than by SDK class. Two reasons,
+# and both are load-bearing: the SDKs are imported lazily so a run with one
+# provider does not need the other's package, and the adapter tests drive these
+# functions with hand-built fakes. A Protocol is the honest statement of what
+# either has to provide, and it holds the fakes to the same contract.
 # ---------------------------------------------------------------------------
 
 
-def tools_for_anthropic(mcp_tools: list[dict]) -> list[dict]:
+class _AnthropicUsage(Protocol):
+    input_tokens: int
+    output_tokens: int
+
+
+class _AnthropicBlock(Protocol):
+    type: str
+    id: str
+    name: str
+    input: JsonObject
+
+
+class _AnthropicReply(Protocol):
+    content: list[_AnthropicBlock]
+    stop_reason: str | None
+    usage: _AnthropicUsage
+
+
+class _AnthropicMessages(Protocol):
+    def create(self, **kwargs: object) -> _AnthropicReply: ...
+
+
+class _AnthropicClient(Protocol):
+    @property
+    def messages(self) -> _AnthropicMessages: ...
+
+
+class _OpenAIFunction(Protocol):
+    name: str
+    arguments: str
+
+
+class _OpenAIToolCall(Protocol):
+    id: str
+    function: _OpenAIFunction
+
+
+class _OpenAIMessage(Protocol):
+    content: str | None
+    tool_calls: list[_OpenAIToolCall] | None
+
+
+class _OpenAIChoice(Protocol):
+    message: _OpenAIMessage
+    finish_reason: str | None
+
+
+class _OpenAIUsage(Protocol):
+    prompt_tokens: int
+    completion_tokens: int
+
+
+class _OpenAIReply(Protocol):
+    choices: list[_OpenAIChoice]
+    usage: _OpenAIUsage
+
+
+class _OpenAICompletions(Protocol):
+    def create(self, **kwargs: object) -> _OpenAIReply: ...
+
+
+class _OpenAIChat(Protocol):
+    @property
+    def completions(self) -> _OpenAICompletions: ...
+
+
+class _OpenAIClient(Protocol):
+    @property
+    def chat(self) -> _OpenAIChat: ...
+
+
+class ToolCall(TypedDict):
+    """One tool call the model asked for, normalised across providers."""
+
+    id: str
+    name: str
+    input: JsonObject
+
+
+class Turn(TypedDict):
+    """What one assistant turn yields, in provider-independent form.
+
+    `tool_result_builder` differs in shape between the two: Anthropic wants the
+    results as content blocks of a single user message, OpenAI as one message
+    per result. The loop handles either by checking for a list.
+    """
+
+    tool_calls: list[ToolCall]
+    assistant_message: JsonObject
+    tool_result_builder: Callable[[list[tuple[str, str]]], JsonObject | list[JsonObject]]
+    stop_reason: str | None
+    tokens: TokenCounts
+
+
+def _sdk_attr(obj: object, name: str) -> object:
+    """One attribute an SDK response may or may not carry.
+
+    Read through `object` so the SDKs' `Any` stops here rather than spreading
+    into the token accounting.
+    """
+    return cast(object, getattr(obj, name, None))
+
+
+def _sdk_int(obj: object, name: str) -> int:
+    """An integer field that is simply absent on older replies and on the test
+    fakes — the cached-token counters, both of which default to zero."""
+    value = _sdk_attr(obj, name)
+    return value if isinstance(value, int) else 0
+
+
+def tools_for_anthropic(mcp_tools: list[ToolDef]) -> list[JsonObject]:
     return [
         {
             "name": t["name"],
@@ -128,7 +270,7 @@ def tools_for_anthropic(mcp_tools: list[dict]) -> list[dict]:
     ]
 
 
-def tools_for_openai(mcp_tools: list[dict]) -> list[dict]:
+def tools_for_openai(mcp_tools: list[ToolDef]) -> list[JsonObject]:
     return [
         {
             "type": "function",
@@ -142,16 +284,19 @@ def tools_for_openai(mcp_tools: list[dict]) -> list[dict]:
     ]
 
 
-def anthropic_turn(client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
+def anthropic_turn(
+    client: object, model: str, system_prompt: str | None, messages: list[JsonObject], tools: list[JsonObject]
+) -> Turn:
     """One assistant turn. Returns {tool_calls, assistant_message, tool_result_builder,
     stop_reason, tokens}."""
-    kwargs = {"model": model, "max_tokens": 1024, "tools": tools, "messages": messages}
+    sdk = cast(_AnthropicClient, client)
+    kwargs: JsonObject = {"model": model, "max_tokens": 1024, "tools": tools, "messages": messages}
     if system_prompt:
         kwargs["system"] = system_prompt
-    response = client.messages.create(**kwargs)
+    response = sdk.messages.create(**kwargs)
 
     tool_calls = [
-        {"id": block.id, "name": block.name, "input": block.input}
+        ToolCall(id=block.id, name=block.name, input=block.input)
         for block in response.content
         if block.type == "tool_use"
     ]
@@ -168,11 +313,11 @@ def anthropic_turn(client, model: str, system_prompt: str | None, messages: list
         # below has to subtract instead. Getting this backwards silently
         # double-counts or under-counts the bill, which is why both adapters
         # normalise to the same three buckets here rather than at the far end.
-        "tokens": {
-            "input": response.usage.input_tokens,
-            "cached_input": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-            "output": response.usage.output_tokens,
-        },
+        "tokens": TokenCounts(
+            input=response.usage.input_tokens,
+            cached_input=_sdk_int(response.usage, "cache_read_input_tokens"),
+            output=response.usage.output_tokens,
+        ),
     }
 
 
@@ -184,30 +329,37 @@ def anthropic_turn(client, model: str, system_prompt: str | None, messages: list
 _OUTPUT_CAP_PARAM: dict[str, str] = {}
 
 
-def openai_turn(client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
+def openai_turn(
+    client: object,
+    model: str,
+    _system_prompt: str | None,  # carried in `messages`; kept so both turns share one signature
+    messages: list[JsonObject],
+    tools: list[JsonObject],
+) -> Turn:
     """One assistant turn (system prompt must already be in messages)."""
-    kwargs = {"model": model, "tools": tools, "tool_choice": "auto", "messages": messages}
+    sdk = cast(_OpenAIClient, client)
+    kwargs: JsonObject = {"model": model, "tools": tools, "tool_choice": "auto", "messages": messages}
     param = _OUTPUT_CAP_PARAM.get(model, "max_completion_tokens")
     try:
-        response = client.chat.completions.create(**kwargs, **{param: 1024})
+        response = sdk.chat.completions.create(**kwargs, **{param: 1024})
     except Exception as exc:  # noqa: BLE001 — retried below, re-raised if it isn't the cap param
         other = "max_tokens" if param == "max_completion_tokens" else "max_completion_tokens"
         if model in _OUTPUT_CAP_PARAM or param not in str(exc):
             raise
-        response = client.chat.completions.create(**kwargs, **{other: 1024})
+        response = sdk.chat.completions.create(**kwargs, **{other: 1024})
         param = other
     _OUTPUT_CAP_PARAM[model] = param
     msg = response.choices[0].message
 
-    tool_calls = []
+    tool_calls: list[ToolCall] = []
     for call in msg.tool_calls or []:
         try:
-            call_input = json.loads(call.function.arguments)
+            call_input = as_object(cast(object, json.loads(call.function.arguments)))
         except json.JSONDecodeError:
             call_input = {}
-        tool_calls.append({"id": call.id, "name": call.function.name, "input": call_input})
+        tool_calls.append(ToolCall(id=call.id, name=call.function.name, input=call_input))
 
-    assistant_message = {"role": "assistant", "content": msg.content}
+    assistant_message: JsonObject = {"role": "assistant", "content": msg.content}
     if msg.tool_calls:
         assistant_message["tool_calls"] = [
             {
@@ -223,8 +375,7 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
     # over ~1k tokens with no opt-in, so this is not zero even though this
     # harness never sets cache_control: it is a discount we receive whether or
     # not we asked for it, and ignoring it would overstate the bill.
-    details = getattr(response.usage, "prompt_tokens_details", None)
-    cached = (getattr(details, "cached_tokens", 0) or 0) if details else 0
+    cached = _sdk_int(_sdk_attr(response.usage, "prompt_tokens_details"), "cached_tokens")
     return {
         "tool_calls": tool_calls,
         "assistant_message": assistant_message,
@@ -232,11 +383,11 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
             {"role": "tool", "tool_call_id": call_id, "content": text} for call_id, text in results
         ],
         "stop_reason": response.choices[0].finish_reason,
-        "tokens": {
-            "input": max(response.usage.prompt_tokens - cached, 0),
-            "cached_input": cached,
-            "output": response.usage.completion_tokens,
-        },
+        "tokens": TokenCounts(
+            input=max(response.usage.prompt_tokens - cached, 0),
+            cached_input=cached,
+            output=response.usage.completion_tokens,
+        ),
     }
 
 
@@ -245,7 +396,7 @@ def openai_turn(client, model: str, system_prompt: str | None, messages: list, t
 # ---------------------------------------------------------------------------
 
 
-def _surface_tokens(tools: list[dict]) -> int:
+def _surface_tokens(tools: list[JsonObject]) -> int:
     """Rough token cost of the advertised tool list.
 
     Chars/4, deliberately: an exact count needs a tokenizer per provider and
@@ -255,7 +406,22 @@ def _surface_tokens(tools: list[dict]) -> int:
     return len(json.dumps(tools)) // 4
 
 
-def _search_rows(result_text: str) -> tuple[list[dict], int | None]:
+class SearchRow(TypedDict):
+    """One ranked result from shopware-tool-search.
+
+    `rank` is the 1-indexed position the server returned it in, and it is the
+    point: a boolean "was the right tool in the results" cannot tell first place
+    from ninth, and that difference decides whether a model scrolling a
+    20-result list ever reaches it.
+    """
+
+    tool: ToolDef
+    score: float | None
+    matched_in: object
+    rank: int
+
+
+def _search_rows(result_text: str) -> tuple[list[SearchRow], int | None]:
     """Ranked rows from shopware-tool-search, plus the candidate pool size.
 
     Each row is {tool, score, matchedIn, rank}, `rank` being the 1-indexed
@@ -266,28 +432,28 @@ def _search_rows(result_text: str) -> tuple[list[dict], int | None]:
     drop both on the floor.
     """
     try:
-        payload = json.loads(result_text)
+        payload = as_object(cast(object, json.loads(result_text)))
     except (json.JSONDecodeError, TypeError):
         return [], None
-    rows = []
-    for position, r in enumerate(payload.get("data", []), start=1):
-        tool = r.get("tool") if isinstance(r, dict) else None
-        if isinstance(tool, dict) and tool.get("name"):
-            rows.append({"tool": tool, "score": r.get("score"), "matched_in": r.get("matchedIn"), "rank": position})
-    meta = payload.get("_meta") or {}
-    total = meta.get("totalCandidates") if isinstance(meta, dict) else None
-    return rows, total
-
-
-def _search_result_tools(result_text: str) -> list[dict]:
-    """Tool definitions returned inline by shopware-tool-search, in MCP tool
-    shape ({name, description, inputSchema}) — for making them callable."""
-    rows, _ = _search_rows(result_text)
-    return [r["tool"] for r in rows]
-
-
-def _search_contains_expected(result_text: str, expected_tool: str) -> bool:
-    return any(t.get("name") == expected_tool for t in _search_result_tools(result_text))
+    rows: list[SearchRow] = []
+    for position, raw in enumerate(as_list(payload.get("data")), start=1):
+        row = as_object(raw)
+        tool = as_object(row.get("tool"))
+        if not tool.get("name"):
+            continue
+        score = row.get("score")
+        rows.append(
+            SearchRow(
+                # The row carries a whole tool definition, which is what makes a
+                # search-surfaced tool callable — see DiscoveryState.record_search.
+                tool=cast(ToolDef, cast(object, tool)),
+                score=float(score) if isinstance(score, int | float) else None,
+                matched_in=row.get("matchedIn"),
+                rank=position,
+            )
+        )
+    total = as_object(payload.get("_meta")).get("totalCandidates")
+    return rows, total if isinstance(total, int) else None
 
 
 @dataclass
@@ -305,24 +471,24 @@ class DiscoveryState:
 
     arm: str
     selected_tool: str | None = None
-    selected_input: dict = field(default_factory=dict)
+    selected_input: JsonObject = field(default_factory=dict)
     fail_reason: str | None = None
     # Every non-meta call the model made, in order. The first is `selected_tool`
     # (the old metric); the rest are what recovery looks like.
-    attempted_tools: list = field(default_factory=list)
+    attempted_tools: list[AttemptRecord] = field(default_factory=list)
     first_tool_correct: bool | None = None
     resolved: bool = False
     steps_to_correct: int | None = None
     dry_run_forced: bool = False
     execution: str | None = None
     stop: bool = False
-    meta_calls: list = field(default_factory=list)
+    meta_calls: list[MetaCall] = field(default_factory=list)
     search_hit: bool | None = None
     search_rank: int | None = None
     search_score: float | None = None
     search_candidates: int | None = None
-    enabled_toolsets: list = field(default_factory=list)
-    tokens: dict = field(default_factory=lambda: {"input": 0, "cached_input": 0, "output": 0})
+    enabled_toolsets: list[str] = field(default_factory=list)
+    tokens: TokenCounts = field(default_factory=lambda: TokenCounts(input=0, cached_input=0, output=0))
     # Bytes of tool-result payload the model was made to read. A tool that
     # answers correctly but returns 40k of JSON is expensive for every client,
     # and nothing else in the suite would notice.
@@ -331,11 +497,12 @@ class DiscoveryState:
     surface_tokens: int = 0
     surface_tokens_peak: int = 0
 
-    def add_tokens(self, turn_tokens: dict) -> None:
-        for bucket, count in turn_tokens.items():
-            self.tokens[bucket] = self.tokens.get(bucket, 0) + count
+    def add_tokens(self, turn_tokens: TokenCounts) -> None:
+        self.tokens["input"] += turn_tokens.get("input", 0)
+        self.tokens["output"] += turn_tokens.get("output", 0)
+        self.tokens["cached_input"] = self.tokens.get("cached_input", 0) + turn_tokens.get("cached_input", 0)
 
-    def record_search(self, result_text: str, expected_tool: str | None, catalog: dict) -> bool:
+    def record_search(self, result_text: str, expected_tool: str | None, catalog: dict[str, ToolDef]) -> bool:
         """Absorb a shopware-tool-search result. Tracks whether the expected tool
         was surfaced and the best rank it ever reached (a later, vaguer query
         cannot make the catalogue look worse than it is), and makes any
@@ -356,7 +523,7 @@ class DiscoveryState:
                 changed = True
         return changed
 
-    def record_enable(self, toolset: str, session_id: str, endpoint, catalog: dict) -> bool:
+    def record_enable(self, toolset: str, session_id: str, endpoint: Endpoint, catalog: dict[str, ToolDef]) -> bool:
         """Absorb a successful toolset-enable: record it and simulate
         tools/list_changed by re-fetching the surface. Returns whether it grew."""
         self.enabled_toolsets.append(toolset)
@@ -367,7 +534,7 @@ class DiscoveryState:
                 changed = True
         return changed
 
-    def to_result(self, fixture: dict, *, passed: bool, latency: float) -> FixtureResult:
+    def to_result(self, fixture: Fixture, *, passed: bool, latency: float) -> FixtureResult:
         expected_toolset = fixture.get("expected_toolset")
         enabled_correct_toolset = None
         if expected_toolset and self.enabled_toolsets:
@@ -387,7 +554,7 @@ class DiscoveryState:
         else:
             discovery_path = "direct"
 
-        return {
+        result: FixtureResult = {
             "schema_version": SCHEMA_VERSION,
             "id": fixture["id"],
             "category": fixture.get("category", ""),
@@ -432,16 +599,17 @@ class DiscoveryState:
             "surface_tokens_peak": self.surface_tokens_peak,
             "notes": fixture.get("notes", ""),
         }
+        return result
 
 
 def run_fixture_discovery(
     provider: str,
-    client,
-    fixture: dict,
+    client: object,
+    fixture: Fixture,
     model: str,
     system_prompt: str | None,
     max_steps: int,
-    endpoint=ADMIN,
+    endpoint: Endpoint = ADMIN,
     arm: str = "discovery",
 ) -> FixtureResult:
     prompt = fixture["prompt"]
@@ -471,8 +639,8 @@ def run_fixture_discovery(
     # and then graded a meta-call as a wrong answer — 40 of its 42 failures were
     # models correctly following the server's own instructions. With none
     # advertised, there is no meta-call to misgrade.
-    if arm == "isolated" and fixture.get("expected_toolset"):
-        enable_toolset(session_id, fixture["expected_toolset"], endpoint=endpoint)
+    if arm == "isolated" and (isolated_toolset := fixture.get("expected_toolset")):
+        enable_toolset(session_id, isolated_toolset, endpoint=endpoint)
     elif arm == "full":
         enable_all_toolsets(session_id, endpoint=endpoint)
 
@@ -513,7 +681,7 @@ def run_fixture_discovery(
     st.surface_tokens = _surface_tokens(tools)
     st.surface_tokens_peak = st.surface_tokens
 
-    messages = []
+    messages: list[JsonObject] = []
     # Every provider except Anthropic carries the context prompt as a system
     # message; Anthropic takes it as a top-level parameter instead (see
     # anthropic_turn). This used to test `== "openai"`, which meant the `github`
@@ -545,7 +713,7 @@ def run_fixture_discovery(
 
         messages.append(turn["assistant_message"])
 
-        tool_results = []
+        tool_results: list[tuple[str, str]] = []
         catalog_changed = False
         for call in turn["tool_calls"]:
             # Any non-meta call is an answer. Meta navigation tools that are NOT
@@ -564,17 +732,12 @@ def run_fixture_discovery(
             result_text = mcp_result_text(resp) or (f"Error: {err}" if err else "")
             st.payload_bytes += len(result_text.encode("utf-8"))
             tool_results.append((call["id"], result_text))
-            st.meta_calls.append(
-                {
-                    "tool": call["name"],
-                    "input": call["input"],
-                    "result_preview": result_text[:300],
-                }
-            )
+            st.meta_calls.append(MetaCall(tool=call["name"], input=call["input"], result_preview=result_text[:300]))
             if call["name"] == "shopware-tool-search":
                 catalog_changed |= st.record_search(result_text, expected_tool, catalog)
             if call["name"] == "shopware-toolset-enable" and not err:
-                catalog_changed |= st.record_enable(call["input"].get("toolset", ""), session_id, endpoint, catalog)
+                toolset = str(call["input"].get("toolset", ""))
+                catalog_changed |= st.record_enable(toolset, session_id, endpoint, catalog)
 
         # `stop` rather than "a tool was selected": a wrong first pick no longer
         # ends the run, because whether the model recovers from it is the point.
@@ -622,12 +785,12 @@ def run_fixture_discovery(
 
 def _handle_answering_call(
     st: DiscoveryState,
-    call: dict,
-    fixture: dict,
-    terminal_tools: set,
+    call: ToolCall,
+    fixture: Fixture,
+    terminal_tools: set[str],
     session_id: str,
-    endpoint,
-    tool_results: list,
+    endpoint: Endpoint,
+    tool_results: list[tuple[str, str]],
 ) -> bool:
     """One answering (non-meta) call. Mutates `st` and returns whether the loop
     should stop — an unsafe tool or a correct-and-passing call both end the run,
@@ -642,7 +805,7 @@ def _handle_answering_call(
         st.selected_tool, st.selected_input = call["name"], call["input"]
         st.first_tool_correct = correct
 
-    attempt = {"tool": call["name"], "correct": correct, "step": st.steps}
+    attempt = AttemptRecord(tool=call["name"], correct=correct, step=st.steps)
     args, forced = prepare_call(call["name"], call["input"])
     st.dry_run_forced = st.dry_run_forced or forced
 
@@ -676,7 +839,10 @@ def _handle_answering_call(
     # empty and only the in-band message exists. Recording just `err` is why
     # every failed attempt in the last run read `tool_error` with error="" —
     # the five gating failures had to be diagnosed from the fixture text.
-    attempt |= {"executed": True, "ok": ok, "reason": reason, "error": (err or inband_error(result_text) or "")[:200]}
+    attempt["executed"] = True
+    attempt["ok"] = ok
+    attempt["reason"] = reason
+    attempt["error"] = (err or inband_error(result_text) or "")[:200]
     st.attempted_tools.append(attempt)
 
     if correct and ok:
@@ -708,19 +874,19 @@ def _handle_answering_call(
 # The SDK client per provider, credential value in. Lazily imported so a run
 # with one provider does not require the other's package, and reading the base
 # URL globals at call time so a test that overrides them is honoured.
-def _anthropic_client(key: str):
+def anthropic_client(key: str) -> object:
     import anthropic
 
     return anthropic.Anthropic(api_key=key)
 
 
-def _openai_client(key: str):
+def openai_client(key: str) -> object:
     from openai import OpenAI
 
     return OpenAI(api_key=key, base_url=None)
 
 
-def _github_client(key: str):
+def github_client(key: str) -> object:
     # GitHub Models speaks the OpenAI wire format, so the same adapter and turn
     # function work — only the base URL and credential differ.
     from openai import OpenAI
@@ -728,7 +894,7 @@ def _github_client(key: str):
     return OpenAI(api_key=key, base_url=GITHUB_MODELS_BASE_URL)
 
 
-def _lmstudio_client(key: str):
+def lmstudio_client(key: str) -> object:
     from openai import OpenAI
 
     return OpenAI(api_key=key, base_url=LMSTUDIO_BASE_URL)
@@ -764,20 +930,28 @@ class Provider:
     # serves whatever is loaded and ignores the requested name).
     dynamic_model_attr: str | None = None
 
-    def tools_for(self, mcp_tools: list[dict]) -> list[dict]:
-        return globals()[self.tools_attr](mcp_tools)
+    def _resolve(self, attr: str) -> Callable[..., object]:
+        # Held by name and looked up here, which is what keeps late binding: the
+        # adapter tests monkeypatch `openai_turn`/`anthropic_turn` on the module
+        # and expect the loop to pick the replacement up.
+        return cast(Callable[..., object], globals()[attr])
 
-    def turn(self, client, model: str, system_prompt: str | None, messages: list, tools: list) -> dict:
-        return globals()[self.turn_attr](client, model, system_prompt, messages, tools)
+    def tools_for(self, mcp_tools: list[ToolDef]) -> list[JsonObject]:
+        return cast(list[JsonObject], self._resolve(self.tools_attr)(mcp_tools))
 
-    def build_client(self, credential_value: str):
-        return globals()[self.client_attr](credential_value)
+    def turn(
+        self, client: object, model: str, system_prompt: str | None, messages: list[JsonObject], tools: list[JsonObject]
+    ) -> Turn:
+        return cast(Turn, self._resolve(self.turn_attr)(client, model, system_prompt, messages, tools))
+
+    def build_client(self, credential_value: str) -> object:
+        return self._resolve(self.client_attr)(credential_value)
 
     def resolve_model(self, requested: str | None) -> str:
         if explicit := (requested or os.environ.get("EVAL_MODEL")):
             return explicit
         if self.dynamic_model_attr:
-            return globals()[self.dynamic_model_attr]()
+            return str(self._resolve(self.dynamic_model_attr)())
         return self.default_model
 
 
@@ -785,7 +959,7 @@ PROVIDERS: dict[str, Provider] = {
     # Kept as the documented cross-vendor option, but no ANTHROPIC_API_KEY is
     # provisioned anywhere (CI runs OpenAI + GitHub Models), so nothing exercises
     # it today. It is now a single registry entry: if it stays unused, dropping
-    # it is deleting this one line, _anthropic_client, the two anthropic_* adapter
+    # it is deleting this one line, anthropic_client, the two anthropic_* adapter
     # functions, and its pricing.yaml row — without touching the loop.
     "anthropic": Provider(
         name="anthropic",
@@ -794,7 +968,7 @@ PROVIDERS: dict[str, Provider] = {
         system_as_param=True,
         tools_attr="tools_for_anthropic",
         turn_attr="anthropic_turn",
-        client_attr="_anthropic_client",
+        client_attr="anthropic_client",
     ),
     # This default is what CI resolves the PRIMARY eval to — the workflow's
     # `eval_model` input defaults to empty, so changing it changes the gating
@@ -812,7 +986,7 @@ PROVIDERS: dict[str, Provider] = {
         system_as_param=False,
         tools_attr="tools_for_openai",
         turn_attr="openai_turn",
-        client_attr="_openai_client",
+        client_attr="openai_client",
     ),
     # A non-OpenAI publisher on purpose: as the second validator its value is
     # being an independent implementation, so it catches tool-description problems
@@ -824,7 +998,7 @@ PROVIDERS: dict[str, Provider] = {
         system_as_param=False,
         tools_attr="tools_for_openai",
         turn_attr="openai_turn",
-        client_attr="_github_client",
+        client_attr="github_client",
     ),
     # A local OpenAI-compatible server for validating the harness for free before
     # CI. Its model is resolved at runtime (see lmstudio_model): the server serves
@@ -837,7 +1011,7 @@ PROVIDERS: dict[str, Provider] = {
         system_as_param=False,
         tools_attr="tools_for_openai",
         turn_attr="openai_turn",
-        client_attr="_lmstudio_client",
+        client_attr="lmstudio_client",
         dynamic_model_attr="lmstudio_model",
     ),
 }
@@ -847,7 +1021,14 @@ PROVIDERS: dict[str, Provider] = {
 PROVIDER_DEFAULTS = {name: p.default_model for name, p in PROVIDERS.items()}
 
 
-def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
+def write_summary_row(
+    provider: str,
+    model: str,
+    discovery: list[FixtureResult] | None,
+    rate: float,
+    ok: bool,
+    args: argparse.Namespace,
+) -> SummaryRow:
     """Record this run's verdict as a JSON row for the consolidated job summary.
 
     Reading a run's outcome from the log alone doesn't work: the tail is
@@ -869,8 +1050,8 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
     # because the row is how the job summary learns the suite ran.
     graded = discovery or []
     throttled = count_rate_limited(graded)
-    row = {
-        "suite": args.suite_label or args.endpoint,
+    row: SummaryRow = {
+        "suite": cast(str, args.suite_label) or cast(str, args.endpoint),
         "provider": provider,
         "model": model,
         "rate": rate,
@@ -878,7 +1059,7 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
         "errored": sum(1 for r in graded or [] if r.get("error")),
         "throttled": throttled,
         "gate": "PASS" if ok else "FAIL",
-        "advisory": bool(args.advisory),
+        "advisory": bool(cast(bool, args.advisory)),
         # Per-owning-repo split, so the summary can say whether a failure landed
         # in core or in an optional plugin. One aggregate rate cannot. Built
         # over executed() — the same exclusions as the overall rate, so the
@@ -897,8 +1078,8 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
         f"graded={row['graded']} errors={row['errored']} throttled={throttled} | {row['gate']}"
     )
 
-    if args.summary_row:
-        path = Path(args.summary_row)
+    if summary_row := cast(str | None, args.summary_row):
+        path = Path(summary_row)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(row, indent=2))
 
@@ -908,7 +1089,7 @@ def write_summary_row(provider, model, discovery, rate, ok, args) -> dict:
 
 
 def skipped_result(
-    fixture: dict, mode: str, reason: str = "expected tool not registered on this instance"
+    fixture: Fixture, mode: str, reason: str = "expected tool not registered on this instance"
 ) -> FixtureResult:
     """A fixture we decline to run, with the reason recorded.
 
@@ -924,7 +1105,7 @@ def skipped_result(
     explainable — that is the difference between a suite that scopes itself
     honestly and one that quietly stops testing things.
     """
-    return {
+    record: FixtureResult = {
         "schema_version": SCHEMA_VERSION,
         "id": fixture["id"],
         "category": fixture.get("category", ""),
@@ -936,9 +1117,10 @@ def skipped_result(
         "skipped": True,
         "skip_reason": reason,
     }
+    return record
 
 
-def load_tool_health(path: str | None) -> dict[str, dict]:
+def load_tool_health(path: str | None) -> dict[str, ToolHealth]:
     """The static layer's per-tool verdict, or an empty map.
 
     Absent by design rather than by accident: a local run without the functional
@@ -949,14 +1131,14 @@ def load_tool_health(path: str | None) -> dict[str, dict]:
     if not path:
         return {}
     try:
-        health = json.loads(Path(path).read_text())
+        health = as_object(cast(object, json.loads(Path(path).read_text())))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"::warning::could not read tool health from {path}: {exc}")
         return {}
-    return health if isinstance(health, dict) else {}
+    return {name: cast(ToolHealth, cast(object, as_object(entry))) for name, entry in health.items()}
 
 
-def unhealthy_reason(tool: str | None, health: dict[str, dict]) -> str:
+def unhealthy_reason(tool: str | None, health: dict[str, ToolHealth]) -> str:
     """Why this tool's fixtures should not be graded, or '' if they should.
 
     Only `fail` blocks. A tool the static layer skipped is *unproven*, not
@@ -964,13 +1146,13 @@ def unhealthy_reason(tool: str | None, health: dict[str, dict]) -> str:
     withholding its fixtures on that basis would shrink the suite every time the
     static layer got more cautious.
     """
-    entry = health.get(tool or "") or {}
+    entry: ToolHealth = health.get(tool or "") or {"status": ""}
     if entry.get("status") != "fail":
         return ""
     return f"static checks failed for this tool: {entry.get('reason', 'no reason recorded')}"
 
 
-def error_result(fixture: dict, mode: str, exc: Exception) -> FixtureResult:
+def error_result(fixture: Fixture, mode: str, exc: Exception) -> FixtureResult:
     """Uniform failure record for a fixture that raised."""
     record: FixtureResult = {
         "schema_version": SCHEMA_VERSION,
@@ -988,21 +1170,21 @@ def error_result(fixture: dict, mode: str, exc: Exception) -> FixtureResult:
         # pass rate but stays in `scored()`, so discovery_summary reads them
         # with bracket access and a missing one is a KeyError mid-report.
         record.update(
-            {
-                "steps": 0,
-                "meta_calls": [],
-                "discovery_path": "none",
-                "search_hit": None,
-                "search_rank": None,
-                "search_score": None,
-                "search_candidates": None,
-                "enabled_correct_toolset": None,
-            }
+            steps=0,
+            meta_calls=[],
+            discovery_path="none",
+            search_hit=None,
+            search_rank=None,
+            search_score=None,
+            search_candidates=None,
+            enabled_correct_toolset=None,
         )
     return record
 
 
-def run_fixtures_concurrently(fixtures: list[dict], worker, workers: int) -> list[dict]:
+def run_fixtures_concurrently(
+    fixtures: list[Fixture], worker: Callable[[Fixture], FixtureResult], workers: int
+) -> list[FixtureResult]:
     """Run `worker(fixture)` over the fixtures with a bounded thread pool.
 
     Fixtures are independent (each discovery run opens its own MCP session), so
@@ -1011,7 +1193,7 @@ def run_fixtures_concurrently(fixtures: list[dict], worker, workers: int) -> lis
     report; progress is printed as each one lands, which is why every line is
     prefixed with the fixture id.
     """
-    results: list[dict | None] = [None] * len(fixtures)
+    results: list[FixtureResult | None] = [None] * len(fixtures)
     if workers <= 1:
         for index, fixture in enumerate(fixtures):
             results[index] = worker(fixture)
@@ -1026,27 +1208,27 @@ def run_fixtures_concurrently(fixtures: list[dict], worker, workers: int) -> lis
             result = future.result()
             results[futures[future]] = result
             completed += 1
-            print(f"  {DIM}[{completed:02d}/{len(fixtures):02d}]{RESET} {result['_line']}")
+            print(f"  {DIM}[{completed:02d}/{len(fixtures):02d}]{RESET} {result.get('_line', '')}")
     return [r for r in results if r is not None]
 
 
 def run_discovery_pass(
-    provider,
-    client,
-    fixtures,
-    model,
-    system_prompt,
-    default_max_steps,
-    available_tools,
-    endpoint=ADMIN,
-    workers=1,
-    tool_health=None,
-):
+    provider: str,
+    client: object,
+    fixtures: list[Fixture],
+    model: str,
+    system_prompt: str | None,
+    default_max_steps: int,
+    available_tools: set[str],
+    endpoint: Endpoint = ADMIN,
+    workers: int = 1,
+    tool_health: dict[str, ToolHealth] | None = None,
+) -> list[FixtureResult]:
     tool_health = tool_health or {}
     print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
     print(f"  concurrency={workers}\n")
 
-    def worker(fixture: dict) -> FixtureResult:
+    def worker(fixture: Fixture) -> FixtureResult:
         # A negative fixture names no tool, so there is nothing to be missing —
         # it always runs. (It is easier on an instance with fewer plugins, since
         # fewer tools exist to be wrongly picked; that is a caveat on comparing
@@ -1054,7 +1236,7 @@ def run_discovery_pass(
         expected = fixture.get("expected_tool")
         if expected and expected not in available_tools:
             result = skipped_result(fixture, "discovery")
-            result["_line"] = _render(result)
+            result["_line"] = render_line(result)
             return result
         # The lane could not supply an id this prompt names, so the call the
         # model would make cannot resolve. Grading that charges the lane's gap
@@ -1062,7 +1244,7 @@ def run_discovery_pass(
         # the model named merchant-cart-checkout correctly every time.
         if unresolved := fixture.get("unresolved_placeholder"):
             result = skipped_result(fixture, "discovery", f"lane could not resolve {{{unresolved}}}")
-            result["_line"] = _render(result)
+            result["_line"] = render_line(result)
             return result
         # Registered but proven broken by the static layer. Grading a model on
         # finding a tool that cannot run charges a plugin bug to the model, and
@@ -1070,7 +1252,7 @@ def run_discovery_pass(
         # established.
         if reason := unhealthy_reason(expected, tool_health):
             result = skipped_result(fixture, "discovery", reason)
-            result["_line"] = _render(result)
+            result["_line"] = render_line(result)
             return result
         max_steps = int(fixture.get("max_steps", default_max_steps))
         try:
@@ -1091,7 +1273,7 @@ def run_discovery_pass(
             result["attempts"] = attempts
         except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
             result = error_result(fixture, "discovery", exc)
-        result["_line"] = _render(result)
+        result["_line"] = render_line(result)
         return result
 
     return run_fixtures_concurrently(fixtures, worker, workers)
@@ -1106,17 +1288,17 @@ ARM_SKIP_CATEGORIES = frozenset({"meta", "discovery", "negative"})
 
 
 def triage_arms(
-    provider,
-    client,
-    discovery_results,
-    fixtures,
-    model,
-    system_prompt,
-    default_max_steps,
-    endpoint=ADMIN,
-    workers=1,
-    arms=("isolated", "full"),
-) -> dict[str, list[dict]]:
+    provider: str,
+    client: object,
+    discovery_results: list[FixtureResult] | None,
+    fixtures: list[Fixture],
+    model: str,
+    system_prompt: str | None,
+    default_max_steps: int,
+    endpoint: Endpoint = ADMIN,
+    workers: int = 1,
+    arms: tuple[str, ...] = ("isolated", "full"),
+) -> dict[str, list[FixtureResult]]:
     """Re-run the discovery arm's failures under the diagnostic arms.
 
     Triage, not a full pass. Running every fixture through all three arms costs
@@ -1141,11 +1323,11 @@ def triage_arms(
         print(f"\n{BOLD}── Triage: no discovery failures to diagnose ──{RESET}\n")
         return {}
 
-    out = {}
+    out: dict[str, list[FixtureResult]] = {}
     for arm in arms:
         print(f"\n{BOLD}── Triage arm: {arm} ({len(failed)} discovery failures) ──{RESET}\n")
 
-        def worker(fixture, arm=arm):
+        def worker(fixture: Fixture, arm: str = arm) -> FixtureResult:
             try:
                 result = run_fixture_discovery(
                     provider,
@@ -1159,7 +1341,7 @@ def triage_arms(
                 )
             except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
                 result = error_result(fixture, arm, exc)
-            result["_line"] = _render(result)
+            result["_line"] = render_line(result)
             return result
 
         out[arm] = run_fixtures_concurrently(failed, worker, workers)
@@ -1337,11 +1519,12 @@ def lmstudio_model() -> str:
     anyway, and failing here would hide why.
     """
     try:
-        models = requests.get(f"{LMSTUDIO_BASE_URL.rstrip('/')}/models", timeout=5).json().get("data", [])
+        body = cast(object, requests.get(f"{LMSTUDIO_BASE_URL.rstrip('/')}/models", timeout=5).json())
     except (requests.RequestException, ValueError):
         return PROVIDER_DEFAULTS["lmstudio"]
+    ids = [str(as_object(m).get("id", "")) for m in as_list(as_object(body).get("data"))]
     # Embedding models sit in the same list and cannot answer a chat request.
-    chat = [m.get("id", "") for m in models if "embed" not in m.get("id", "")]
+    chat = [i for i in ids if "embed" not in i]
     return chat[0] if chat else PROVIDER_DEFAULTS["lmstudio"]
 
 
@@ -1369,7 +1552,7 @@ def require_credentials(provider: str, endpoint_name: str) -> tuple[str, str]:
     else:
         required += [("SW_ACCESS_KEY", SW_ACCESS_KEY), ("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)]
     env = PROVIDERS[provider].credential_env
-    credential = (env, globals().get(env, ""))
+    credential = (env, str(cast(object, globals().get(env, ""))))
     required.append(credential)
     missing = [var for var, val in required if not val]
     if missing:
@@ -1377,7 +1560,7 @@ def require_credentials(provider: str, endpoint_name: str) -> tuple[str, str]:
     return credential
 
 
-def build_client(provider: str, credential: tuple[str, str]):
+def build_client(provider: str, credential: tuple[str, str]) -> object:
     """The provider SDK client. Imported lazily so a run with one provider does
     not require the other's package to be installed."""
     return PROVIDERS[provider].build_client(credential[1])
@@ -1389,8 +1572,9 @@ def fixtures_path_for(endpoint_name: str, override: str | None) -> Path:
     return Path(__file__).parent / ("fixtures_store.yaml" if endpoint_name == "store" else "fixtures.yaml")
 
 
-def load_fixtures(path: Path, category: str | None = None, fixture_id: str | None = None) -> list[dict]:
-    fixtures = yaml.safe_load(path.read_text())["fixtures"]
+def load_fixtures(path: Path, category: str | None = None, fixture_id: str | None = None) -> list[Fixture]:
+    loaded = as_list(as_object(cast(object, yaml.safe_load(path.read_text()))).get("fixtures"))
+    fixtures = [cast(Fixture, cast(object, as_object(f))) for f in loaded]
     if category:
         fixtures = [f for f in fixtures if f.get("category") == category]
     if fixture_id:
@@ -1400,7 +1584,7 @@ def load_fixtures(path: Path, category: str | None = None, fixture_id: str | Non
     return fixtures
 
 
-def _first_sales_channel_id(endpoint) -> str | None:
+def _first_sales_channel_id(endpoint: Endpoint) -> str | None:
     """A real sales-channel id off the live lane, preferring the demo
     `Storefront` channel.
 
@@ -1414,25 +1598,25 @@ def _first_sales_channel_id(endpoint) -> str | None:
     session_id, _ = mcp_init(endpoint=endpoint)
     resp = mcp_call(session_id, "shopware-entity-search", {"entity": "sales_channel", "limit": 25}, endpoint=endpoint)
     try:
-        rows = json.loads(mcp_result_text(resp) or "")
+        body = as_object(cast(object, json.loads(mcp_result_text(resp) or "")))
     except (json.JSONDecodeError, TypeError):
         return None
-    rows = rows.get("data") or rows.get("elements") or []
-    if isinstance(rows, dict):
-        rows = list(rows.values())
+    raw = body.get("data") or body.get("elements")
+    keyed = as_object(raw)
+    rows = [as_object(r) for r in (list(keyed.values()) if keyed else as_list(raw))]
 
-    def _name(r: dict) -> str:
-        return (r.get("name") or (r.get("translated") or {}).get("name") or "") if isinstance(r, dict) else ""
+    def _name(r: JsonObject) -> str:
+        return str(r.get("name") or as_object(r.get("translated")).get("name") or "")
 
     # Storefront first, then any channel with an id — the tool only needs a
     # resolvable one; the name match is for the prompt reading coherently.
     for row in sorted(rows, key=lambda r: _name(r).lower() != "storefront"):
-        if isinstance(row, dict) and row.get("id"):
-            return row["id"]
+        if row_id := row.get("id"):
+            return str(row_id)
     return None
 
 
-def _first_id_of(entity: str):
+def _first_id_of(entity: str) -> LaneResolver:
     """A resolver that returns the id of any one row of `entity`.
 
     Any row, not a specific one: what these fixtures need is an id the server
@@ -1441,7 +1625,7 @@ def _first_id_of(entity: str):
     stable to prefer.
     """
 
-    def resolve(endpoint) -> str | None:
+    def resolve(endpoint: Endpoint) -> str | None:
         session_id, _ = mcp_init(endpoint=endpoint)
         return lane.first_entity_id(session_id, endpoint, entity) or None
 
@@ -1449,7 +1633,7 @@ def _first_id_of(entity: str):
     return resolve
 
 
-def _seed_cart(endpoint) -> dict[str, str]:
+def _seed_cart(endpoint: Endpoint) -> dict[str, str]:
     """MUTATES: a real cart with a real line item, as {cart_token, line_item_id}.
 
     One resolver for both ids because they come from one cart. Two independent
@@ -1477,7 +1661,7 @@ def _seed_cart(endpoint) -> dict[str, str]:
 # Everything here READS. `{product_id}` and friends go through core
 # entity-search rather than the merchant tools so they still resolve on an
 # instance with no plugins installed.
-PLACEHOLDER_RESOLVERS = {
+PLACEHOLDER_RESOLVERS: dict[str, LaneResolver] = {
     "sales_channel_id": _first_sales_channel_id,
     "product_id": _first_id_of("product"),
     "customer_id": _first_id_of("customer"),
@@ -1488,7 +1672,7 @@ PLACEHOLDER_RESOLVERS = {
 # Held apart from the read-only set and reached only under --seed-lane: creating
 # a cart on somebody's real instance to grade a fixture is not a trade this
 # suite gets to make on its own.
-SEEDING_RESOLVERS = {
+SEEDING_RESOLVERS: dict[tuple[str, ...], SeedingResolver] = {
     ("cart_token", "line_item_id"): _seed_cart,
 }
 
@@ -1498,7 +1682,7 @@ SEEDING_RESOLVERS = {
 KNOWN_PLACEHOLDERS = set(PLACEHOLDER_RESOLVERS) | {k for keys in SEEDING_RESOLVERS for k in keys}
 
 
-def _referenced(fixtures: list[dict], key: str) -> bool:
+def _referenced(fixtures: list[Fixture], key: str) -> bool:
     return any("{" + key + "}" in f.get("prompt", "") for f in fixtures)
 
 
@@ -1522,7 +1706,7 @@ def _lane_lookup_failed(key: str, exc: Exception) -> None:
 # it are skipped — so degrading to that is strictly better than dying at startup
 # before a single fixture has been graded, which is the exact failure this file's
 # own regression test was written for.
-def _resolve_one(key: str, resolver, endpoint) -> str | None:
+def _resolve_one(key: str, resolver: LaneResolver, endpoint: Endpoint) -> str | None:
     try:
         return resolver(endpoint)
     except LANE_LOOKUP_ERRORS as exc:
@@ -1530,7 +1714,7 @@ def _resolve_one(key: str, resolver, endpoint) -> str | None:
         return None
 
 
-def _resolve_many(key: str, resolver, endpoint) -> dict[str, str]:
+def _resolve_many(key: str, resolver: SeedingResolver, endpoint: Endpoint) -> dict[str, str]:
     try:
         return resolver(endpoint)
     except LANE_LOOKUP_ERRORS as exc:
@@ -1538,7 +1722,7 @@ def _resolve_many(key: str, resolver, endpoint) -> dict[str, str]:
         return {}
 
 
-def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool = False) -> dict[str, str]:
+def resolve_lane_substitutions(fixtures: list[Fixture], endpoint: Endpoint, seed_lane: bool = False) -> dict[str, str]:
     """Values for every `{placeholder}` the loaded fixtures actually reference.
 
     Only resolves what is used, so a run filtered to fixtures with no placeholder
@@ -1577,7 +1761,7 @@ def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool =
     return subs
 
 
-def apply_substitutions(fixtures: list[dict], subs: dict[str, str]) -> None:
+def apply_substitutions(fixtures: list[Fixture], subs: dict[str, str]) -> None:
     """Replace `{placeholder}` tokens in each fixture prompt, in place.
 
     A fixture left holding a placeholder this runner knows about is marked
@@ -1595,7 +1779,9 @@ def apply_substitutions(fixtures: list[dict], subs: dict[str, str]) -> None:
             fixture["unresolved_placeholder"] = ", ".join(sorted(missing))
 
 
-def fetch_system_prompt(endpoint, enabled: bool = True, prompt_set: str = "all") -> tuple[str | None, dict]:
+def fetch_system_prompt(
+    endpoint: Endpoint, enabled: bool = True, prompt_set: str = "all"
+) -> tuple[str | None, PromptInventory]:
     """The server's instructions plus its context prompts, and what they were.
 
     Returns (prompt, inventory). The inventory travels into the report because a
@@ -1605,20 +1791,21 @@ def fetch_system_prompt(endpoint, enabled: bool = True, prompt_set: str = "all")
     """
     if not enabled or prompt_set == "none":
         print("Context prompt: none")
-        return None, {"names": [], "chars": {}, "total_chars": 0, "set": "none", "disabled": True}
+        return None, PromptInventory(names=[], chars={}, total_chars=0, set="none", disabled=True)
     session_id, server_instructions = mcp_init(endpoint=endpoint)
     prompt, inventory = mcp_fetch_context_prompts(
         session_id, server_instructions, endpoint=endpoint, owners=PROMPT_SETS[prompt_set]
     )
     inventory["set"] = prompt_set
     named = ", ".join(inventory["names"]) or "none"
-    print(f"Context prompt [{prompt_set}]: {inventory['total_chars']} chars from {len(inventory['names'])}: {named}")
-    if inventory["excluded"]:
-        print(f"  withheld ({len(inventory['excluded'])}): {', '.join(inventory['excluded'])}")
+    chars = inventory.get("total_chars", 0)
+    print(f"Context prompt [{prompt_set}]: {chars} chars from {len(inventory['names'])}: {named}")
+    if excluded := inventory.get("excluded"):
+        print(f"  withheld ({len(excluded)}): {', '.join(excluded)}")
     return prompt, inventory
 
 
-def probe_catalogue(endpoint) -> set[str]:
+def probe_catalogue(endpoint: Endpoint) -> set[str]:
     """Every tool registered on this instance, with all toolsets enabled.
 
     Fixtures whose expected tool is absent (a plugin bundle that isn't installed)
@@ -1632,15 +1819,15 @@ def probe_catalogue(endpoint) -> set[str]:
 def build_report(
     provider: str,
     model: str,
-    fixtures: list[dict],
-    discovery: list[dict] | None,
+    fixtures: list[Fixture],
+    discovery: list[FixtureResult] | None,
     system_prompt_enabled: bool,
     max_steps: int,
-    arm_results: dict[str, list[dict]] | None = None,
-    prompt_inventory: dict | None = None,
-) -> dict:
+    arm_results: dict[str, list[FixtureResult]] | None = None,
+    prompt_inventory: PromptInventory | None = None,
+) -> Report:
     """The JSON report. Pure: no writing, so its shape can be asserted directly."""
-    report = {
+    report: Report = {
         "timestamp": datetime.now(UTC).isoformat(),
         "server": SW_BASE_URL,
         "provider": provider,
@@ -1651,22 +1838,22 @@ def build_report(
         # The inventory, not just the flag: two runs with the same boolean can
         # have had different prompts, and the admin/store gap is invisible
         # without it.
-        "context_prompt": prompt_inventory or {},
+        "context_prompt": cast(JsonObject, cast(object, prompt_inventory or {})),
         "max_steps": max_steps,
     }
     if discovery is not None:
-        report["modes"]["discovery"] = {
-            "passed": sum(1 for r in scored(discovery) if r["passed"]),
-            "failed": sum(1 for r in scored(discovery) if not r["passed"]),
-            "skipped": sum(1 for r in discovery if r.get("skipped")),
-            "results": discovery,
-        }
-        report["discovery_summary"] = discovery_summary(discovery)
+        report["modes"]["discovery"] = ModeBlock(
+            passed=sum(1 for r in scored(discovery) if r["passed"]),
+            failed=sum(1 for r in scored(discovery) if not r["passed"]),
+            skipped=sum(1 for r in discovery if r.get("skipped")),
+            results=discovery,
+        )
+        report["discovery_summary"] = cast(JsonObject, cast(object, discovery_summary(discovery)))
         # What was NOT graded, and why. A pass rate over a denominator that
         # silently shrank is the failure mode this guards: the number goes up
         # because the hard cases stopped being asked, and nothing says so.
         report["skipped_fixtures"] = [
-            {"id": r["id"], "expected_tool": r.get("expected_tool"), "reason": r.get("skip_reason", "")}
+            SkippedFixture(id=r["id"], expected_tool=r.get("expected_tool"), reason=r.get("skip_reason", ""))
             for r in discovery
             if r.get("skipped")
         ]
@@ -1674,12 +1861,12 @@ def build_report(
     # compare_runs and the gate — which both read modes["discovery"] by name —
     # are untouched by their presence.
     for arm, records in (arm_results or {}).items():
-        report["modes"][arm] = {
-            "passed": sum(1 for r in scored(records) if r["passed"]),
-            "failed": sum(1 for r in scored(records) if not r["passed"]),
-            "skipped": sum(1 for r in records if r.get("skipped")),
-            "results": records,
-        }
+        report["modes"][arm] = ModeBlock(
+            passed=sum(1 for r in scored(records) if r["passed"]),
+            failed=sum(1 for r in scored(records) if not r["passed"]),
+            skipped=sum(1 for r in records if r.get("skipped")),
+            results=records,
+        )
     # Per-owning-repo rates, so the report answers "which codebase regressed"
     # without re-deriving attribution downstream. `or []` covers discovery not
     # having run — parse_modes rejects an empty mode list, so that is unreachable
@@ -1693,13 +1880,13 @@ def build_report(
     return report
 
 
-def print_gate(verdict: dict, args) -> None:
+def print_gate(verdict: GateVerdict, args: argparse.Namespace) -> None:
     """The gate block. Reads only the verdict dict, so gate_verdict stays the
     single place the pass/fail decision is made."""
     gating, graded = verdict["gating"], verdict["graded"]
     print(
         f"\nGate: {verdict['passed']}/{len(gating)} = {round(verdict['rate'] * 100)}% "
-        f"(threshold {round(args.min_pass_rate * 100)}%) → {'PASS' if verdict['quality_ok'] else 'FAIL'}"
+        f"(threshold {round(cast(float, args.min_pass_rate) * 100)}%) → {'PASS' if verdict['quality_ok'] else 'FAIL'}"
     )
     print_tier_block(gating)
     if verdict["core_total"]:
@@ -1711,7 +1898,7 @@ def print_gate(verdict: dict, args) -> None:
     if verdict["errored"]:
         print(
             f"  {verdict['errored']}/{len(graded)} fixtures never reached the model "
-            f"({round(verdict['error_rate'] * 100)}%, budget {round(args.max_error_rate * 100)}%) → "
+            f"({round(verdict['error_rate'] * 100)}%, budget {round(cast(float, args.max_error_rate) * 100)}%) → "
             f"{'within budget' if verdict['run_valid'] else 'RUN INVALID'}"
         )
     if not verdict["quality_ok"]:
@@ -1723,15 +1910,23 @@ def print_gate(verdict: dict, args) -> None:
         print("  too many fixtures errored to trust this run — fix the server/provider, then re-run.")
 
 
-def run_suite(args) -> int:
+def run_suite(args: argparse.Namespace) -> int:
     """One eval run end to end. Returns the process exit code."""
-    provider = args.provider
-    model = resolve_model(provider, args.model)
-    modes = parse_modes(args.modes)
-    endpoint = endpoint_by_name(args.endpoint)
-    credential = require_credentials(provider, args.endpoint)
+    provider = cast(str, args.provider)
+    endpoint_name = cast(str, args.endpoint)
+    max_steps = cast(int, args.max_steps)
+    concurrency = cast(int, args.discovery_concurrency)
+    no_system_prompt = cast(bool, args.no_system_prompt)
+    model = resolve_model(provider, cast(str | None, args.model))
+    modes = parse_modes(cast(str, args.modes))
+    endpoint = endpoint_by_name(endpoint_name)
+    credential = require_credentials(provider, endpoint_name)
     client = build_client(provider, credential)
-    fixtures = load_fixtures(fixtures_path_for(args.endpoint, args.fixtures), args.category, args.id)
+    fixtures = load_fixtures(
+        fixtures_path_for(endpoint_name, cast(str | None, args.fixtures)),
+        cast(str | None, args.category),
+        cast(str | None, args.id),
+    )
 
     print(f"{BOLD}Shopware MCP LLM Eval (v2 discovery){RESET}")
     print(f"Server:   {SW_BASE_URL}  ({endpoint.name} endpoint)")
@@ -1742,19 +1937,19 @@ def run_suite(args) -> int:
 
     print("\nInitializing MCP session for system prompt...")
     system_prompt, prompt_inventory = fetch_system_prompt(
-        endpoint, enabled=not args.no_system_prompt, prompt_set=args.context_prompts
+        endpoint, enabled=not no_system_prompt, prompt_set=cast(str, args.context_prompts)
     )
 
     available_tools = probe_catalogue(endpoint)
     # `.get()`: a negative fixture names no tool, so there is nothing that could
     # be absent from the catalogue — and indexing it here crashed the whole run
     # before a single fixture had been graded.
-    absent = sorted({f["expected_tool"] for f in fixtures if f.get("expected_tool")} - available_tools)
+    absent = sorted({t for f in fixtures if (t := f.get("expected_tool"))} - available_tools)
     if absent:
         print(f"Catalogue: {len(available_tools)} tools; will skip fixtures for absent: {', '.join(absent)}")
 
-    tool_health = load_tool_health(args.tool_health)
-    blocked = sorted({f["expected_tool"] for f in fixtures if unhealthy_reason(f.get("expected_tool"), tool_health)})
+    tool_health = load_tool_health(cast(str | None, args.tool_health))
+    blocked = sorted({t for f in fixtures if (t := f.get("expected_tool")) and unhealthy_reason(t, tool_health)})
     if blocked:
         print(f"Tool health: skipping fixtures for {len(blocked)} broken tool(s): {', '.join(blocked)}")
 
@@ -1763,9 +1958,9 @@ def run_suite(args) -> int:
     # resolvable ids, which the model cannot invent — see
     # resolve_lane_substitutions. Anything left unresolved skips its fixtures
     # rather than grading them against a literal brace string.
-    apply_substitutions(fixtures, resolve_lane_substitutions(fixtures, endpoint, seed_lane=args.seed_lane))
+    apply_substitutions(fixtures, resolve_lane_substitutions(fixtures, endpoint, seed_lane=cast(bool, args.seed_lane)))
 
-    results_discovery = None
+    results_discovery: list[FixtureResult] | None = None
     if "discovery" in modes:
         results_discovery = run_discovery_pass(
             provider,
@@ -1773,10 +1968,10 @@ def run_suite(args) -> int:
             fixtures,
             model,
             system_prompt,
-            args.max_steps,
+            max_steps,
             available_tools,
             endpoint=endpoint,
-            workers=args.discovery_concurrency,
+            workers=concurrency,
             tool_health=tool_health,
         )
 
@@ -1788,8 +1983,8 @@ def run_suite(args) -> int:
         print_single_mode(results_discovery, "discovery")
         print_discovery_block(results_discovery)
 
-    arm_results = {}
-    if args.triage:
+    arm_results: dict[str, list[FixtureResult]] = {}
+    if cast(bool, args.triage):
         arm_results = triage_arms(
             provider,
             client,
@@ -1797,16 +1992,16 @@ def run_suite(args) -> int:
             fixtures,
             model,
             system_prompt,
-            args.max_steps,
+            max_steps,
             endpoint=endpoint,
-            workers=args.discovery_concurrency,
+            workers=concurrency,
         )
         for records in arm_results.values():
             for record in records:
                 record.pop("_line", None)
 
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    output_path = Path(args.output or BASE / "results" / f"eval-{provider}-{ts}.json")
+    output_path = Path(cast(str | None, args.output) or BASE / "results" / f"eval-{provider}-{ts}.json")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(
@@ -1815,8 +2010,8 @@ def run_suite(args) -> int:
                 model,
                 fixtures,
                 results_discovery,
-                not args.no_system_prompt,
-                args.max_steps,
+                not no_system_prompt,
+                max_steps,
                 arm_results,
                 prompt_inventory,
             ),
@@ -1833,10 +2028,10 @@ def run_suite(args) -> int:
     # collapsing) still fails. Each failed fixture is also retried once (see
     # run_discovery_pass). Set --min-pass-rate 1.0 for strict.
     verdict = gate_verdict(
-        results_discovery,
-        min_pass_rate=args.min_pass_rate,
-        min_core_pass_rate=args.min_core_pass_rate,
-        max_error_rate=args.max_error_rate,
+        results_discovery or [],
+        min_pass_rate=cast(float, args.min_pass_rate),
+        min_core_pass_rate=cast(float | None, args.min_core_pass_rate),
+        max_error_rate=cast(float, args.max_error_rate),
     )
     print_gate(verdict, args)
     write_summary_row(provider, model, results_discovery, verdict["rate"], verdict["ok"], args)

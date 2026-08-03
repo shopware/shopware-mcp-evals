@@ -22,7 +22,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import cast
 
+from eval.result_schema import Snapshot, ToolDef, Toolset
 from mcp_client import (
     BASE,
     SW_ACCESS_KEY,
@@ -59,8 +61,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    endpoint = endpoint_by_name(args.endpoint)
-    if args.endpoint == "store":
+    endpoint = endpoint_by_name(cast(str, args.endpoint))
+    if cast(str, args.endpoint) == "store":
         missing = [n for n, v in (("SW_BASE_URL", SW_BASE_URL), ("SW_SC_ACCESS_KEY", SW_SC_ACCESS_KEY)) if not v]
     else:
         missing = [
@@ -82,13 +84,13 @@ def main() -> int:
 
     toolsets = sorted(
         (
-            {
-                "name": ts.get("name", ""),
-                "title": ts.get("title", ""),
-                "description": ts.get("description", ""),
+            Toolset(
+                name=ts.get("name", ""),
+                title=ts.get("title", ""),
+                description=ts.get("description", ""),
                 # 'enabled' is session state, not catalogue shape — drop it.
-                "tools": sorted(ts.get("tools", [])),
-            }
+                tools=sorted(ts.get("tools", [])),
+            )
             for ts in mcp_toolsets_list(session_id, endpoint=endpoint)
         ),
         key=lambda ts: ts["name"],
@@ -97,24 +99,24 @@ def main() -> int:
     enable_all_toolsets(session_id, endpoint=endpoint)
     full_catalogue = mcp_tools_list_all(session_id, endpoint=endpoint)
 
-    normalized = {
-        "server_instructions": instructions,
-        "default_tools": default_tools,
-        "toolsets": toolsets,
-        "tools": sorted(
+    normalized = Snapshot(
+        server_instructions=instructions,
+        default_tools=default_tools,
+        toolsets=toolsets,
+        tools=sorted(
             (
-                {
-                    "name": t.get("name", ""),
-                    "description": t.get("description", ""),
-                    "inputSchema": t.get("inputSchema", {}),
-                }
+                ToolDef(
+                    name=t.get("name", ""),
+                    description=t.get("description", ""),
+                    inputSchema=t.get("inputSchema", {}),
+                )
                 for t in full_catalogue
             ),
             key=lambda t: t["name"],
         ),
-    }
+    )
 
-    out = Path(args.output)
+    out = Path(cast(str, args.output))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n")
     print(

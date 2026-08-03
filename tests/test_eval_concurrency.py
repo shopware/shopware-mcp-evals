@@ -135,13 +135,13 @@ def test_every_default_model_is_priced():
     assert not unpriced, f"no pricing.yaml entry for {unpriced}"
 
 
-def test_render_marks_pass_fail_skip():
+def test_render_line_marks_pass_fail_skip():
     passed = {"id": "a", "mode": "baseline", "passed": True, "selected_tool": "x", "latency_s": 1}
     failed = {"id": "b", "mode": "baseline", "passed": False, "selected_tool": None, "latency_s": 1}
     skipped = {"id": "c", "mode": "baseline", "skipped": True, "expected_tool": "x"}
-    assert "PASS" in E._render(passed)
-    assert "FAIL" in E._render(failed)
-    assert "SKIP" in E._render(skipped)
+    assert "PASS" in E.render_line(passed)
+    assert "FAIL" in E.render_line(failed)
+    assert "SKIP" in E.render_line(skipped)
 
 
 # ---------------------------------------------------------------------------

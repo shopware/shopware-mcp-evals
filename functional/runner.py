@@ -25,13 +25,16 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import cast
 
 import requests
 
 import lane
 from eval.assertions import inband_error
-from functional.checks import CORE_CHECKS, DEV_CHECKS, LOG_PROBE_TEXT, MERCHANT_CHECKS, ToolCheck
+from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
+from functional.checks import CORE_CHECKS, DEV_CHECKS, LOG_PROBE_TEXT, MERCHANT_CHECKS, Context, ToolCheck
 from functional.journeys import run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
@@ -59,13 +62,9 @@ STOREFRONT_TYPE_ID = "8a243080f92e4c719546314b577cf82b"
 # ---------------------------------------------------------------------------
 # Small parsing helpers
 # ---------------------------------------------------------------------------
-def _payload(resp: dict) -> dict:
+def _payload(resp: McpResponse) -> JsonObject:
     """Parse the JSON payload carried in a tools/call text content block."""
-    try:
-        parsed = json.loads(mcp_result_text(resp) or "{}")
-        return parsed if isinstance(parsed, dict) else {}
-    except (ValueError, TypeError):
-        return {}
+    return lane.payload(resp)
 
 
 def _advertised(rep: Reporter, session: str, endpoint: Endpoint, label: str) -> list[str] | None:
@@ -78,16 +77,18 @@ def _advertised(rep: Reporter, session: str, endpoint: Endpoint, label: str) -> 
         return None
 
 
-def _first_field(session: str, endpoint: Endpoint, entity: str, field: str = "id", extra: dict | None = None) -> str:
+def _first_field(
+    session: str, endpoint: Endpoint, entity: str, field: str = "id", extra: JsonObject | None = None
+) -> str:
     """First entity's field value via entity-search, retried a few times
     (a large payload can occasionally deliver a partial read). '' on failure."""
     for _ in range(3):
-        args = {"entity": entity, "limit": 1}
+        args: JsonObject = {"entity": entity, "limit": 1}
         if extra:
             args.update(extra)
-        items = _payload(mcp_call(session, "shopware-entity-search", args, endpoint=endpoint)).get("data", [])
+        items = lane.data_rows(mcp_call(session, "shopware-entity-search", args, endpoint=endpoint))
         if items:
-            value = items[0].get(field, "")
+            value = str(as_object(items[0]).get(field, ""))
             if value:
                 return value
     return ""
@@ -101,10 +102,10 @@ def assert_tool(
     session: str,
     endpoint: Endpoint,
     tool: str,
-    args: dict,
+    args: JsonObject,
     label: str | None = None,
     contains: str = "",
-) -> dict:
+) -> JsonObject:
     """Call a tool; pass only if it neither errored nor reported failure in band.
 
     Returns the parsed payload so a caller can thread an id into the next call —
@@ -120,8 +121,8 @@ def assert_tool(
     """
     label = label or tool
     resp = mcp_call(session, tool, args, endpoint=endpoint)
-    error = resp.get("error", {}).get("message", "")
-    content = resp.get("result", {}).get("content", [])
+    error = (resp.get("error") or {}).get("message", "")
+    content = (resp.get("result") or {}).get("content", [])
     text = mcp_result_text(resp)
     if error:
         rep.tool_fail(tool, label, error)
@@ -140,18 +141,18 @@ def assert_tool(
 
 
 def assert_tool_error(
-    rep: Reporter, session: str, endpoint: Endpoint, tool: str, args: dict, expected: str, label: str
+    rep: Reporter, session: str, endpoint: Endpoint, tool: str, args: JsonObject, expected: str, label: str
 ) -> None:
     """Call a tool and expect it to FAIL (protocol error, isError, or a
     {"success": false} payload), optionally containing `expected`."""
     resp = mcp_call(session, tool, args, endpoint=endpoint)
-    msg = resp.get("error", {}).get("message", "")
-    result = resp.get("result", {})
+    msg = (resp.get("error") or {}).get("message", "")
+    result = resp.get("result") or {}
     text = mcp_result_text(resp)
     is_error = bool(msg) or bool(result.get("isError"))
     if not is_error:
         try:
-            is_error = json.loads(text).get("success") is False
+            is_error = as_object(cast(object, json.loads(text))).get("success") is False
         except (ValueError, TypeError):
             pass
     if not is_error:
@@ -185,7 +186,7 @@ def verify_default_surface(rep: Reporter, session: str, endpoint: Endpoint) -> N
         rep.check_fail("default surface", "unexpected tools advertised: " + " ".join(sorted(extras)))
 
 
-def load_toolsets(session: str, endpoint: Endpoint) -> list[dict]:
+def load_toolsets(session: str, endpoint: Endpoint) -> list[Toolset]:
     return mcp_toolsets_list(session, endpoint=endpoint)
 
 
@@ -268,38 +269,46 @@ def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None
         )
 
 
-def _search_payload_tools(session: str, endpoint: Endpoint) -> list[dict]:
+def _search_payload_tools(session: str, endpoint: Endpoint) -> list[JsonObject]:
     """Tool definitions embedded in shopware-tool-search results.
 
     Queried across several terms so parameterless tools — the ones that trip the
     empty-properties bug — are actually reached; a single query returns only its
     top matches.
     """
-    seen: dict[str, dict] = {}
+    seen: dict[str, JsonObject] = {}
     for query in ("list", "skills", "search", "config", "order", "product"):
         payload = mcp_result_text(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint))
         try:
-            data = json.loads(payload).get("data", [])
+            data = as_list(as_object(cast(object, json.loads(payload))).get("data"))
         except (json.JSONDecodeError, TypeError, AttributeError):
             continue
         for row in data:
-            tool = row.get("tool") if isinstance(row, dict) else None
-            if isinstance(tool, dict) and tool.get("name"):
-                seen[tool["name"]] = tool
+            tool = as_object(as_object(row).get("tool"))
+            name = str(tool.get("name", ""))
+            if name:
+                seen[name] = tool
     return list(seen.values())
 
 
-def _malformed_schemas(tools: list[dict]) -> list[str]:
-    """Names the tools whose inputSchema is not a JSON-Schema-valid object."""
-    malformed = []
+def _malformed_schemas(tools: Sequence[Mapping[str, object]]) -> list[str]:
+    """Names the tools whose inputSchema is not a JSON-Schema-valid object.
+
+    Takes a read-only mapping so both callers fit: tools/list hands over typed
+    ToolDefs, and tool-search's payload arrives as an untyped JsonObject.
+    """
+    malformed: list[str] = []
     for tool in tools:
-        schema = tool.get("inputSchema")
-        if not isinstance(schema, dict):
-            malformed.append(f"{tool.get('name')}: inputSchema is {type(schema).__name__}")
-        elif not isinstance(schema.get("properties", {}), dict):
-            malformed.append(
-                f"{tool.get('name')}: properties is a {type(schema['properties']).__name__}, not an object"
-            )
+        raw = tool.get("inputSchema")
+        # as_object before the isinstance: narrowing an `object` to `dict` yields
+        # dict[Unknown, Unknown], and every read off it is then unknown too.
+        schema = as_object(raw)
+        if not isinstance(raw, dict):
+            malformed.append(f"{tool.get('name')}: inputSchema is {type(raw).__name__}")
+            continue
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            malformed.append(f"{tool.get('name')}: properties is a {type(properties).__name__}, not an object")
     return malformed
 
 
@@ -319,7 +328,7 @@ def verify_enable_and_isolation(
         return
 
     payload = _payload(enable_toolset(session_a, target_toolset, endpoint=endpoint))
-    if payload.get("success") and payload.get("_meta", {}).get("listChanged"):
+    if payload.get("success") and as_object(payload.get("_meta")).get("listChanged"):
         rep.check_pass(f"toolset-enable ({target_toolset}) succeeds with _meta.listChanged=true")
     else:
         rep.check_fail(f"toolset-enable ({target_toolset})", "no success/listChanged in response")
@@ -346,7 +355,7 @@ def verify_enable_and_isolation(
         rep.check_pass("toolset enablement does not leak across sessions")
 
 
-def run_search(session: str, endpoint: Endpoint, query: str, max_results: int) -> dict:
+def run_search(session: str, endpoint: Endpoint, query: str, max_results: int) -> JsonObject:
     return _payload(
         mcp_call(session, "shopware-tool-search", {"query": query, "maxResults": max_results}, endpoint=endpoint)
     )
@@ -355,7 +364,7 @@ def run_search(session: str, endpoint: Endpoint, query: str, max_results: int) -
 # ---------------------------------------------------------------------------
 # Admin endpoint
 # ---------------------------------------------------------------------------
-def verify_admin_toolsets(rep: Reporter, session: str, endpoint: Endpoint) -> tuple[str, list[dict]]:
+def verify_admin_toolsets(rep: Reporter, session: str, endpoint: Endpoint) -> tuple[str, list[Toolset]]:
     """Toolset taxonomy: complete metadata, enabled=false on a fresh session,
     and a toolset that contains shopware-entity-read. Returns
     (entity_toolset, toolsets)."""
@@ -396,7 +405,7 @@ def verify_admin_toolsets(rep: Reporter, session: str, endpoint: Endpoint) -> tu
     return entity_toolset, toolsets
 
 
-def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: str, toolsets: list[dict]) -> None:
+def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: str, toolsets: list[Toolset]) -> None:
     """Admin discovery mechanics: enable/isolation, deferred-callable,
     tool-search behavior, unknown-toolset rejection, activate-all completeness."""
     rep.section("v2: Discovery mechanics")
@@ -430,8 +439,8 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: st
 
     # tool-search: ranked results spanning deferred tools
     search = run_search(session, endpoint, "upload an image file", 5)
-    results = search.get("data", [])
-    meta = search.get("_meta", {})
+    results = [as_object(r) for r in as_list(search.get("data"))]
+    meta = as_object(search.get("_meta"))
     problems: list[str] = []
     if not search.get("success"):
         problems.append("success != true")
@@ -439,7 +448,7 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: st
         problems.append("no results")
     if any(not all(k in r for k in ("tool", "score", "matchedIn")) for r in results):
         problems.append("result missing tool/score/matchedIn")
-    names = [r.get("tool", {}).get("name", "") for r in results]
+    names = [str(as_object(r.get("tool")).get("name", "")) for r in results]
     if "shopware-media-upload" not in names:
         problems.append(f"shopware-media-upload not in results: {names}")
     if "query" not in meta or "totalCandidates" not in meta:
@@ -450,7 +459,7 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: st
         rep.check_fail("tool-search (upload an image file)", "; ".join(problems))
 
     # tool-search caps maxResults at 20
-    cap_count = len(run_search(session, endpoint, "shopware", 50).get("data", []))
+    cap_count = len(as_list(run_search(session, endpoint, "shopware", 50).get("data")))
     if 1 <= cap_count <= 20:
         rep.check_pass(f"tool-search caps maxResults at 20 (got {cap_count})")
     else:
@@ -503,7 +512,7 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: st
         )
 
 
-def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[ToolCheck, ...], ctx: dict) -> None:
+def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[ToolCheck, ...], ctx: Context) -> None:
     """Run a table of checks, skipping any whose prerequisites are missing."""
     for check in checks:
         reason = check.blocked_by(ctx)
@@ -524,7 +533,7 @@ def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[To
             )
 
 
-def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -> dict:
+def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -> Context:
     """The live ids the check payloads need.
 
     Every one is optional: an empty shop yields no product to read and no sales
@@ -544,7 +553,7 @@ def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -
             },
         ),
         # Inverted so the check table can treat it like any other prerequisite.
-        "media_upload_enabled": not args.skip_media_upload,
+        "media_upload_enabled": not cast(bool, args.skip_media_upload),
     }
 
 
@@ -613,12 +622,15 @@ def first_skill_name(session: str, endpoint: Endpoint) -> str:
     The payload has been both `{"skills": [...]}` and a bare list, and its items
     both dicts and strings, so all four shapes are tolerated.
     """
-    data = _payload(mcp_call(session, "swag-dev-tools-list-skills", {}, endpoint=endpoint)).get("data", {})
-    skills = data.get("skills", data) if isinstance(data, dict) else data
-    if isinstance(skills, list) and skills:
-        first = skills[0]
-        return first.get("name", "") if isinstance(first, dict) else str(first)
-    return ""
+    raw = _payload(mcp_call(session, "swag-dev-tools-list-skills", {}, endpoint=endpoint)).get("data")
+    data = as_object(raw)
+    skills = as_list(data.get("skills", raw)) if data else as_list(raw)
+    if not skills:
+        return ""
+    first = skills[0]
+    # as_object before the isinstance, for the same reason as _malformed_schemas.
+    named = as_object(first)
+    return str(named.get("name", "")) if isinstance(first, dict) else str(first)
 
 
 def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str, product_ids: list[str]) -> str:
@@ -653,16 +665,17 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     # Several candidates, because the storefront search does not filter for
     # sellability either: create_cart_token adds them until the cart reads back
     # non-empty, and returns "" if none does.
-    ctx["cart_product_ids"] = sellable_products(session, endpoint, ctx["sales_channel_id"])
-    ctx["cart_token"] = create_cart_token(session, endpoint, ctx["sales_channel_id"], ctx["cart_product_ids"])
+    channel = str(ctx.get("sales_channel_id", ""))
+    product_ids = sellable_products(session, endpoint, channel)
+    ctx["cart_product_ids"] = product_ids
+    ctx["cart_token"] = create_cart_token(session, endpoint, channel, product_ids)
     run_checks(rep, session, endpoint, MERCHANT_CHECKS, ctx)
 
     rep.section("Dev tools")
-    if args.skip_dev_tools:
+    if cast(bool, args.skip_dev_tools):
         rep.skip("dev tools (--skip-dev-tools)")
         return
-    ctx["log_file"] = newest_log_file(session, endpoint)
-    ctx["log_file"], ctx["log_probe"] = find_log_probe(session, endpoint, ctx["log_file"])
+    ctx["log_file"], ctx["log_probe"] = find_log_probe(session, endpoint, newest_log_file(session, endpoint))
     # Needs the tool it is named after to have run, so it cannot be part of ctx.
     ctx["skill_name"] = first_skill_name(session, endpoint)
     run_checks(rep, session, endpoint, DEV_CHECKS, ctx)
@@ -735,7 +748,7 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     rep.section("Store context & search")
     ctx_session, _ = mcp_init(endpoint=endpoint)
     ctx = _payload(mcp_call(ctx_session or session, "shopware-store-api-context", {}, endpoint=endpoint))
-    data = ctx.get("data", {})
+    data = as_object(ctx.get("data"))
     if ctx.get("success") and data.get("salesChannelId") and data.get("token"):
         rep.check_pass("shopware-store-api-context (deferred, callable, returns channel+token)")
     else:
@@ -743,7 +756,7 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
 
     # --- tool-search finds a deferred UCP tool ---
     search = run_search(session, endpoint, "add items to a shopping cart", 5)
-    names = [r.get("tool", {}).get("name", "") for r in search.get("data", [])]
+    names = [str(as_object(as_object(r).get("tool")).get("name", "")) for r in as_list(search.get("data"))]
     if search.get("success") and any(name.startswith("shopware-ucp-cart") for name in names):
         rep.check_pass("shopware-tool-search finds a deferred UCP cart tool")
     else:
@@ -784,17 +797,18 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    endpoint_name = cast(str, args.endpoint)
 
     require("SW_BASE_URL", SW_BASE_URL)
-    endpoint = endpoint_by_name(args.endpoint)
-    if args.endpoint == "admin":
+    endpoint = endpoint_by_name(endpoint_name)
+    if endpoint_name == "admin":
         require("SW_ACCESS_KEY", SW_ACCESS_KEY)
         require("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)
     else:
         require("SW_SC_ACCESS_KEY (sales-channel access key)", SW_SC_ACCESS_KEY)
 
     rep = Reporter(SW_BASE_URL)
-    rep.banner(f"Shopware MCP Functional Tests — {args.endpoint} (v2 discovery)")
+    rep.banner(f"Shopware MCP Functional Tests — {endpoint_name} (v2 discovery)")
     rep.info(f"Endpoint: {endpoint.url}\n")
     rep.info("Initializing MCP session...")
     try:
@@ -808,10 +822,10 @@ def main() -> int:
     rep.info(f"Session: {session}")
 
     try:
-        if args.endpoint == "admin":
+        if endpoint_name == "admin":
             run_admin(rep, endpoint, args, session)
         else:
-            run_store(rep, endpoint, session, allow_mutations=args.allow_mutations)
+            run_store(rep, endpoint, session, allow_mutations=cast(bool, args.allow_mutations))
     except requests.exceptions.RequestException as exc:
         # A transport failure that survived the client's throttle retries — record
         # it and still emit a summary + report rather than crashing mid-suite.
@@ -819,10 +833,10 @@ def main() -> int:
 
     rep.summary()
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    rep.write_report(BASE / "results" / f"functional-{args.endpoint}-{timestamp}.json")
+    rep.write_report(BASE / "results" / f"functional-{endpoint_name}-{timestamp}.json")
     # Stable filename: the eval job consumes this as an artifact, so it cannot
     # be timestamped like the report.
-    rep.write_health(BASE / "results" / f"tool-health-{args.endpoint}.json")
+    rep.write_health(BASE / "results" / f"tool-health-{endpoint_name}.json")
     return rep.exit_code
 
 

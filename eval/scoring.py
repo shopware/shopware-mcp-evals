@@ -12,10 +12,19 @@ eval/runner.py, which produces the records. The same split is why
 eval/summary.py and eval/compare_runs.py are the best-tested code here.
 """
 
+from eval.result_schema import (
+    DiscoverySummary,
+    Fixture,
+    FixtureResult,
+    GateVerdict,
+    PassCount,
+    Score,
+    TokenCounts,
+)
 from ownership import core_rate
 
 
-def is_negative(fixture: dict) -> bool:
+def is_negative(fixture: Fixture) -> bool:
     """A fixture where the right answer is that no tool applies.
 
     Everything else in the suite asks "is X picked when X is right", which
@@ -27,7 +36,7 @@ def is_negative(fixture: dict) -> bool:
     return bool(fixture.get("expect_no_tool"))
 
 
-def is_correct(selected_tool: str | None, fixture: dict, fail_reason: str | None = None) -> bool:
+def is_correct(selected_tool: str | None, fixture: Fixture, fail_reason: str | None = None) -> bool:
     """Whether a fixture's outcome is the right one.
 
     For an ordinary fixture: the expected tool, or any of the optional
@@ -45,15 +54,15 @@ def is_correct(selected_tool: str | None, fixture: dict, fail_reason: str | None
         return selected_tool is None and fail_reason != "step_cap"
     if selected_tool is None:
         return False
-    return selected_tool == fixture["expected_tool"] or selected_tool in fixture.get("acceptable_tools", [])
+    return selected_tool == fixture.get("expected_tool") or selected_tool in fixture.get("acceptable_tools", [])
 
 
-def scored(results: list[dict]) -> list[dict]:
+def scored(results: list[FixtureResult]) -> list[FixtureResult]:
     """Results that count toward pass/fail — skipped fixtures are excluded."""
     return [r for r in results if not r.get("skipped")]
 
 
-def executed(results: list[dict]) -> list[dict]:
+def executed(results: list[FixtureResult]) -> list[FixtureResult]:
     """Scored results that actually reached the model.
 
     A transport error — the server answering 500, or throttling with 429 — is
@@ -65,14 +74,14 @@ def executed(results: list[dict]) -> list[dict]:
     return [r for r in scored(results) if not r.get("error")]
 
 
-def score(results: list[dict]) -> dict:
+def score(results: list[FixtureResult]) -> Score:
     """Return per-tool and per-category pass counts (skipped fixtures excluded)."""
-    tools: dict[str, dict] = {}
-    cats: dict[str, dict] = {}
+    tools: dict[str, PassCount] = {}
+    cats: dict[str, PassCount] = {}
     for r in scored(results):
         t = r.get("expected_tool")
         c = r["category"]
-        cats.setdefault(c, {"pass": 0, "total": 0})
+        cats.setdefault(c, PassCount({"pass": 0, "total": 0}))
         cats[c]["total"] += 1
         if r["passed"]:
             cats[c]["pass"] += 1
@@ -81,15 +90,15 @@ def score(results: list[dict]) -> dict:
         # counts in its category, which is where it is meant to be read.
         if not t:
             continue
-        tools.setdefault(t, {"pass": 0, "total": 0})
+        tools.setdefault(t, PassCount({"pass": 0, "total": 0}))
         tools[t]["total"] += 1
         if r["passed"]:
             tools[t]["pass"] += 1
     return {"tools": tools, "cats": cats}
 
 
-def total_tokens(results: list[dict]) -> dict:
-    agg = {"input": 0, "output": 0}
+def total_tokens(results: list[FixtureResult]) -> TokenCounts:
+    agg = TokenCounts(input=0, output=0)
     for r in results:
         t = r.get("tokens") or {}
         agg["input"] += t.get("input", 0)
@@ -97,7 +106,7 @@ def total_tokens(results: list[dict]) -> dict:
     return agg
 
 
-def count_rate_limited(results: list[dict] | None) -> int:
+def count_rate_limited(results: list[FixtureResult] | None) -> int:
     """Fixtures whose error looks like provider throttling.
 
     Worth separating from ordinary failures: a throttled fixture says nothing
@@ -114,7 +123,7 @@ def count_rate_limited(results: list[dict] | None) -> int:
     return sum(1 for r in results or [] if any(n in str(r.get("error", "")).lower() for n in needles))
 
 
-def recovery_summary(graded: list[dict]) -> dict:
+def recovery_summary(graded: list[FixtureResult]) -> DiscoverySummary:
     """How often the model got there first time, and how often it corrected itself.
 
     A wrong first pick that the model recovers from is a different — and much
@@ -132,7 +141,7 @@ def recovery_summary(graded: list[dict]) -> dict:
     first_try = sum(1 for r in tried if r.get("first_try"))
     missed_first = [r for r in tried if not r.get("first_try")]
     recovered = sum(1 for r in missed_first if r.get("recovered"))
-    steps = [r["steps_to_correct"] for r in tried if r.get("steps_to_correct") is not None]
+    steps = [s for r in tried if (s := r.get("steps_to_correct")) is not None]
     return {
         "first_try_rate": round(first_try / len(tried), 2),
         # Of the fixtures that did NOT land it first time, how many got there in
@@ -150,24 +159,25 @@ def recovery_summary(graded: list[dict]) -> dict:
     }
 
 
-def discovery_summary(discovery: list[dict]) -> dict:
+def discovery_summary(discovery: list[FixtureResult]) -> DiscoverySummary:
     graded = scored(discovery)
     n = len(graded)
     passed = sum(1 for r in graded if r["passed"])
-    steps = [r["steps"] for r in graded]
+    steps = [r.get("steps", 0) for r in graded]
     paths: dict[str, int] = {}
     for r in graded:
-        paths[r["discovery_path"]] = paths.get(r["discovery_path"], 0) + 1
-    search_used = [r for r in graded if r["search_hit"] is not None]
-    search_hits = sum(1 for r in search_used if r["search_hit"])
+        path = r.get("discovery_path", "none")
+        paths[path] = paths.get(path, 0) + 1
+    search_used = [r for r in graded if r.get("search_hit") is not None]
+    search_hits = sum(1 for r in search_used if r.get("search_hit"))
     # Where the expected tool actually placed, over the fixtures that searched
     # and found it. `search_hit` says the ranker returned it at all; this says
     # whether it returned it somewhere a model would plausibly read. Read with
     # .get() because reports written before this field existed are still
     # compared against.
     ranks = sorted(rank for r in graded if (rank := r.get("search_rank")) is not None)
-    toolset_graded = [r for r in graded if r["enabled_correct_toolset"] is not None]
-    toolset_correct = sum(1 for r in toolset_graded if r["enabled_correct_toolset"])
+    toolset_graded = [r for r in graded if r.get("enabled_correct_toolset") is not None]
+    toolset_correct = sum(1 for r in toolset_graded if r.get("enabled_correct_toolset"))
     return {
         "fixtures": n,
         "skipped": sum(1 for r in discovery if r.get("skipped")),
@@ -186,7 +196,12 @@ def discovery_summary(discovery: list[dict]) -> dict:
     }
 
 
-def gate_verdict(results, min_pass_rate, min_core_pass_rate, max_error_rate) -> dict:
+def gate_verdict(
+    results: list[FixtureResult],
+    min_pass_rate: float,
+    min_core_pass_rate: float | None,
+    max_error_rate: float,
+) -> GateVerdict:
     """Decide whether a run passes, and on which of the three independent axes.
 
     Kept pure and separate from main() so the policy is testable without a

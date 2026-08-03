@@ -21,50 +21,56 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import cast
+
+from eval.result_schema import DriftSummary, Snapshot, Toolset, ToolsetChanges, as_object
 
 
-def load(path: str) -> dict:
-    return json.loads(Path(path).read_text())
+def load(path: str) -> Snapshot:
+    return cast(Snapshot, json.loads(Path(path).read_text()))
 
 
-def summarise(old: dict, new: dict) -> dict:
+def summarise(old: Snapshot, new: Snapshot) -> DriftSummary:
     """Structured diff of two snapshots. Pure, so the rendering can be tested."""
     o = {t["name"]: t for t in old.get("tools", [])}
     n = {t["name"]: t for t in new.get("tools", [])}
     shared = sorted(set(o) & set(n))
 
-    return {
-        "added": sorted(set(n) - set(o)),
-        "removed": sorted(set(o) - set(n)),
-        "described": [t for t in shared if o[t].get("description") != n[t].get("description")],
-        "schema": [t for t in shared if o[t].get("inputSchema") != n[t].get("inputSchema")],
+    return DriftSummary(
+        added=sorted(set(n) - set(o)),
+        removed=sorted(set(o) - set(n)),
+        described=[t for t in shared if o[t].get("description") != n[t].get("description")],
+        schema=[t for t in shared if o[t].get("inputSchema") != n[t].get("inputSchema")],
         # The default surface is what a fresh session advertises. A change here is
         # categorically worse than a description edit: it moves what every fixture
         # has to discover before it can call anything.
-        "default_surface": old.get("default_tools") != new.get("default_tools"),
-        "toolsets": _toolset_changes(old, new),
-        "instructions": old.get("server_instructions") != new.get("server_instructions"),
-    }
+        default_surface=old.get("default_tools") != new.get("default_tools"),
+        toolsets=_toolset_changes(old, new),
+        instructions=old.get("server_instructions") != new.get("server_instructions"),
+    )
 
 
-def _toolset_changes(old: dict, new: dict) -> dict:
+def _toolset_changes(old: Snapshot, new: Snapshot) -> ToolsetChanges:
     """Group-level changes, which reslice what the model has to enable."""
     o = {ts["name"]: ts for ts in old.get("toolsets", [])}
     n = {ts["name"]: ts for ts in new.get("toolsets", [])}
 
-    def names(ts: dict) -> list[str]:
+    def names(ts: Toolset) -> list[str]:
         # Tolerates both wire shapes: bare names, and the {name, title} pairs
         # shopware/shopware#18762 proposed.
-        return sorted(t["name"] if isinstance(t, dict) else t for t in ts.get("tools", []))
+        out: list[str] = []
+        for t in ts.get("tools", []):
+            out.append(str(as_object(t).get("name", "")) if isinstance(t, dict) else str(t))
+        return sorted(out)
 
-    return {
-        "added": sorted(set(n) - set(o)),
-        "removed": sorted(set(o) - set(n)),
-        "membership": [g for g in sorted(set(o) & set(n)) if names(o[g]) != names(n[g])],
-    }
+    return ToolsetChanges(
+        added=sorted(set(n) - set(o)),
+        removed=sorted(set(o) - set(n)),
+        membership=[g for g in sorted(set(o) & set(n)) if names(o[g]) != names(n[g])],
+    )
 
 
-def is_significant(s: dict) -> bool:
+def is_significant(s: DriftSummary) -> bool:
     """Whether anything changed at all. Kept separate from rendering so the
     workflow can branch on it without parsing markdown."""
     ts = s["toolsets"]
@@ -81,7 +87,7 @@ def is_significant(s: dict) -> bool:
     )
 
 
-def render(s: dict, heading: str = "Tool description drift") -> str:
+def render(s: DriftSummary, heading: str = "Tool description drift") -> str:
     """Markdown, ordered by how much a reader should care."""
     if not is_significant(s):
         return "No catalogue drift vs the committed baseline.\n"
@@ -133,18 +139,22 @@ def main() -> int:
         help="exit 1 when anything drifted, for use as a shell condition",
     )
     args = parser.parse_args()
+    old_path = cast(str, args.old)
+    new_path = cast(str, args.new)
+    heading = cast(str, args.heading)
+    use_exit_code = cast(bool, args.exit_code)
 
     try:
-        summary = summarise(load(args.old), load(args.new))
+        summary = summarise(load(old_path), load(new_path))
     except (OSError, json.JSONDecodeError) as exc:
         # A missing or unreadable baseline is itself drift, but it must not crash
         # the workflow step that called this.
         print(f"::warning::Could not compare snapshots: {exc}", file=sys.stderr)
         print("Baseline missing or unreadable; treating as drift.\n")
-        return 1 if args.exit_code else 0
+        return 1 if use_exit_code else 0
 
-    print(render(summary, args.heading))
-    return 1 if (args.exit_code and is_significant(summary)) else 0
+    print(render(summary, heading))
+    return 1 if (use_exit_code and is_significant(summary)) else 0
 
 
 if __name__ == "__main__":

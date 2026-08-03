@@ -28,7 +28,9 @@ test of the seed.
 """
 
 import json
-from typing import TypedDict
+from typing import cast
+
+from eval.result_schema import ExpectSpec, as_list, as_object
 
 # Substrings that mark a server response as a rejection of the request rather
 # than an answer to it. Matched case-insensitively against the error text.
@@ -84,22 +86,23 @@ def is_not_found(error: str | None) -> bool:
     return any(marker in lowered for marker in NOT_FOUND_MARKERS)
 
 
-def _payload(result_text: str | None):
+def _payload(result_text: str | None) -> object:
     try:
-        return json.loads(result_text) if result_text else None
+        return cast(object, json.loads(result_text)) if result_text else None
     except (json.JSONDecodeError, TypeError):
         return None
 
 
-def _resolve(payload, path: str):
+def _resolve(payload: object, path: str) -> tuple[bool, object]:
     """Walk a dotted path. Returns (found, value) so a real null is not confused
     with an absent key — a tool returning `{"data": null}` has answered, and it
     has answered that there is nothing there."""
-    current = payload
+    current: object = payload
     for part in path.split("."):
-        if not isinstance(current, dict) or part not in current:
+        step = as_object(current)
+        if part not in step:
             return False, None
-        current = current[part]
+        current = step[part]
     return True, current
 
 
@@ -113,44 +116,25 @@ def inband_error(result_text: str | None) -> str | None:
     gone green while not a single tool did anything, which is a worse outcome
     than the failure it replaced.
     """
-    payload = _payload(result_text)
-    if not isinstance(payload, dict) or payload.get("success") is not False:
+    body = as_object(_payload(result_text))
+    if body.get("success") is not False:
         return None
-    err = payload.get("error")
-    if isinstance(err, dict):
+    raw_err = body.get("error")
+    err = as_object(raw_err)
+    if isinstance(raw_err, dict):
         # `type` carries the classification the server already made — keeping it
         # in the string lets the markers below sort it without a second scheme.
-        message = f"{err.get('type', '')}: {err.get('message', '')}".strip(": ").strip()
+        message = f"{err.get('type', '')!s}: {err.get('message', '')!s}".strip(": ").strip()
         # `violations` is where the answer actually is. UCP's schema errors say
         # only 'Validation failed for schema "checkout.create.request"' in the
         # message, and carry `["$.line_items is required"]` alongside it — the
         # difference between a dead end and a fix. Dropping it cost several
         # rounds of guessing payload shapes by hand.
-        violations = err.get("violations")
-        if isinstance(violations, list) and violations:
+        violations = as_list(err.get("violations"))
+        if violations:
             message += f" ({'; '.join(str(v) for v in violations)})"
         return message
-    return str(err) if err else "the tool reported success: false"
-
-
-class MinItems(TypedDict, total=False):
-    """The `min_items` predicate: the collection at `path` must hold >= `n`."""
-
-    path: str
-    n: int
-
-
-class ExpectSpec(TypedDict, total=False):
-    """A fixture's `expect_result` in mapping form — a tier plus the predicates
-    that tier turns on. `total=False`: a spec names only what it asserts, and the
-    runner defaults the tier to `accepted`. Modelling it (rather than a bare dict)
-    is what lets the type checker keep `min_items.get("n")` an int and reject a
-    predicate key that no branch below reads."""
-
-    tier: str
-    has_keys: list[str]
-    min_items: MinItems
-    contains: list[str]
+    return str(raw_err) if raw_err else "the tool reported success: false"
 
 
 def check(expect: str | ExpectSpec | None, result_text: str | None, error: str | None) -> tuple[bool, str | None]:
@@ -213,7 +197,9 @@ def check(expect: str | ExpectSpec | None, result_text: str | None, error: str |
         found, value = _resolve(payload, path)
         if not found or not isinstance(value, list | dict | str):
             return False, f"not_a_collection:{path}"
-        if len(value) < wanted:
+        # Narrowed to list | dict | str above, but the element types stay unknown
+        # for a decoded JSON value; only the length is being read.
+        if len(cast(list[object] | dict[str, object] | str, value)) < wanted:
             return False, f"too_few:{path}<{wanted}"
 
     for needle in spec.get("contains", []):

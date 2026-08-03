@@ -209,36 +209,37 @@ def test_an_error_record_for_another_mode_omits_the_discovery_fields():
 # ---------------------------------------------------------------------------
 # tool-search payload parsing
 # ---------------------------------------------------------------------------
+# The inline tool definitions are what make a search-surfaced tool callable, so
+# these assert on `_search_rows`' `tool` — there used to be a
+# `_search_result_tools` wrapper that only these tests called.
+def _tool_names(text: str) -> list[str]:
+    rows, _ = E._search_rows(text)
+    return [row["tool"]["name"] for row in rows]
+
+
 def test_search_results_extract_the_inline_tool_definitions():
     text = '{"data": [{"tool": {"name": "a", "description": "d"}}, {"tool": {"name": "b"}}]}'
 
-    assert [t["name"] for t in E._search_result_tools(text)] == ["a", "b"]
+    assert _tool_names(text) == ["a", "b"]
 
 
 def test_search_results_of_a_non_json_body_are_empty():
-    assert E._search_result_tools("not json") == []
+    assert _tool_names("not json") == []
 
 
 def test_search_results_tolerate_entries_without_a_tool():
     text = '{"data": [{"score": 1}, {"tool": null}, {"tool": {"name": "ok"}}, "bare"]}'
 
-    assert [t["name"] for t in E._search_result_tools(text)] == ["ok"]
+    assert _tool_names(text) == ["ok"]
 
 
 def test_search_results_drop_a_tool_with_no_name():
     """A nameless tool cannot be called or matched, so it is not a result."""
-    assert E._search_result_tools('{"data": [{"tool": {"description": "d"}}]}') == []
+    assert _tool_names('{"data": [{"tool": {"description": "d"}}]}') == []
 
 
 def test_search_results_of_an_empty_payload_are_empty():
-    assert E._search_result_tools("{}") == []
-
-
-def test_search_contains_expected_matches_by_name():
-    text = '{"data": [{"tool": {"name": "wanted"}}]}'
-
-    assert E._search_contains_expected(text, "wanted") is True
-    assert E._search_contains_expected(text, "other") is False
+    assert _tool_names("{}") == []
 
 
 def test_search_rows_carry_rank_score_and_pool_size():

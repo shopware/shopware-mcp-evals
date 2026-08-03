@@ -29,6 +29,8 @@ instance whose store endpoint advertises 17 more.
 import argparse
 import re
 import sys
+from pathlib import Path
+from typing import cast
 
 import toolclass
 
@@ -46,7 +48,7 @@ def parse_tools(text: str) -> dict[str, str]:
     Returns an empty mapping for output with no table in it, so a command that
     failed or printed a help page is a visible zero rather than a crash.
     """
-    tools = {}
+    tools: dict[str, str] = {}
     for line in text.splitlines():
         columns = [part.strip() for part in line.split("|")]
         if len(columns) >= 6 and _TOOL_NAME.match(columns[1]):
@@ -60,7 +62,7 @@ def mutates(privileges: str) -> bool:
 
 def problems(tools: dict[str, str]) -> list[str]:
     """Every disagreement between the registry and toolclass, as readable lines."""
-    found = []
+    found: list[str] = []
     for tool, privileges in sorted(tools.items()):
         classification = toolclass.classify(tool)
         if classification == "read_only" and mutates(privileges):
@@ -85,7 +87,8 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    text = sys.stdin.read() if args.from_file == "-" else open(args.from_file).read()
+    from_file = cast(str, args.from_file)
+    text = sys.stdin.read() if from_file == "-" else Path(from_file).read_text()
     tools = parse_tools(text)
 
     if not tools:

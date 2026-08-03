@@ -26,6 +26,11 @@ merchant tool) is therefore counted against core, and `compare_runs.py` shows
 what it lost to.
 """
 
+# Reaching into eval/ from a root module, which functional/runner.py already does
+# for eval.assertions. eval/__init__.py is a docstring and result_schema imports
+# only typing, so this costs nothing and cannot cycle.
+from eval.result_schema import FixtureResult, TierBucket
+
 # Ordered: first match wins, so more specific prefixes come first.
 OWNER_PREFIXES = (
     ("shopware-ucp-", "agentic-commerce"),
@@ -116,7 +121,7 @@ def tier_of(tool: str | None) -> str:
     return owner_of(tool)
 
 
-def breakdown(results: list[dict]) -> dict[str, dict]:
+def breakdown(results: list[FixtureResult]) -> dict[str, TierBucket]:
     """Per-tier pass counts over the results given.
 
     Callers pass an already-filtered list (scored, non-errored) — this only
@@ -130,7 +135,7 @@ def breakdown(results: list[dict]) -> dict[str, dict]:
     admin runs over one fixture set and reports dev-tools out of 42 when there
     are 21 dev-tools fixtures. The id lists let it union instead of add.
     """
-    out: dict[str, dict] = {}
+    out: dict[str, TierBucket] = {}
     for r in results or []:
         # A negative fixture expects no tool, so no repository owns it — it is a
         # statement about the catalogue as a whole. Attributing it would file
@@ -139,19 +144,19 @@ def breakdown(results: list[dict]) -> dict[str, dict]:
         if not r.get("expected_tool"):
             continue
         tier = tier_of(r["expected_tool"])
-        bucket = out.setdefault(tier, {"passed": 0, "total": 0, "ids": [], "failed_ids": []})
+        bucket = out.setdefault(tier, TierBucket(passed=0, total=0, rate=0.0, ids=[], failed_ids=[]))
         bucket["total"] += 1
-        bucket["ids"].append(r.get("id"))
+        bucket.setdefault("ids", []).append(r["id"])
         if r.get("passed"):
             bucket["passed"] += 1
         else:
-            bucket["failed_ids"].append(r.get("id"))
+            bucket.setdefault("failed_ids", []).append(r["id"])
     for bucket in out.values():
         bucket["rate"] = bucket["passed"] / bucket["total"] if bucket["total"] else 0.0
     return {t: out[t] for t in TIER_ORDER if t in out} | {t: v for t, v in out.items() if t not in TIER_ORDER}
 
 
-def core_rate(results: list[dict]) -> tuple[int, int, float]:
+def core_rate(results: list[FixtureResult]) -> tuple[int, int, float]:
     """Passed, total and rate over core fixtures — discovery meta-tools included.
 
     This is the number that gates separately. Rolling discovery in keeps the

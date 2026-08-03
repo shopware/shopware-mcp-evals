@@ -38,11 +38,21 @@ import collections
 import json
 import sys
 from pathlib import Path
+from typing import cast
 
+from eval.result_schema import (
+    BothFailDetail,
+    Comparison,
+    FixtureResult,
+    Report,
+    RunSide,
+    as_list,
+    as_object,
+)
 from ownership import TIER_ORDER, tier_of
 
 
-def discovery_index(report: dict) -> dict[str, dict]:
+def discovery_index(report: Report) -> dict[str, FixtureResult]:
     """Map fixture id -> result record for graded discovery results.
 
     Skipped fixtures (expected tool not registered on the instance) are dropped:
@@ -51,10 +61,10 @@ def discovery_index(report: dict) -> dict[str, dict]:
     mode = report.get("modes", {}).get("discovery")
     if not mode:
         return {}
-    return {r["id"]: r for r in mode.get("results", []) if not r.get("skipped")}
+    return {r.get("id", ""): r for r in mode.get("results", []) if not r.get("skipped")}
 
 
-def executed(index: dict[str, dict]) -> dict[str, dict]:
+def executed(index: dict[str, FixtureResult]) -> dict[str, FixtureResult]:
     """Drop fixtures that errored out before the model chose anything.
 
     A transport error (the server answering 500, or throttling with 429) is
@@ -65,7 +75,7 @@ def executed(index: dict[str, dict]) -> dict[str, dict]:
     return {k: v for k, v in index.items() if not v.get("error")}
 
 
-def pass_rate(index: dict[str, dict]) -> tuple[int, int, float]:
+def pass_rate(index: dict[str, FixtureResult]) -> tuple[int, int, float]:
     """Pass rate over fixtures that actually ran."""
     ran = executed(index)
     total = len(ran)
@@ -85,14 +95,16 @@ def load_catalogue(path: str | None) -> dict[str, str]:
     if not path:
         return {}
     try:
-        snapshot = json.loads(Path(path).read_text())
+        snapshot = cast(object, json.loads(Path(path).read_text()))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"::warning::Could not read tool catalogue {path}: {exc}", file=sys.stderr)
         return {}
-    return {t["name"]: t.get("description") or "" for t in snapshot.get("tools", []) if t.get("name")}
+    tools = as_list(as_object(snapshot).get("tools"))
+    named = (as_object(t) for t in tools)
+    return {str(t["name"]): str(t.get("description") or "") for t in named if t.get("name")}
 
 
-def _trail(result: dict) -> str:
+def _trail(result: FixtureResult) -> str:
     """The discovery route as one line: which meta-tools ran, with their argument.
 
     A both-fail row says the model picked the wrong tool but not whether it ever
@@ -100,7 +112,7 @@ def _trail(result: dict) -> str:
     description overlap; never enabling `dev-skills` at all is a discovery
     failure, and the fix for those is not the same.
     """
-    steps = []
+    steps: list[str] = []
     for call in result.get("meta_calls") or []:
         args = call.get("input") or {}
         arg = args.get("toolset") or args.get("query") or ""
@@ -110,7 +122,7 @@ def _trail(result: dict) -> str:
     return " → ".join(steps)
 
 
-def compare(primary: dict, second: dict, catalogue: dict[str, str] | None = None) -> dict:
+def compare(primary: Report, second: Report, catalogue: dict[str, str] | None = None) -> Comparison:
     """Split the shared fixture set four ways by which models passed."""
     catalogue = catalogue or {}
     a_all, b_all = discovery_index(primary), discovery_index(second)
@@ -118,16 +130,16 @@ def compare(primary: dict, second: dict, catalogue: dict[str, str] | None = None
     # Only fixtures that ran cleanly in BOTH runs can be attributed to a model.
     shared = sorted(set(a) & set(b))
 
-    buckets = collections.defaultdict(list)
+    buckets: dict[tuple[str, str], list[str]] = collections.defaultdict(list)
     for fid in shared:
         key = ("pass" if a[fid].get("passed") else "fail", "pass" if b[fid].get("passed") else "fail")
         buckets[key].append(fid)
 
     both_fail = buckets[("fail", "fail")]
     # Group the actionable set by the tool whose description is implicated.
-    by_tool = collections.defaultdict(list)
+    by_tool: dict[str, list[str]] = collections.defaultdict(list)
     for fid in both_fail:
-        by_tool[a[fid].get("expected_tool", "?")].append(fid)
+        by_tool[a[fid].get("expected_tool") or "?"].append(fid)
 
     # What each model reached for instead. "Tool X failed" is only half the
     # finding — the other half is what the description was confused with, and
@@ -137,22 +149,22 @@ def compare(primary: dict, second: dict, catalogue: dict[str, str] | None = None
     # too. Naming the confusion pair says *which* two descriptions overlap; you
     # still cannot rewrite either without reading them, and going to fetch them
     # by hand is the step that stopped anyone acting on these rows.
-    detail = [
-        {
-            "id": fid,
-            "expected_tool": a[fid].get("expected_tool", "?"),
-            "primary_selected": a[fid].get("selected_tool"),
-            "second_selected": b[fid].get("selected_tool"),
-            "primary_reason": a[fid].get("fail_reason"),
-            "second_reason": b[fid].get("fail_reason"),
-            "prompt": a[fid].get("prompt", ""),
-            "category": a[fid].get("category", ""),
-            "notes": a[fid].get("notes", ""),
-            "expected_toolset": a[fid].get("expected_toolset"),
+    detail: list[BothFailDetail] = [
+        BothFailDetail(
+            id=fid,
+            expected_tool=a[fid].get("expected_tool") or "?",
+            primary_selected=a[fid].get("selected_tool"),
+            second_selected=b[fid].get("selected_tool"),
+            primary_reason=a[fid].get("fail_reason"),
+            second_reason=b[fid].get("fail_reason"),
+            prompt=a[fid].get("prompt", ""),
+            category=a[fid].get("category", ""),
+            notes=a[fid].get("notes", ""),
+            expected_toolset=a[fid].get("expected_toolset"),
             # Keyed by tool name rather than by role: the two models often pick
             # the same wrong tool, and repeating its description would double
             # the block for no gain.
-            "descriptions": {
+            descriptions={
                 name: catalogue[name]
                 for name in (
                     a[fid].get("expected_tool"),
@@ -161,53 +173,53 @@ def compare(primary: dict, second: dict, catalogue: dict[str, str] | None = None
                 )
                 if name and name in catalogue
             },
-            "primary_trail": _trail(a[fid]),
-            "second_trail": _trail(b[fid]),
-        }
+            primary_trail=_trail(a[fid]),
+            second_trail=_trail(b[fid]),
+        )
         for fid in both_fail
     ]
 
     a_passed, a_total, a_rate = pass_rate(a_all)
     b_passed, b_total, b_rate = pass_rate(b_all)
 
-    return {
-        "primary": {
-            "model": primary.get("model", "?"),
-            "passed": a_passed,
-            "total": a_total,
-            "rate": a_rate,
-            "errored": len(a_all) - len(a),
-        },
-        "second": {
-            "model": second.get("model", "?"),
-            "passed": b_passed,
-            "total": b_total,
-            "rate": b_rate,
-            "errored": len(b_all) - len(b),
-        },
-        "shared": len(shared),
-        "both_pass": buckets[("pass", "pass")],
-        "only_primary": buckets[("pass", "fail")],
-        "only_second": buckets[("fail", "pass")],
-        "both_fail": both_fail,
-        "both_fail_by_tool": {t: sorted(ids) for t, ids in sorted(by_tool.items())},
+    return Comparison(
+        primary=RunSide(
+            model=primary.get("model", "?"),
+            passed=a_passed,
+            total=a_total,
+            rate=a_rate,
+            errored=len(a_all) - len(a),
+        ),
+        second=RunSide(
+            model=second.get("model", "?"),
+            passed=b_passed,
+            total=b_total,
+            rate=b_rate,
+            errored=len(b_all) - len(b),
+        ),
+        shared=len(shared),
+        both_pass=buckets[("pass", "pass")],
+        only_primary=buckets[("pass", "fail")],
+        only_second=buckets[("fail", "pass")],
+        both_fail=both_fail,
+        both_fail_by_tool={t: sorted(ids) for t, ids in sorted(by_tool.items())},
         # Same set as both_fail, one record per fixture, carrying what each
         # model picked. Kept alongside the id lists rather than replacing them
         # so existing consumers of the comparison JSON keep working.
-        "both_fail_detail": detail,
+        both_fail_detail=detail,
         # Fixtures present in one report but not the other — a mismatch means the
         # two runs used different fixture files. Compared over the full graded
         # sets, so a fixture that merely errored is reported as errored rather
         # than masquerading as a fixture-file mismatch.
-        "unmatched": sorted(set(a_all) ^ set(b_all)),
-    }
+        unmatched=sorted(set(a_all) ^ set(b_all)),
+    )
 
 
 def _verdict(rate: float, threshold: float) -> str:
     return "PASS" if rate >= threshold else "FAIL"
 
 
-def render_rates(cmp_: dict, threshold: float, threshold_second: float | None = None) -> str:
+def render_rates(cmp_: Comparison, threshold: float, threshold_second: float | None = None) -> str:
     """Per-model pass rates. Used for standalone/local runs.
 
     The CI job summary does NOT include this: `eval/summary.py` already prints
@@ -218,7 +230,7 @@ def render_rates(cmp_: dict, threshold: float, threshold_second: float | None = 
     The two models are held to different thresholds, so each row is rendered
     against its own — see main() for why the second validator's is lower.
     """
-    p, s = cmp_["primary"], cmp_["second"]
+    p, s = cmp_.get("primary", {}), cmp_.get("second", {})
     second = threshold if threshold_second is None else threshold_second
     lines = [
         "Rates are over fixtures that actually ran. Transport errors (server 500,",
@@ -229,13 +241,14 @@ def render_rates(cmp_: dict, threshold: float, threshold_second: float | None = 
         "|---|---|---|---|---|",
     ]
     for role, m, t in (("primary", p, threshold), ("second", s, second)):
-        pct = round(100 * m["rate"])
+        pct = round(100 * m.get("rate", 0.0))
+        counts = f"{m.get('passed', 0)}/{m.get('total', 0)}"
         lines.append(
-            f"| `{m['model']}` ({role}) | {m['passed']}/{m['total']} | {pct}% | {m['errored']} | "
-            f"{_verdict(m['rate'], t)} (>= {round(100 * t)}%) |"
+            f"| `{m.get('model', '?')}` ({role}) | {counts} | {pct}% | {m.get('errored', 0)} | "
+            f"{_verdict(m.get('rate', 0.0), t)} (>= {round(100 * t)}%) |"
         )
 
-    worst = max(p["errored"], s["errored"])
+    worst = max(p.get("errored", 0), s.get("errored", 0))
     if worst:
         lines += [
             "",
@@ -246,16 +259,16 @@ def render_rates(cmp_: dict, threshold: float, threshold_second: float | None = 
     return "\n".join(lines)
 
 
-def render_split(cmp_: dict) -> str:
+def render_split(cmp_: Comparison) -> str:
     """The four-way outcome table — the reason two models are run at all."""
     return "\n".join(
         [
             "| Outcome | Count | Meaning |",
             "|---|---|---|",
-            f"| both pass | {len(cmp_['both_pass'])} | nothing to do |",
-            f"| only primary | {len(cmp_['only_primary'])} | weaker model's capability gap |",
-            f"| only second | {len(cmp_['only_second'])} | noise / flaky discovery |",
-            f"| **both fail** | **{len(cmp_['both_fail'])}** | **description problem — actionable** |",
+            f"| both pass | {len(cmp_.get('both_pass', []))} | nothing to do |",
+            f"| only primary | {len(cmp_.get('only_primary', []))} | weaker model's capability gap |",
+            f"| only second | {len(cmp_.get('only_second', []))} | noise / flaky discovery |",
+            f"| **both fail** | **{len(cmp_.get('both_fail', []))}** | **description problem — actionable** |",
             "",
         ]
     )
@@ -278,7 +291,7 @@ def _note(primary_reason: str | None, second_reason: str | None) -> str:
     s = second_reason if second_reason in interesting else None
     if p and p == s:
         return f"both: {p}"
-    parts = []
+    parts: list[str] = []
     if p:
         parts.append(f"primary: {p}")
     if s:
@@ -286,14 +299,14 @@ def _note(primary_reason: str | None, second_reason: str | None) -> str:
     return ", ".join(parts)
 
 
-def render_actionable(cmp_: dict, primary_model: str = "primary", second_model: str = "second") -> str:
+def render_actionable(cmp_: Comparison, primary_model: str = "primary", second_model: str = "second") -> str:
     """The both-fail set, with what each model reached for instead.
 
     Naming only the expected tool says a description is wrong but not what it
     lost to, which is the part you need to rewrite it. The confusion pair is
     the finding.
     """
-    if not cmp_["both_fail"]:
+    if not cmp_.get("both_fail", []):
         return "No fixture failed for both models.\n"
 
     # Role-qualified, because the two runs can be the same model (a re-run
@@ -311,17 +324,17 @@ def render_actionable(cmp_: dict, primary_model: str = "primary", second_model: 
         "|---|---|---|---|---|---|",
     ]
 
-    detail = {d["id"]: d for d in cmp_.get("both_fail_detail", [])}
+    detail = {d.get("id", ""): d for d in cmp_.get("both_fail_detail", [])}
 
     # Core first, then most-failed tool: 3/3 is a description rewrite, 1/3 an
     # awkward prompt.
-    def _rank(kv):
+    def _rank(kv: tuple[str, list[str]]) -> tuple[int, int, str]:
         tool, ids = kv
         return (TIER_ORDER.index(tier_of(tool)) if tier_of(tool) in TIER_ORDER else len(TIER_ORDER), -len(ids), tool)
 
-    for tool, ids in sorted(cmp_["both_fail_by_tool"].items(), key=_rank):
+    for tool, ids in sorted(cmp_.get("both_fail_by_tool", {}).items(), key=_rank):
         for fid in ids:
-            d = detail.get(fid, {})
+            d = detail.get(fid) or BothFailDetail(id=fid)
             lines.append(
                 f"| {tier_of(tool)} | `{tool}` | `{fid}` | {_picked(d.get('primary_selected'))} | "
                 f"{_picked(d.get('second_selected'))} | {_note(d.get('primary_reason'), d.get('second_reason'))} |"
@@ -330,7 +343,7 @@ def render_actionable(cmp_: dict, primary_model: str = "primary", second_model: 
     return "\n".join(lines)
 
 
-def render_detail(cmp_: dict, primary_model: str = "primary", second_model: str = "second") -> str:
+def render_detail(cmp_: Comparison, primary_model: str = "primary", second_model: str = "second") -> str:
     """Everything needed to write the fix, one collapsed block per fixture.
 
     The table above identifies the confusion pair; this is the material you
@@ -359,11 +372,11 @@ def render_detail(cmp_: dict, primary_model: str = "primary", second_model: str 
         descriptions = d.get("descriptions") or {}
         out += [f"##### `{d.get('id')}` — expected `{expected}`", ""]
         if d.get("prompt"):
-            out += [f"> {d['prompt']}", ""]
+            out += [f"> {d.get('prompt', '')}", ""]
 
-        meta = [f"category: {d['category']}" for _ in (1,) if d.get("category")]
+        meta = [f"category: {d.get('category', '')}" for _ in (1,) if d.get("category")]
         if d.get("expected_toolset"):
-            meta.append(f"toolset: `{d['expected_toolset']}`")
+            meta.append(f"toolset: `{d.get('expected_toolset')}`")
         if meta:
             out += [" · ".join(meta), ""]
 
@@ -384,22 +397,29 @@ def render_detail(cmp_: dict, primary_model: str = "primary", second_model: str 
             f"- discovery trail, second `{second_model}`: {d.get('second_trail', '?')}",
         ]
         if d.get("notes"):
-            out += ["", f"Fixture note: {d['notes']}"]
+            out += ["", f"Fixture note: {d.get('notes', '')}"]
         out.append("")
     out += ["</details>", ""]
     return "\n".join(out)
 
 
-def render_unmatched(cmp_: dict) -> str:
-    if not cmp_["unmatched"]:
+def render_unmatched(cmp_: Comparison) -> str:
+    if not cmp_.get("unmatched", []):
         return ""
     return (
-        f"> Warning: {len(cmp_['unmatched'])} fixture(s) graded in only one run "
-        f"({', '.join(cmp_['unmatched'][:5])}...). The runs are not comparable.\n"
+        f"> Warning: {len(cmp_.get('unmatched', []))} fixture(s) graded in only one run "
+        f"({', '.join(cmp_.get('unmatched', [])[:5])}...). The runs are not comparable.\n"
     )
 
 
-def render(cmp_: dict, threshold: float, threshold_second: float | None = None) -> str:
+def _model(cmp_: Comparison, side: str) -> str:
+    """The model name for one side, or "?" — both keys are NotRequired because a
+    comparison read back from an older report may not carry them."""
+    run = cmp_.get("primary") if side == "primary" else cmp_.get("second")
+    return (run or {}).get("model", "?")
+
+
+def render(cmp_: Comparison, threshold: float, threshold_second: float | None = None) -> str:
     """Full standalone report — everything, including the per-model rates."""
     return "\n".join(
         [
@@ -407,8 +427,8 @@ def render(cmp_: dict, threshold: float, threshold_second: float | None = None) 
             "",
             render_rates(cmp_, threshold, threshold_second),
             render_split(cmp_),
-            render_actionable(cmp_, cmp_["primary"]["model"], cmp_["second"]["model"]),
-            render_detail(cmp_, cmp_["primary"]["model"], cmp_["second"]["model"]),
+            render_actionable(cmp_, _model(cmp_, "primary"), _model(cmp_, "second")),
+            render_detail(cmp_, _model(cmp_, "primary"), _model(cmp_, "second")),
             render_unmatched(cmp_),
         ]
     )
@@ -451,28 +471,32 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        primary = json.loads(Path(args.primary).read_text())
-        second = json.loads(Path(args.second).read_text())
+        primary = cast(Report, json.loads(Path(cast(str, args.primary)).read_text()))
+        second = cast(Report, json.loads(Path(cast(str, args.second)).read_text()))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"Could not read both reports: {exc}", file=sys.stderr)
         return 2
 
-    cmp_ = compare(primary, second, load_catalogue(args.catalogue))
+    cmp_ = compare(primary, second, load_catalogue(cast(str, args.catalogue)))
     # Printed to the step log, not to GITHUB_STEP_SUMMARY: `eval/summary.py`
     # renders the job summary once, at the end, from --output below. Appending
     # here as well would put a second copy of these tables in the middle of it.
-    min_second = args.min_pass_rate if args.min_pass_rate_second is None else args.min_pass_rate_second
-    print(render(cmp_, args.min_pass_rate, min_second))
+    min_pass = cast(float, args.min_pass_rate)
+    min_pass_second = cast(float | None, args.min_pass_rate_second)
+    output = cast(str | None, args.output)
+    gate = cast(str, args.gate)
+    min_second = min_pass if min_pass_second is None else min_pass_second
+    print(render(cmp_, min_pass, min_second))
 
-    if args.output:
-        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.output).write_text(json.dumps(cmp_, indent=2))
+    if output:
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        Path(output).write_text(json.dumps(cmp_, indent=2))
 
-    if args.gate == "none":
+    if gate == "none":
         return 0
-    checks = [(cmp_["primary"]["rate"], args.min_pass_rate)]
-    if args.gate == "both":
-        checks.append((cmp_["second"]["rate"], min_second))
+    checks = [((cmp_.get("primary") or RunSide()).get("rate", 0.0), min_pass)]
+    if gate == "both":
+        checks.append(((cmp_.get("second") or RunSide()).get("rate", 0.0), min_second))
     return 0 if all(rate >= threshold for rate, threshold in checks) else 1
 
 

@@ -25,6 +25,13 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from eval.result_schema import JsonObject
+
+# The live ids and flags gather_context assembles, keyed by the names `requires`
+# refers to. Values are heterogeneous (ids are strings, --skip flags are bools),
+# so it is the same string-keyed map every other JSON shape here uses.
+type Context = JsonObject
+
 # A phantom UUID that cannot exist — used for dryRun delete assertions.
 # 32 hex characters with NO dashes. That is the only form Shopware's DAL accepts:
 # the dashed form is rejected with "Value is not a valid UUID", so the delete
@@ -43,8 +50,8 @@ class ToolCheck:
     # prepended, so it never has to be repeated here. A callable when the detail
     # is only known at run time — load-skill names the skill it actually loaded,
     # which is the difference between "it worked" and "it worked on this input".
-    detail: str | Callable[[dict], str] = ""
-    args: Callable[[dict], dict] = field(default=lambda _ctx: {})
+    detail: str | Callable[[Context], str] = ""
+    args: Callable[[Context], JsonObject] = field(default=lambda _ctx: {})
     requires: tuple[tuple[str, str], ...] = ()
     # Text the response must contain. Without it a check only asserts that the
     # tool answered *something*, which for a reader is satisfied by an empty
@@ -52,14 +59,14 @@ class ToolCheck:
     # With it, the check proves the tool returned the thing we know is there.
     contains: str = ""
 
-    def label(self, ctx: dict) -> str:
+    def label(self, ctx: Context) -> str:
         detail = self.detail(ctx) if callable(self.detail) else self.detail
         return f"{self.tool} {detail}".strip()
 
     def skip_label(self, reason: str) -> str:
         return f"{self.tool} ({reason})"
 
-    def blocked_by(self, ctx: dict) -> str | None:
+    def blocked_by(self, ctx: Context) -> str | None:
         """The reason this check cannot run, or None. First missing key wins."""
         for key, reason in self.requires:
             if not ctx.get(key):

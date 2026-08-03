@@ -23,20 +23,22 @@ instance that is about to be destroyed.
 """
 
 import json
+from typing import cast
 
+from eval.result_schema import JsonObject, McpResponse, as_object
 from mcp_client import Endpoint, mcp_call, mcp_result_text
 
 
-def payload(resp: dict) -> dict:
+def payload(resp: McpResponse) -> JsonObject:
     """The JSON object carried in a tools/call text content block, or {}."""
     try:
-        parsed = json.loads(mcp_result_text(resp) or "{}")
+        parsed = cast(object, json.loads(mcp_result_text(resp) or "{}"))
     except (ValueError, TypeError):
         return {}
-    return parsed if isinstance(parsed, dict) else {}
+    return cast(JsonObject, parsed) if isinstance(parsed, dict) else {}
 
 
-def data_rows(resp: dict, key: str = "") -> list:
+def data_rows(resp: McpResponse, key: str = "") -> list[object]:
     """The list of records in a tool reply, whichever shape it arrived in.
 
     `data` has been a bare list, `{"elements": [...]}` and — for the merchant
@@ -45,8 +47,9 @@ def data_rows(resp: dict, key: str = "") -> list:
     """
     data = payload(resp).get("data")
     if isinstance(data, dict):
-        data = data.get(key) if key else (data.get("elements") or data.get("data"))
-    return data if isinstance(data, list) else []
+        inner = cast(JsonObject, data)
+        data = inner.get(key) if key else (inner.get("elements") or inner.get("data"))
+    return cast(list[object], data) if isinstance(data, list) else []
 
 
 def first_entity_id(session: str, endpoint: Endpoint, entity: str) -> str:
@@ -58,7 +61,7 @@ def first_entity_id(session: str, endpoint: Endpoint, entity: str) -> str:
     """
     resp = mcp_call(session, "shopware-entity-search", {"entity": entity, "limit": 1}, endpoint=endpoint)
     rows = data_rows(resp)
-    return rows[0].get("id", "") if rows and isinstance(rows[0], dict) else ""
+    return str(as_object(rows[0]).get("id", "")) if rows else ""
 
 
 def sellable_products(session: str, endpoint: Endpoint, sales_channel_id: str) -> list[str]:
@@ -84,10 +87,10 @@ def sellable_products(session: str, endpoint: Endpoint, sales_channel_id: str) -
         {"salesChannelId": sales_channel_id, "term": "a", "limit": 10},
         endpoint=endpoint,
     )
-    return [p["id"] for p in data_rows(resp, "products") if isinstance(p, dict) and p.get("id")]
+    return [str(pid) for row in data_rows(resp, "products") if (pid := as_object(row).get("id"))]
 
 
-def cart_line_items(session: str, endpoint: Endpoint, sales_channel_id: str, token: str) -> list:
+def cart_line_items(session: str, endpoint: Endpoint, sales_channel_id: str, token: str) -> list[object]:
     """The cart's line items, read back off the server.
 
     The `add` call answering `success: true` does not mean anything went in —
@@ -127,7 +130,7 @@ def create_cart(session: str, endpoint: Endpoint, sales_channel_id: str, product
         {"salesChannelId": sales_channel_id, "action": "create"},
         endpoint=endpoint,
     )
-    token = payload(created).get("data", {}).get("token", "")
+    token = str(as_object(payload(created).get("data")).get("token", ""))
     if not token:
         return "", ""
     for product_id in product_ids:
@@ -145,6 +148,5 @@ def create_cart(session: str, endpoint: Endpoint, sales_channel_id: str, product
         )
         items = cart_line_items(session, endpoint, sales_channel_id, token)
         if items:
-            first = items[0] if isinstance(items[0], dict) else {}
-            return token, first.get("id", "")
+            return token, str(as_object(items[0]).get("id", ""))
     return "", ""

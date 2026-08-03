@@ -28,10 +28,23 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import cast
 
 import toollint
 from eval.compare_runs import render_actionable, render_detail, render_split, render_unmatched
 from eval.cost import combine
+from eval.result_schema import (
+    Comparison,
+    CostBlock,
+    FixtureResult,
+    PromptArm,
+    Report,
+    ScorecardEntry,
+    Snapshot,
+    SummaryRow,
+    ToolDef,
+    as_list,
+)
 from eval.tool_scorecard import collisions, rank_worst, scorecard
 from ownership import TIER_ORDER
 
@@ -83,7 +96,7 @@ def para(*sentences: str) -> str:
     return " ".join(s.strip() for s in sentences if s.strip())
 
 
-def load_rows(rows_dir: Path) -> list[dict]:
+def load_rows(rows_dir: Path) -> list[SummaryRow]:
     """Read the per-run rows, ordered by filename.
 
     A missing directory or an unreadable row is not fatal: the summary is a
@@ -93,16 +106,16 @@ def load_rows(rows_dir: Path) -> list[dict]:
     """
     if not rows_dir.is_dir():
         return []
-    rows = []
+    rows: list[SummaryRow] = []
     for path in sorted(rows_dir.glob("*.json")):
         try:
-            rows.append(json.loads(path.read_text()))
+            rows.append(cast(SummaryRow, json.loads(path.read_text())))
         except (OSError, json.JSONDecodeError) as exc:
             print(f"::warning::Could not read summary row {path}: {exc}", file=sys.stderr)
     return rows
 
 
-def render_runs(rows: list[dict]) -> str:
+def render_runs(rows: list[SummaryRow]) -> str:
     """One table for every eval run in the job, suite-labelled."""
     if not rows:
         return "No eval run reported a result.\n"
@@ -127,7 +140,7 @@ def render_runs(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _usd(cost: dict | None) -> str:
+def _usd(cost: CostBlock | None) -> str:
     """A run's dollar cost, or an explicit gap.
 
     "—" for a run with no cost block at all (an older row) and "unpriced" for
@@ -138,7 +151,7 @@ def _usd(cost: dict | None) -> str:
         return "—"
     if cost.get("total_usd") is None:
         return "unpriced"
-    return f"${cost['total_usd']:.2f}" + ("*" if cost.get("unverified") else "")
+    return f"${cost.get('total_usd', None):.2f}" + ("*" if cost.get("unverified") else "")
 
 
 def _tokens(count: int) -> str:
@@ -149,7 +162,7 @@ def _tokens(count: int) -> str:
     return str(count)
 
 
-def render_cost(rows: list[dict]) -> str:
+def render_cost(rows: list[SummaryRow]) -> str:
     """The job's total cost, and the two numbers that make it actionable.
 
     Cost per fixture says what a data point costs. Cost per *passing* fixture
@@ -157,7 +170,7 @@ def render_cost(rows: list[dict]) -> str:
     the suite: a run that costs more but converts failures into passes got
     cheaper by this measure and more expensive by the total.
     """
-    costs = [r["cost"] for r in rows if r.get("cost")]
+    costs = [c for r in rows if (c := r.get("cost"))]
     if not costs:
         return ""
 
@@ -172,7 +185,7 @@ def render_cost(rows: list[dict]) -> str:
 
     parts = [
         f"**Cost of this run:** {total} · "
-        f"{_tokens(tokens['input'])} input ({_tokens(tokens['cached_input'])} cached) · "
+        f"{_tokens(tokens['input'])} input ({_tokens(tokens.get('cached_input', 0))} cached) · "
         f"{_tokens(tokens['output'])} output"
     ]
     if graded and job["total_usd"]:
@@ -217,7 +230,7 @@ DIAGNOSIS = {
 }
 
 
-def render_arm_matrix(reports: list[dict]) -> str:
+def render_arm_matrix(reports: list[Report]) -> str:
     """Where each discovery failure actually lives.
 
     The discovery arm says a fixture failed. It cannot say why, because three
@@ -226,7 +239,7 @@ def render_arm_matrix(reports: list[dict]) -> str:
     right tool at all. Re-running just the failures with the group pre-enabled,
     and then with the whole catalogue enabled, separates them.
     """
-    arms = {}
+    arms: dict[str, dict[str, FixtureResult]] = {}
     for report in reports:
         for arm in ("discovery", "isolated", "full"):
             mode = (report.get("modes") or {}).get(arm)
@@ -249,8 +262,8 @@ def render_arm_matrix(reports: list[dict]) -> str:
         "| Fixture | Expected | isolated | full | Diagnosis |",
         "|---|---|:---:|:---:|---|",
     ]
-    buckets = {}
-    unusable = []
+    buckets: dict[str, list[str]] = {}
+    unusable: list[tuple[str, str]] = []
     for fid in triaged:
         iso = arms.get("isolated", {}).get(fid)
         full = arms.get("full", {}).get(fid)
@@ -295,7 +308,7 @@ def render_arm_matrix(reports: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_tiers(rows: list[dict]) -> str:
+def render_tiers(rows: list[SummaryRow]) -> str:
     """Pass rates per owning repository, across every suite in the job.
 
     The run table above says "admin · primary 92%", but admin spans core,
@@ -311,8 +324,8 @@ def render_tiers(rows: list[dict]) -> str:
     # counted twice against the rate while a single-model one counted once,
     # inflating exactly the capability-gap misses the cross-model table exists
     # to discount.
-    graded: dict[str, collections.Counter] = {}
-    failed: dict[str, collections.Counter] = {}
+    graded: dict[str, collections.Counter[str]] = {}
+    failed: dict[str, collections.Counter[str]] = {}
     advisory: dict[str, bool] = {}
     for index, r in enumerate(rows):
         for tier, b in (r.get("by_tier") or {}).items():
@@ -407,7 +420,7 @@ def _enforcement(tier: str, advisory: bool) -> str:
     return "suite rate"
 
 
-def _failing(ids: list, consistent: set | None = None) -> str:
+def _failing(ids: list[str], consistent: set[str] | None = None) -> str:
     """Failing fixture ids, the all-models ones bolded.
 
     Truncation puts the bolded ids first: with a cap of six, an owner with eight
@@ -426,7 +439,7 @@ def _failing(ids: list, consistent: set | None = None) -> str:
     consistent = consistent or set()
     ordered = sorted(named, key=lambda i: (i not in consistent, i))
     shown = ", ".join(f"**`{i}`**" if i in consistent else f"`{i}`" for i in ordered[:6])
-    extra = []
+    extra: list[str] = []
     if len(ordered) > 6:
         extra.append(f"+{len(ordered) - 6} more")
     if anonymous:
@@ -434,7 +447,7 @@ def _failing(ids: list, consistent: set | None = None) -> str:
     return shown + (f" ({', '.join(extra)})" if extra else "")
 
 
-def render_comparison(cmp_: dict | None) -> str:
+def render_comparison(cmp_: Comparison | None) -> str:
     """The cross-model section, minus the per-model rates.
 
     Those rates are already in the run table above — repeating them is exactly
@@ -468,7 +481,7 @@ def render_comparison(cmp_: dict | None) -> str:
     )
 
 
-def load_reports(paths: list[str] | None) -> list[dict]:
+def load_reports(paths: list[str] | None) -> list[Report]:
     """Read the full per-run reports named by the caller.
 
     The rows carry a verdict; the scorecard needs every fixture's selection.
@@ -486,10 +499,10 @@ def load_reports(paths: list[str] | None) -> list[dict]:
     missed. A report that exists but cannot be parsed is a real problem and says
     so. Either way it costs a table, never the build.
     """
-    reports = []
+    reports: list[Report] = []
     for path in paths or []:
         try:
-            reports.append(json.loads(Path(path).read_text()))
+            reports.append(cast(Report, json.loads(Path(path).read_text())))
         except FileNotFoundError:
             continue
         except (OSError, json.JSONDecodeError) as exc:
@@ -497,7 +510,7 @@ def load_reports(paths: list[str] | None) -> list[dict]:
     return reports
 
 
-def load_snapshot(path: str | None) -> dict | None:
+def load_snapshot(path: str | None) -> Snapshot | None:
     """A whole catalogue snapshot, or None.
 
     None rather than {} so a caller can tell "no snapshot for this endpoint" from
@@ -508,13 +521,13 @@ def load_snapshot(path: str | None) -> dict | None:
     if not path:
         return None
     try:
-        return json.loads(Path(path).read_text())
+        return cast(Snapshot, json.loads(Path(path).read_text()))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"::warning::Could not read tool catalogue {path}: {exc}", file=sys.stderr)
         return None
 
 
-def load_catalog(path: str | None) -> dict[str, dict]:
+def load_catalog(path: str | None) -> dict[str, ToolDef]:
     """Tool name -> full definition, from a snapshot written by snapshot_tools.py.
 
     compare_runs.load_catalogue reads the same file but keeps only descriptions;
@@ -526,7 +539,7 @@ def load_catalog(path: str | None) -> dict[str, dict]:
     return {t["name"]: t for t in snapshot.get("tools", []) if t.get("name")}
 
 
-def pooled_results(reports: list[dict]) -> list[dict]:
+def pooled_results(reports: list[Report]) -> list[FixtureResult]:
     """Every graded discovery result in the job, across suites and models.
 
     Pooled rather than deduplicated per fixture, which is the opposite of what
@@ -561,7 +574,7 @@ def _partners(counts: dict[str, int], limit: int = 2) -> str:
     return ", ".join(shown) or "–"
 
 
-def render_tool_scorecard(results: list[dict], catalog: dict[str, dict]) -> str:
+def render_tool_scorecard(results: list[FixtureResult], catalog: dict[str, ToolDef]) -> str:
     """Per-tool recall, precision and confusion — the half recall alone can't show.
 
     Recall is what the pass rate already reports: did this tool win the fixtures
@@ -609,7 +622,8 @@ def render_tool_scorecard(results: list[dict], catalog: dict[str, dict]) -> str:
     found = collisions(card)
     if found:
         pairs = [
-            f"- `{p['pair'][0]}` / `{p['pair'][1]}` — {p['total']} miss(es)" + (" **(mutual)**" if p["mutual"] else "")
+            f"- `{p['pair'][0]}` / `{p['pair'][1]}` — {p.get('total', 0)} miss(es)"
+            + (" **(mutual)**" if p["mutual"] else "")
             for p in found
         ]
         lines += [
@@ -642,7 +656,7 @@ TOP_COLLISIONS = 5
 ACTIONABLE_F1 = 0.9
 
 
-def _needs_work(entry: dict) -> bool:
+def _needs_work(entry: ScorecardEntry) -> bool:
     """Whether a tool's row belongs in front of the reader.
 
     Either half can be the problem and they mean opposite things: low recall is a
@@ -652,10 +666,11 @@ def _needs_work(entry: dict) -> bool:
     """
     if not entry.get("expected_n"):
         return True
-    return any(entry.get(k) is not None and entry[k] < ACTIONABLE_F1 for k in ("recall", "precision"))
+    halves = (entry.get("recall"), entry.get("precision"))
+    return any(half is not None and half < ACTIONABLE_F1 for half in halves)
 
 
-def _scorecard_table(entries: list[tuple[str, dict]]) -> str:
+def _scorecard_table(entries: list[tuple[str, ScorecardEntry]]) -> str:
     lines = [
         "| Tool | Fixtures | Recall | Picked | Precision | F1 | Steals from | Search rank |",
         "|---|---:|---:|---:|---:|---:|---|---:|",
@@ -670,7 +685,7 @@ def _scorecard_table(entries: list[tuple[str, dict]]) -> str:
     return "\n".join(lines)
 
 
-def render_catalogue(snapshot: dict | None, label: str) -> str:
+def render_catalogue(snapshot: Snapshot | None, label: str) -> str:
     """One endpoint's toolsets and their tools.
 
     Both endpoints or neither. The Store listing used to be written straight to
@@ -691,7 +706,7 @@ def render_catalogue(snapshot: dict | None, label: str) -> str:
     return details(f"{label} catalogue — {len(tools)} tools", "\n".join(lines))
 
 
-def render_catalogue_lint(snapshot: dict | None) -> str:
+def render_catalogue_lint(snapshot: Snapshot | None) -> str:
     """The static description findings, rendered here rather than in a second
     workflow's summary.
 
@@ -710,13 +725,13 @@ def render_catalogue_lint(snapshot: dict | None) -> str:
 
 
 def render(
-    rows: list[dict],
-    cmp_: dict | None,
-    results: list[dict] | None = None,
-    catalog: dict | None = None,
-    reports: list[dict] | None = None,
-    admin_snapshot: dict | None = None,
-    store_snapshot: dict | None = None,
+    rows: list[SummaryRow],
+    cmp_: Comparison | None,
+    results: list[FixtureResult] | None = None,
+    catalog: dict[str, ToolDef] | None = None,
+    reports: list[Report] | None = None,
+    admin_snapshot: Snapshot | None = None,
+    store_snapshot: Snapshot | None = None,
 ) -> str:
     """The whole job on one page, verdict first.
 
@@ -787,26 +802,33 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
+    # argparse types every attribute as Any; naming them once here keeps that
+    # from spreading into every call below.
+    comparison_path = cast(str | None, args.comparison)
+    reports_paths = cast(list[str] | None, args.reports)
+    rows_dir = cast(str, args.rows)
+    tools_path = cast(str, args.tools)
+    store_tools_path = cast(str, args.store_tools)
 
-    cmp_ = None
-    if args.comparison:
+    cmp_: Comparison | None = None
+    if comparison_path:
         try:
-            cmp_ = json.loads(Path(args.comparison).read_text())
+            cmp_ = cast(Comparison, json.loads(Path(comparison_path).read_text()))
         except (OSError, json.JSONDecodeError):
             # Expected whenever the comparison step skipped, which it does when
             # either eval run failed to produce a report. Rendered as a note in
             # the summary rather than warned about here.
             cmp_ = None
 
-    reports = load_reports(args.reports)
+    reports = load_reports(reports_paths)
     markdown = render(
-        load_rows(Path(args.rows)),
+        load_rows(Path(rows_dir)),
         cmp_,
         pooled_results(reports),
-        load_catalog(args.tools),
+        load_catalog(tools_path),
         reports,
-        admin_snapshot=load_snapshot(args.tools),
-        store_snapshot=load_snapshot(args.store_tools),
+        admin_snapshot=load_snapshot(tools_path),
+        store_snapshot=load_snapshot(store_tools_path),
     )
     print(markdown)
 
@@ -835,7 +857,7 @@ def main() -> int:
     return 0
 
 
-def render_skipped(reports: list[dict]) -> str:
+def render_skipped(reports: list[Report]) -> str:
     """Fixtures that were not graded, grouped by reason.
 
     Rendered even when empty is pointless, but rendered *only* when non-empty is
@@ -859,7 +881,7 @@ def render_skipped(reports: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def render_prompt_delta(reports: list[dict]) -> str:
+def render_prompt_delta(reports: list[Report]) -> str:
     """What the context prompt is worth, and what each suite actually got.
 
     Two questions, one table. The first is the A/B: the same model on the same
@@ -871,7 +893,7 @@ def render_prompt_delta(reports: list[dict]) -> str:
     none. Their pass rates were being read side by side as though they were the
     same measurement, and nothing in any report said otherwise.
     """
-    seen: dict[str, dict] = {}
+    seen: dict[str, PromptArm] = {}
     for report in reports:
         inventory = report.get("context_prompt") or {}
         if not inventory:
@@ -883,24 +905,26 @@ def render_prompt_delta(reports: list[dict]) -> str:
         # then excluded it from the very note that exists to report it.
         prompt_set = inventory.get("set") or ("none" if inventory.get("disabled") else "all")
         key = f"{report.get('server', '?')}|{report.get('model', '?')}|{prompt_set}"
-        seen[key] = {
-            "server": report.get("server", "?"),
-            "model": report.get("model", "?"),
-            "enabled": bool(report.get("system_prompt")),
-            "chars": inventory.get("total_chars", 0),
-            "names": inventory.get("names", []),
-            "set": prompt_set,
-            "rate": rate,
-            "by_tier": report.get("by_tier") or {},
-        }
+        seen[key] = PromptArm(
+            server=report.get("server", "?"),
+            model=report.get("model", "?"),
+            enabled=bool(report.get("system_prompt")),
+            chars=int(cast(int, inventory.get("total_chars", 0) or 0)),
+            names=[str(n) for n in as_list(inventory.get("names"))],
+            set=str(prompt_set),
+            rate=rate,
+            by_tier=report.get("by_tier") or {},
+        )
     if not seen:
         return ""
 
     lines = ["### Context prompt", "", "| Model | Set | Chars | Prompts | Pass rate |", "|---|---|---:|---|---:|"]
-    for entry in sorted(seen.values(), key=lambda e: -e["chars"]):
-        names = ", ".join(f"`{n}`" for n in entry["names"]) or "_none_"
-        rate = "—" if entry["rate"] is None else f"{round(100 * entry['rate'])}%"
-        lines.append(f"| `{entry['model']}` | `{entry['set']}` | {entry['chars']:,} | {names} | {rate} |")
+    for entry in sorted(seen.values(), key=lambda e: -e.get("chars", 0)):
+        names = ", ".join(f"`{n}`" for n in entry.get("names", [])) or "_none_"
+        arm_rate = entry.get("rate")
+        rate = "—" if arm_rate is None else f"{round(100 * arm_rate)}%"
+        cells = f"`{entry.get('model', '?')}` | `{entry.get('set', 'all')}` | {entry.get('chars', 0):,}"
+        lines.append(f"| {cells} | {names} | {rate} |")
     lines.append("")
     lines += _contamination_table(list(seen.values()))
 
@@ -909,7 +933,7 @@ def render_prompt_delta(reports: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _discovery_rate(report: dict) -> float | None:
+def _discovery_rate(report: Report) -> float | None:
     mode = (report.get("modes") or {}).get("discovery") or {}
     passed, failed = mode.get("passed"), mode.get("failed")
     if passed is None or failed is None or (passed + failed) == 0:
@@ -917,9 +941,9 @@ def _discovery_rate(report: dict) -> float | None:
     return passed / (passed + failed)
 
 
-def _prompt_notes(entries: list[dict]) -> list[str]:
+def _prompt_notes(entries: list[PromptArm]) -> list[str]:
     """The two readings worth spelling out rather than leaving to inference."""
-    notes = []
+    notes: list[str] = []
     # Same model AND same server. Matching on the model alone paired the store
     # suite's prompt-on run against admin's prompt-off run and reported the gap
     # between two different endpoints as what the prompt was worth — a confident,
@@ -928,21 +952,26 @@ def _prompt_notes(entries: list[dict]) -> list[str]:
         (a, b)
         for a in entries
         for b in entries
-        if a["model"] == b["model"] and a["server"] == b["server"] and a["enabled"] and not b["enabled"]
+        if a.get("model", "?") == b.get("model", "?")
+        and a.get("server", "?") == b.get("server", "?")
+        and a.get("enabled", False)
+        and not b.get("enabled", False)
     ]
     for on, off in pairs:
-        if on["rate"] is None or off["rate"] is None:
+        on_rate, off_rate = on.get("rate"), off.get("rate")
+        if on_rate is None or off_rate is None:
             continue
-        delta = round(100 * (on["rate"] - off["rate"]))
+        delta = round(100 * (on_rate - off_rate))
         verdict = "worth it" if delta > 0 else ("no measurable effect" if delta == 0 else "actively hurting")
         notes.append(
-            f"**{on['chars']:,} characters of context prompt moved `{on['model']}` by {delta:+d} points — {verdict}.**"
+            f"**{on.get('chars', 0):,} characters of context prompt moved "
+            f"`{on.get('model', '?')}` by {delta:+d} points — {verdict}.**"
         )
     # An arm we deliberately ran with `--context-prompts none` is not an endpoint
     # that ships nothing — it is the control. Counting it here claimed the store
     # endpoint's problem existed on admin too.
-    served = [e for e in entries if e["set"] != "none"]
-    if any(not e["names"] for e in served) and any(e["names"] for e in served):
+    served = [e for e in entries if e.get("set", "all") != "none"]
+    if any(not e.get("names", []) for e in served) and any(e.get("names", []) for e in served):
         notes.append(
             "One endpoint ships **no context prompt at all** while another ships several. Their pass rates are "
             "not comparable: a model working the bare endpoint is being asked to do the same job with a fraction "
@@ -951,7 +980,7 @@ def _prompt_notes(entries: list[dict]) -> list[str]:
     return notes
 
 
-def _contamination_table(entries: list[dict]) -> list[str]:
+def _contamination_table(entries: list[PromptArm]) -> list[str]:
     """Each area's rate under every prompt set that contained its prompt.
 
     This is the question the sets exist to answer. A merchant-tools fixture under
@@ -961,11 +990,11 @@ def _contamination_table(entries: list[dict]) -> list[str]:
     and that failure currently shows up in the scorecard as a description
     problem, attributed to the wrong thing entirely.
     """
-    by_set = {e["set"]: e for e in entries if e["set"] != "none"}
+    by_set = {e.get("set", "all"): e for e in entries if e.get("set", "all") != "none"}
     if len(by_set) < 2:
         return []
 
-    areas = sorted({area for e in by_set.values() for area in e["by_tier"]})
+    areas = sorted({area for e in by_set.values() for area in e.get("by_tier", {})})
     if not areas:
         return []
 
@@ -977,10 +1006,10 @@ def _contamination_table(entries: list[dict]) -> list[str]:
         "|---" * (len(sets) + 1) + "|",
     ]
     for area in areas:
-        cells = []
+        cells: list[str] = []
         for name in sets:
-            tier = by_set[name]["by_tier"].get(area)
-            cells.append(f"{round(100 * tier['rate'])}%" if tier and tier.get("total") else "—")
+            tier = by_set[name].get("by_tier", {}).get(area)
+            cells.append(f"{round(100 * tier.get('rate', 0.0))}%" if tier and tier.get("total") else "—")
         lines.append(f"| {area} | " + " | ".join(cells) + " |")
     lines += ["", "</details>", ""]
     return lines

@@ -29,7 +29,7 @@ import uuid
 TOOL_PREFIX = "shopware-ucp-"
 
 # Reads. Safe to call for real.
-READ_ONLY = frozenset(
+READ_ONLY: frozenset[str] = frozenset(
     {
         "shopware-ucp-cart-get",
         "shopware-ucp-catalog-lookup",
@@ -45,7 +45,7 @@ READ_ONLY = frozenset(
 #
 # `checkout-complete` is the one that can take money, and it is only callable at
 # all because the server offers the safe path.
-DRY_RUNNABLE = frozenset(
+DRY_RUNNABLE: frozenset[str] = frozenset(
     {
         "shopware-ucp-cart-cancel",
         "shopware-ucp-cart-create",
@@ -60,7 +60,7 @@ DRY_RUNNABLE = frozenset(
 
 # Nothing currently. Kept so a new mutating tool without a dryRun has an obvious
 # home rather than being forced into one of the two above.
-UNSAFE = frozenset()
+UNSAFE: frozenset[str] = frozenset()
 
 # Every UCP runtime tool rejects a request without this header. The SDK reads it
 # with /profile="([^"]+)"/ and then fetches the URI, so it has to be a real

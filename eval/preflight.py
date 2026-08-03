@@ -20,11 +20,13 @@ import argparse
 import json
 import sys
 import time
+from typing import cast
 
 import requests
 
 import mcp_client as mc
 import toolclass
+from eval.result_schema import JsonObject, McpResponse, as_list, as_object
 
 # A read-only tool per endpoint whose success proves the whole chain works:
 # session, toolset enable, argument validation, and — on store — the UCP-Agent
@@ -33,7 +35,7 @@ import toolclass
 # The store query is a placeholder: run() replaces it with a product name
 # discovered from the Store API (see discover_store_query), so the probe searches
 # something the shop actually has rather than an invented word.
-PROBES = {
+PROBES: dict[str, tuple[str, JsonObject]] = {
     "store": ("shopware-ucp-catalog-search", {"query": "test"}),
     "admin": ("shopware-entity-search", {"entity": "product", "limit": 1}),
 }
@@ -107,19 +109,21 @@ def diagnose(error: str) -> str:
     return "No known diagnosis. Check the server log for the underlying exception."
 
 
-def _first_product_name(body: dict) -> str:
+def _first_product_name(body: object) -> str:
     """Pull the first product name out of a Store API listing response.
 
     The store-api serializes an EntitySearchResult's `elements` as a list, but a
     dict-of-values is tolerated rather than assuming one shape.
     """
-    elements = (body or {}).get("elements")
-    if isinstance(elements, dict):
-        elements = list(elements.values())
-    if isinstance(elements, list):
-        for item in elements:
-            if isinstance(item, dict) and (item.get("name") or "").strip():
-                return item["name"].strip()
+    raw = as_object(body).get("elements")
+    # as_object first, then values(): isinstance on an `object` narrows to
+    # dict[Unknown, Unknown], which poisons everything downstream.
+    keyed = as_object(raw)
+    elements = list(keyed.values()) if keyed else as_list(raw)
+    for item in elements:
+        name = str(as_object(item).get("name") or "").strip()
+        if name:
+            return name
     return ""
 
 
@@ -132,13 +136,13 @@ def _product_id_from_search(text: str) -> str:
     probe rather than sending a lookup nothing can resolve.
     """
     try:
-        payload = json.loads(text).get("data", {})
+        payload = as_object(cast(object, json.loads(text))).get("data", {})
     except (ValueError, TypeError, AttributeError):
         return ""
-    products = payload.get("products") if isinstance(payload, dict) else None
-    if isinstance(products, list) and products and isinstance(products[0], dict):
-        return (products[0].get("id") or "").strip()
-    return ""
+    products = as_list(as_object(payload).get("products"))
+    if not products:
+        return ""
+    return str(as_object(products[0]).get("id") or "").strip()
 
 
 def discover_store_query(default: str) -> tuple[str, str]:
@@ -165,7 +169,7 @@ def discover_store_query(default: str) -> tuple[str, str]:
             timeout=10,
         )
         resp.raise_for_status()
-        body = resp.json()
+        body = cast(object, resp.json())
     except (requests.RequestException, ValueError) as exc:
         return default, f"Store API product listing failed ({type(exc).__name__}), probing with {default!r}"
 
@@ -175,7 +179,9 @@ def discover_store_query(default: str) -> tuple[str, str]:
     return name, f"grounded in a real product: {name!r}"
 
 
-def _execute(session_id: str, tool: str, args: dict, endpoint) -> tuple[str, str, float, dict]:
+def _execute(
+    session_id: str, tool: str, args: JsonObject, endpoint: mc.Endpoint
+) -> tuple[str, str, float, McpResponse]:
     """Run one probe. Returns (error, result_text, elapsed, raw_response).
 
     Timed, because duration separates two failures that look identical from the
@@ -197,7 +203,9 @@ def _execute(session_id: str, tool: str, args: dict, endpoint) -> tuple[str, str
     return error, text, elapsed, response
 
 
-def _report_failure(endpoint_name: str, label: str, error: str, elapsed: float, text: str, response: dict) -> None:
+def _report_failure(
+    endpoint_name: str, label: str, error: str, elapsed: float, text: str, response: McpResponse
+) -> None:
     print(f"FAILED — {label} did not execute after {elapsed:.2f}s.\n  error: {error}\n  cause: {diagnose(error)}")
 
     # "Error while executing tool" is the MCP layer's generic wrapper, which it
@@ -236,7 +244,7 @@ def run(endpoint_name: str) -> int:
     search_tool, search_args = PROBES["store"]
     print(f"Preflight: {search_tool} on the store endpoint ({endpoint.url})", flush=True)
     print(f"  UCP-Agent: {ucp.agent_header(mc.SW_BASE_URL)}", flush=True)
-    query, note = discover_store_query(search_args.get("query", "test"))
+    query, note = discover_store_query(str(search_args.get("query", "test")))
     print(f"  probe query: {query!r} — {note}", flush=True)
 
     failures = 0
@@ -277,10 +285,10 @@ def probe_profile(uri: str) -> tuple[int | None, str]:
     if response.status_code != 200:
         return response.status_code, "not a profile — the server answered, but not with one"
     try:
-        body = response.json()
+        body = cast(object, response.json())
     except ValueError:
         return 200, "200 but not JSON — almost certainly an error page"
-    if not isinstance(body, dict) or "ucp" not in body:
+    if "ucp" not in as_object(body):
         return 200, "200 and JSON, but no `ucp` key — not a UCP profile"
     return 200, "valid UCP profile"
 
@@ -320,7 +328,7 @@ def profile_report(error: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--endpoint", choices=sorted(PROBES), default="store")
-    return run(parser.parse_args().endpoint)
+    return run(cast(str, parser.parse_args().endpoint))
 
 
 if __name__ == "__main__":

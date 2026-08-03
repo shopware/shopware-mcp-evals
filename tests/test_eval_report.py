@@ -24,7 +24,7 @@ def plain(capsys) -> str:
 
 def base(fid, passed=True, tool="shopware-entity-read", category="unambiguous", **over):
     """A minimal record. Its mode is deliberately not "discovery", so the tests
-    below can show which lines _render adds only for a discovery record."""
+    below can show which lines render_line adds only for a discovery record."""
     return {
         "id": fid,
         "mode": "other",
@@ -66,46 +66,46 @@ def test_pct_color_thresholds_are_inclusive_at_the_boundary(pct, expected):
 
 
 # ---------------------------------------------------------------------------
-# _render — the per-fixture progress line
+# render_line — the per-fixture progress line
 # ---------------------------------------------------------------------------
-def test_render_marks_a_pass_with_the_selected_tool():
-    line = STRIP.sub("", R._render(base("f1")))
+def test_render_line_marks_a_pass_with_the_selected_tool():
+    line = STRIP.sub("", R.render_line(base("f1")))
 
     assert line.startswith("PASS")
     assert "selected=shopware-entity-read" in line
 
 
-def test_render_shows_none_when_the_model_called_nothing():
-    line = STRIP.sub("", R._render(base("f1", passed=False, selected_tool=None)))
+def test_render_line_shows_none_when_the_model_called_nothing():
+    line = STRIP.sub("", R.render_line(base("f1", passed=False, selected_tool=None)))
 
     assert "selected=(none)" in line
 
 
-def test_render_reports_a_skip_with_the_absent_tool():
-    line = STRIP.sub("", R._render(base("f1", skipped=True)))
+def test_render_line_reports_a_skip_with_the_absent_tool():
+    line = STRIP.sub("", R.render_line(base("f1", skipped=True)))
 
     assert line.startswith("SKIP")
     assert "not registered" in line
 
 
-def test_render_reports_a_transport_error_instead_of_a_verdict():
-    line = STRIP.sub("", R._render(base("f1", passed=False, error="500 Server Error")))
+def test_render_line_reports_a_transport_error_instead_of_a_verdict():
+    line = STRIP.sub("", R.render_line(base("f1", passed=False, error="500 Server Error")))
 
     assert line.startswith("ERROR")
     assert "500 Server Error" in line
 
 
-def test_render_adds_steps_and_path_only_in_discovery_mode():
-    assert "steps=" not in STRIP.sub("", R._render(base("f1")))
-    assert "steps=2  path=toolsets" in STRIP.sub("", R._render(disc("f1")))
+def test_render_line_adds_steps_and_path_only_in_discovery_mode():
+    assert "steps=" not in STRIP.sub("", R.render_line(base("f1")))
+    assert "steps=2  path=toolsets" in STRIP.sub("", R.render_line(disc("f1")))
 
 
-def test_render_flags_a_fixture_that_needed_its_retry():
+def test_render_line_flags_a_fixture_that_needed_its_retry():
     """A pass on the second attempt is a flaky fixture, not a clean one."""
-    line = STRIP.sub("", R._render(disc("f1", attempts=2)))
+    line = STRIP.sub("", R.render_line(disc("f1", attempts=2)))
 
     assert "(attempts=2)" in line
-    assert "(attempts" not in STRIP.sub("", R._render(disc("f2", attempts=1)))
+    assert "(attempts" not in STRIP.sub("", R.render_line(disc("f2", attempts=1)))
 
 
 # ---------------------------------------------------------------------------

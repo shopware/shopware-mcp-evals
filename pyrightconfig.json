@@ -1,31 +1,54 @@
 // Static type checking for the Python layers. Gating in lint.yml.
 //
-// mode: `standard`, not basedpyright's stricter default `recommended`.
-//   Measured: standard is 0 errors on the source, recommended is 126 — 104 of
-//   them reportTypedDictNotRequiredAccess, i.e. every result["id"] flagged
-//   because FixtureResult is total=False. Ratcheting to recommended is a
-//   deliberate follow-up, not the price of turning any checking on.
+// mode: `recommended`. It was `standard` while the alternative looked like 126
+//   errors; measured on the current tree it is 470 root annotations across the
+//   source, and that number is the whole reason this is worth doing. The
+//   Unknown* family — 2,209 diagnostics — is not independent work, it is the
+//   shadow of those 470. ownership.py was the proof: 29 diagnostics from four
+//   bare `dict` annotations in signatures, all 29 gone once the four were typed.
+//   Leverage across the source files ran 3x to 16x.
 //
-// scope: source only. tests/ is intentionally out: it fakes provider clients
-//   and MCP responses with duck-typed stand-ins and feeds deliberate edge
-//   values (None, empty payloads), which a checker reads as ~120 errors in
-//   `standard` mode that are not bugs — a test that calls a renamed function
-//   fails under pytest on the next line anyway. The value here is catching a
-//   renamed key or bad call in the code that ships — e.g. FixtureResult across
-//   its five readers.
+//   What that buys, concretely: the JSON shapes this repo passes between modules
+//   (FixtureResult, the summary rows, the comparison, the snapshots) are now
+//   types rather than `dict`, so a renamed key fails here instead of as a
+//   KeyError mid-run in the heavy eval workflow.
 //
-// exclude vs ignore, and why BOTH name tests/: `exclude` keeps the CI
-//   whole-project run from analysing a path, but an editor's language server
-//   still type-checks any file you OPEN even when it is excluded — which is why
-//   opening a test file used to show errors CI never runs. `ignore` suppresses
-//   diagnostics for a path even when open, so the two agree: tests are not
-//   type-checked, in CI or in the editor.
+// Warnings are not tolerated either. basedpyright exits non-zero only on errors,
+//   so `recommended` would technically pass with thousands of warnings standing —
+//   and a checker printing 7,000 lines is one nobody reads. Clean means clean.
+//
+// Three of `recommended`'s rules are off, and only these three. Each costs real
+// edits and makes the code worse, which is a different thing from being hard:
+//
+//   reportUnusedCallResult — wants `_ = f()` for every discarded return. That is
+//     128 sites, and it would put `_ =` in front of every `lines.append` and
+//     `print` in the repo. Not Python idiom, and it obscures the lines it marks.
+//   reportImplicitStringConcatenation — flags adjacent string literals across
+//     lines, which is exactly the `para(...)` prose style eval/summary.py uses
+//     deliberately so that hard-wrapped source does not leak line breaks into a
+//     GitHub step summary. 41 sites, all of them the intended style.
+//   reportPrivateUsage / reportPrivateLocalImportUsage — 143 sites, nearly all
+//     tests reaching for a `_`-prefixed helper (E._first_sales_channel_id,
+//     S._usd, R._payload). There is a real argument that a helper a test needs is
+//     part of the contract and should be public; that rename is a follow-up, not
+//     a reason to hold up the rest.
 //
 // pythonVersion: matches .python-version so stdlib and syntax are checked
 //   against the interpreter CI actually runs.
+//
+// scope: source for now; tests/ lands next, in its own commit. It is 850 more
+//   root annotations and two structural changes — typed factories for the fakes,
+//   and marking FixtureResult's always-present fields Required — which is a
+//   different review from this one. `exclude` AND `ignore` both name it until
+//   then: exclude keeps the CI run out, but an editor still checks any file you
+//   OPEN even when excluded, and `ignore` is what makes the two agree.
 {
-  "typeCheckingMode": "standard",
+  "typeCheckingMode": "recommended",
   "pythonVersion": "3.14",
+  "reportUnusedCallResult": "none",
+  "reportImplicitStringConcatenation": "none",
+  "reportPrivateUsage": "none",
+  "reportPrivateLocalImportUsage": "none",
   "include": [
     "eval",
     "functional",

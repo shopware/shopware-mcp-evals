@@ -46,10 +46,17 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import cast
 
 from eval.assertions import inband_error
+from eval.result_schema import JsonObject, as_list, as_object
 from functional.reporting import Reporter
 from mcp_client import Endpoint, mcp_call, mcp_result_text
+
+# The ids each step contributes and the later steps consume, keyed by the names
+# `needs` refers to. Distinct from functional.checks.Context — same shape, but
+# this one is built by the journey itself rather than gathered up front.
+type Context = JsonObject
 
 # A buyer who is obviously synthetic, so a leftover order in a dev shop is
 # identifiable at a glance rather than looking like a real customer.
@@ -108,17 +115,27 @@ class JourneyStep:
 
     tool: str
     detail: str
-    args: Callable[[dict], dict]
-    capture: Callable[[dict, dict], None] = field(default=lambda payload, ctx: None)
+    args: Callable[[Context], JsonObject]
+    capture: Callable[[JsonObject, Context], None] = field(default=lambda payload, ctx: None)
     needs: tuple[str, ...] = ()
     commits: bool = False
 
-    def missing(self, ctx: dict) -> str:
+    def missing(self, ctx: Context) -> str:
         return next((key for key in self.needs if not ctx.get(key)), "")
 
 
-def _line_items(ctx: dict) -> list[dict]:
+def _line_items(ctx: Context) -> list[JsonObject]:
     return [{"item": {"id": ctx["product_id"]}, "quantity": 1}]
+
+
+def _first(payload: JsonObject, key: str) -> JsonObject:
+    """The first element of a list-valued payload key, as a map, or {}.
+
+    Stands in for `(payload.get(key) or [{}])[0]`, which cannot be typed: the
+    value is `object` until something narrows it.
+    """
+    rows = as_list(payload.get(key))
+    return as_object(rows[0]) if rows else {}
 
 
 UCP_JOURNEY: tuple[JourneyStep, ...] = (
@@ -127,8 +144,8 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         detail="find a product to buy",
         args=lambda ctx: {"query": ctx.get("query", ""), "limit": 5},
         capture=lambda payload, ctx: ctx.update(
-            product_id=(payload.get("products") or [{}])[0].get("id", ""),
-            product_title=(payload.get("products") or [{}])[0].get("title", ""),
+            product_id=str(_first(payload, "products").get("id", "")),
+            product_title=str(_first(payload, "products").get("title", "")),
         ),
     ),
     JourneyStep(
@@ -143,7 +160,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         tool="shopware-ucp-cart-create",
         detail="open a cart with that product",
         args=lambda ctx: {"payload": json.dumps({"line_items": _line_items(ctx)}), "dryRun": False},
-        capture=lambda payload, ctx: ctx.update(cart_id=payload.get("id", "")),
+        capture=lambda payload, ctx: ctx.update(cart_id=str(payload.get("id", ""))),
         needs=("product_id",),
         commits=True,
     ),
@@ -183,7 +200,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         # items directly and has no cart reference at all, which is worth pinning
         # because it is the opposite of what the tool names suggest.
         args=lambda ctx: {"payload": json.dumps({"line_items": _line_items(ctx)}), "dryRun": False},
-        capture=lambda payload, ctx: ctx.update(checkout_id=payload.get("id", "")),
+        capture=lambda payload, ctx: ctx.update(checkout_id=str(payload.get("id", ""))),
         needs=("product_id",),
         commits=True,
     ),
@@ -214,7 +231,9 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         tool="shopware-ucp-checkout-complete",
         detail="place the order",
         args=lambda ctx: {"id": ctx["checkout_id"], "dryRun": False},
-        capture=lambda payload, ctx: ctx.update(order_id=payload.get("order", {}).get("id") or payload.get("id", "")),
+        capture=lambda payload, ctx: ctx.update(
+            order_id=str(as_object(payload.get("order")).get("id") or payload.get("id", ""))
+        ),
         needs=("checkout_id",),
         commits=True,
     ),
@@ -234,20 +253,20 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
 )
 
 
-def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: dict) -> tuple[float, str, dict]:
+def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: Context) -> tuple[float, str, JsonObject]:
     """Run one step. Returns (elapsed, error, payload)."""
     started = time.monotonic()
     response = mcp_call(session, step.tool, step.args(ctx), endpoint=endpoint)
     elapsed = time.monotonic() - started
     text = mcp_result_text(response)
-    error = response.get("error", {}).get("message", "") or inband_error(text) or ""
+    error = (response.get("error") or {}).get("message", "") or inband_error(text) or ""
     if error:
         return elapsed, error, {}
     try:
-        payload = json.loads(text).get("data", {})
+        payload = as_object(cast(object, json.loads(text))).get("data")
     except (ValueError, TypeError):
         return elapsed, "response was not readable JSON", {}
-    return elapsed, "", payload if isinstance(payload, dict) else {}
+    return elapsed, "", as_object(payload)
 
 
 def run_ucp_journey(
@@ -256,7 +275,7 @@ def run_ucp_journey(
     endpoint: Endpoint,
     allow_mutations: bool = False,
     query: str = "",
-) -> dict:
+) -> Context:
     """Walk the buyer journey. Returns the context gathered along the way.
 
     Every step commits, so the whole journey is gated on `allow_mutations`. It is
@@ -273,7 +292,7 @@ def run_ucp_journey(
             )
         return {}
 
-    ctx: dict = {"query": query}
+    ctx: Context = {"query": query}
     if code := os.environ.get(PROMO_CODE_ENV, ""):
         ctx["promo_code"] = code
 
