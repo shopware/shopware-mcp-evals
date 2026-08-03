@@ -60,7 +60,15 @@
     "toolclass.py",
     "ucp.py",
     "toollint.py",
-    "tests"
+    "tests",
+    "scripts"
+  ],
+  // scripts/ is not importable as a package — the files there are run directly —
+  // so a test that imports one needs the directory on the resolution path. The
+  // runtime side is a sys.path insert in the test itself; this is the same fact
+  // stated for the type checker.
+  "extraPaths": [
+    "scripts"
   ],
   "exclude": [
     "**/__pycache__",
