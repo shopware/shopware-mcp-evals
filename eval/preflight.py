@@ -100,8 +100,10 @@ DIAGNOSES = (
 )
 
 
-def diagnose(error: str) -> str:
-    """Map a failure to its cause. Pure, so the table is testable without a server."""
+def diagnose(error: str | None) -> str:
+    """Map a failure to its cause. Pure, so the table is testable without a server.
+
+    `None` reaches here from the callers' `mcp_call_error(...) or ...` chains."""
     lowered = (error or "").lower()
     for marker, advice in DIAGNOSES:
         if marker in lowered:

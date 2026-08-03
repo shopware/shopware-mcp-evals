@@ -2,25 +2,47 @@
 
 import json
 import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from eval import compare_runs as C
+from eval.result_schema import FixtureResult, JsonObject, MetaCall, Report
+
+# (id, passed, expected_tool, skipped) — one row of a fake run.
+type Row = tuple[str, bool, str, bool]
 
 
-def report(model, results, errors=()):
+def report(model: str, results: Sequence[Row], errors: Sequence[str] = ()) -> Report:
     """results: list of (id, passed, expected_tool, skipped); errors: list of ids that errored"""
-    errors = set(errors)
-    records = []
+    errored = set(errors)
+    records: list[FixtureResult] = []
     for i, p, t, s in results:
-        rec = {"id": i, "passed": p, "expected_tool": t, "skipped": s}
-        if i in errors:
+        rec: JsonObject = {"id": i, "passed": p, "expected_tool": t, "skipped": s}
+        if i in errored:
             rec["error"] = "500 Server Error: Internal Server Error"
-        records.append(rec)
-    return {"model": model, "modes": {"discovery": {"results": records}}}
+        records.append(cast(FixtureResult, cast(object, rec)))
+    built: JsonObject = {"model": model, "modes": {"discovery": {"results": records}}}
+    return cast(Report, cast(object, built))
 
 
-def test_splits_fixtures_four_ways():
+def records_of(report_: Report) -> list[FixtureResult]:
+    """The discovery results a fake report carries."""
+    return report_["modes"]["discovery"]["results"]
+
+
+def amend(record: FixtureResult, **fields: object) -> None:
+    """Add fields to a fake result that the four-tuple rows do not cover.
+
+    `record |= {...}` and `record.update({...})` both fail here: pyright wants a
+    synthesized `Partial[FixtureResult]`, which a plain dict literal is not.
+    """
+    record.update(cast(FixtureResult, cast(object, fields)))
+
+
+def test_splits_fixtures_four_ways() -> None:
     a = report(
         "strong",
         [("f1", True, "t1", False), ("f2", True, "t1", False), ("f3", False, "t2", False), ("f4", False, "t2", False)],
@@ -38,7 +60,7 @@ def test_splits_fixtures_four_ways():
     assert c["both_fail"] == ["f4"]
 
 
-def test_skipped_fixtures_are_excluded_from_rates():
+def test_skipped_fixtures_are_excluded_from_rates() -> None:
     """Skipped fixtures never gate, so they must not dilute either rate."""
     a = report("strong", [("f1", True, "t1", False), ("f2", False, "t1", True)])
     b = report("weak", [("f1", True, "t1", False), ("f2", False, "t1", True)])
@@ -50,7 +72,7 @@ def test_skipped_fixtures_are_excluded_from_rates():
     assert c["shared"] == 1
 
 
-def test_errored_fixtures_are_not_counted_as_failures():
+def test_errored_fixtures_are_not_counted_as_failures() -> None:
     """The regression this guards: 18 server 500s once read as a 53% model score.
 
     Every fixture but one errors; the model got one right out of one that ran,
@@ -71,7 +93,7 @@ def test_errored_fixtures_are_not_counted_as_failures():
     assert c["both_fail"] == []
 
 
-def test_errored_fixtures_are_excluded_from_the_shared_comparison():
+def test_errored_fixtures_are_excluded_from_the_shared_comparison() -> None:
     """A fixture that errored for one model cannot be attributed to either."""
     a = report("strong", [("f1", True, "t1", False), ("f2", False, "t1", False)], errors=["f2"])
     b = report("weak", [("f1", True, "t1", False), ("f2", False, "t1", False)])
@@ -85,7 +107,7 @@ def test_errored_fixtures_are_excluded_from_the_shared_comparison():
     assert c["unmatched"] == []
 
 
-def test_render_warns_when_fixtures_errored():
+def test_render_warns_when_fixtures_errored() -> None:
     a = report("strong", [("f1", True, "t1", False), ("f2", False, "t1", False)], errors=["f2"])
     out = C.render(C.compare(a, a), 0.9)
 
@@ -93,7 +115,7 @@ def test_render_warns_when_fixtures_errored():
     assert "Errored" in out
 
 
-def test_both_fail_is_grouped_by_tool():
+def test_both_fail_is_grouped_by_tool() -> None:
     a = report("strong", [("f1", False, "t1", False), ("f2", False, "t1", False), ("f3", False, "t2", False)])
     b = report("weak", [("f1", False, "t1", False), ("f2", False, "t1", False), ("f3", False, "t2", False)])
 
@@ -102,7 +124,7 @@ def test_both_fail_is_grouped_by_tool():
     assert c["both_fail_by_tool"] == {"t1": ["f1", "f2"], "t2": ["f3"]}
 
 
-def test_unmatched_fixtures_are_flagged():
+def test_unmatched_fixtures_are_flagged() -> None:
     """Different fixture sets between runs make the comparison meaningless."""
     a = report("strong", [("f1", True, "t1", False), ("only_in_a", True, "t1", False)])
     b = report("weak", [("f1", True, "t1", False), ("only_in_b", True, "t1", False)])
@@ -113,15 +135,16 @@ def test_unmatched_fixtures_are_flagged():
     assert c["shared"] == 1
 
 
-def test_missing_discovery_mode_yields_empty_index():
+def test_missing_discovery_mode_yields_empty_index() -> None:
     """A report without a discovery mode compares to nothing rather than crashing,
     e.g. one written by a run that died during setup."""
-    assert C.discovery_index({"modes": {}}) == {}
-    assert C.discovery_index({"modes": {"other": {"results": [{"id": "f1", "passed": True}]}}}) == {}
+    assert C.discovery_index(cast(Report, cast(object, {"modes": {}}))) == {}
+    other = {"modes": {"other": {"results": [{"id": "f1", "passed": True}]}}}
+    assert C.discovery_index(cast(Report, cast(object, other))) == {}
     assert C.pass_rate({}) == (0, 0, 0.0)
 
 
-def test_render_lists_worst_tool_first():
+def test_render_lists_worst_tool_first() -> None:
     a = report("strong", [("f1", False, "lonely", False), ("f2", False, "busy", False), ("f3", False, "busy", False)])
     out = C.render(C.compare(a, a), 0.9)
 
@@ -139,7 +162,15 @@ def test_render_lists_worst_tool_first():
         ("both", True, False, 1),  # this is the "both clear their threshold" mode
     ],
 )
-def test_gate_modes(tmp_path, monkeypatch, capsys, gate, strong_pass, weak_pass, expected):
+def test_gate_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    gate: str,
+    strong_pass: bool,
+    weak_pass: bool,
+    expected: int,
+) -> None:
     a = tmp_path / "a.json"
     b = tmp_path / "b.json"
     a.write_text(json.dumps(report("strong", [("f1", strong_pass, "t1", False)])))
@@ -152,11 +183,11 @@ def test_gate_modes(tmp_path, monkeypatch, capsys, gate, strong_pass, weak_pass,
     capsys.readouterr()
 
 
-def _two_reports(tmp_path, strong_rate: float, weak_rate: float):
+def _two_reports(tmp_path: Path, strong_rate: float, weak_rate: float) -> tuple[Path, Path]:
     """Reports whose pass rates are `rate`, built from 20 fixtures so a threshold
     of 0.85 and one of 0.9 can be told apart."""
 
-    def rows(rate):
+    def rows(rate: float) -> list[Row]:
         passes = round(rate * 20)
         return [(f"f{i}", i < passes, "t1", False) for i in range(20)]
 
@@ -166,7 +197,9 @@ def _two_reports(tmp_path, strong_rate: float, weak_rate: float):
     return a, b
 
 
-def test_the_second_validator_gets_its_own_lower_threshold(tmp_path, monkeypatch, capsys):
+def test_the_second_validator_gets_its_own_lower_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """The weak model flapped at a shared 90%, so it gates at 85%. 0.85 has to pass
     on the second while the same rate would fail on the primary."""
     a, b = _two_reports(tmp_path, strong_rate=0.9, weak_rate=0.85)
@@ -193,7 +226,9 @@ def test_the_second_validator_gets_its_own_lower_threshold(tmp_path, monkeypatch
     assert ">= 90%" in out and ">= 85%" in out, "each row is rendered against its own threshold"
 
 
-def test_the_primary_is_still_held_to_its_own_threshold(tmp_path, monkeypatch, capsys):
+def test_the_primary_is_still_held_to_its_own_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Slack for the second validator must not leak into the primary."""
     a, b = _two_reports(tmp_path, strong_rate=0.85, weak_rate=0.85)
 
@@ -218,7 +253,9 @@ def test_the_primary_is_still_held_to_its_own_threshold(tmp_path, monkeypatch, c
     capsys.readouterr()
 
 
-def test_the_second_threshold_defaults_to_the_primary_one(tmp_path, monkeypatch, capsys):
+def test_the_second_threshold_defaults_to_the_primary_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     a, b = _two_reports(tmp_path, strong_rate=0.9, weak_rate=0.85)
 
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
@@ -228,7 +265,9 @@ def test_the_second_threshold_defaults_to_the_primary_one(tmp_path, monkeypatch,
     capsys.readouterr()
 
 
-def test_step_summary_is_left_to_the_summary_renderer(tmp_path, monkeypatch, capsys):
+def test_step_summary_is_left_to_the_summary_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """This script must not touch GITHUB_STEP_SUMMARY any more.
 
     eval/summary.py renders the job summary once, from --output. Appending here
@@ -250,13 +289,13 @@ def test_step_summary_is_left_to_the_summary_renderer(tmp_path, monkeypatch, cap
     assert "Cross-model comparison" in capsys.readouterr().out
 
 
-def test_both_fail_detail_records_what_each_model_picked():
+def test_both_fail_detail_records_what_each_model_picked() -> None:
     """The confusion pair is the finding — naming only the expected tool says a
     description is wrong but not what it lost to."""
     a = report("strong", [("f1", False, "wanted", False)])
     b = report("weak", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
-    b["modes"]["discovery"]["results"][0] |= {"selected_tool": None, "fail_reason": "no_tool_call"}
+    amend(records_of(a)[0], selected_tool="sibling", fail_reason="wrong_tool")
+    amend(records_of(b)[0], selected_tool=None, fail_reason="no_tool_call")
 
     detail = C.compare(a, b)["both_fail_detail"]
 
@@ -275,58 +314,59 @@ def test_both_fail_detail_records_what_each_model_picked():
     assert {k: detail[0].get(k) for k in expected} == expected
 
 
-def test_both_fail_detail_carries_the_material_needed_to_rewrite_the_description():
+def test_both_fail_detail_carries_the_material_needed_to_rewrite_the_description() -> None:
     """The confusion pair names which two descriptions overlap; it does not show
     them. Fetching them by hand from the run artifact is the step that stopped
     anyone acting on these rows, so the prompt, both descriptions and the
     discovery trail travel with the finding."""
     a = report("strong", [("f1", False, "wanted", False)])
     b = report("weak", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {
-        "selected_tool": "sibling",
-        "fail_reason": "wrong_tool",
-        "prompt": "Read me the entity-definition skill.",
-        "expected_toolset": "dev-skills",
-        "meta_calls": [
-            {"tool": "shopware-toolsets-list", "input": {}},
-            {"tool": "shopware-toolset-enable", "input": {"toolset": "dev-skills"}},
+    amend(
+        records_of(a)[0],
+        selected_tool="sibling",
+        fail_reason="wrong_tool",
+        prompt="Read me the entity-definition skill.",
+        expected_toolset="dev-skills",
+        meta_calls=[
+            MetaCall(tool="shopware-toolsets-list", input={}),
+            MetaCall(tool="shopware-toolset-enable", input={"toolset": "dev-skills"}),
         ],
-    }
-    b["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+    )
+    amend(records_of(b)[0], selected_tool="sibling", fail_reason="wrong_tool")
 
     d = C.compare(a, b, {"wanted": "Reads one skill body.", "sibling": "Lists the skills."})["both_fail_detail"][0]
 
-    assert d["prompt"] == "Read me the entity-definition skill."
-    assert d["expected_toolset"] == "dev-skills"
-    assert d["descriptions"] == {"wanted": "Reads one skill body.", "sibling": "Lists the skills."}
-    assert d["primary_trail"] == "shopware-toolsets-list → shopware-toolset-enable(dev-skills)"
+    assert d.get("prompt") == "Read me the entity-definition skill."
+    assert d.get("expected_toolset") == "dev-skills"
+    assert d.get("descriptions") == {"wanted": "Reads one skill body.", "sibling": "Lists the skills."}
+    assert d.get("primary_trail") == "shopware-toolsets-list → shopware-toolset-enable(dev-skills)"
     # No meta calls on the second run: it never tried to discover anything, which
     # is a different failure from picking the wrong tool after discovering well.
-    assert d["second_trail"] == "went straight to a tool — no discovery calls"
+    assert d.get("second_trail") == "went straight to a tool — no discovery calls"
 
 
-def test_detail_omits_descriptions_when_no_catalogue_is_available():
+def test_detail_omits_descriptions_when_no_catalogue_is_available() -> None:
     """The snapshot is optional — a comparison run without it still renders."""
     a = report("strong", [("f1", False, "wanted", False)])
 
-    assert C.compare(a, a)["both_fail_detail"][0]["descriptions"] == {}
+    assert C.compare(a, a)["both_fail_detail"][0].get("descriptions") == {}
 
 
-def test_both_fail_detail_degrades_when_fields_are_absent():
+def test_both_fail_detail_degrades_when_fields_are_absent() -> None:
     """Older reports have no selected_tool/fail_reason; that must not raise."""
     a = report("strong", [("f1", False, "t1", False)])
 
     detail = C.compare(a, a)["both_fail_detail"]
 
-    assert detail[0]["primary_selected"] is None
-    assert detail[0]["primary_reason"] is None
+    assert detail[0].get("primary_selected") is None
+    assert detail[0].get("primary_reason") is None
 
 
-def test_actionable_table_shows_both_picks_and_hides_wrong_tool():
+def test_actionable_table_shows_both_picks_and_hides_wrong_tool() -> None:
     a = report("strong", [("f1", False, "wanted", False)])
     b = report("weak", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling_a", "fail_reason": "wrong_tool"}
-    b["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling_b", "fail_reason": "wrong_tool"}
+    amend(records_of(a)[0], selected_tool="sibling_a", fail_reason="wrong_tool")
+    amend(records_of(b)[0], selected_tool="sibling_b", fail_reason="wrong_tool")
 
     out = C.render_actionable(C.compare(a, b), "strong", "weak")
 
@@ -336,19 +376,20 @@ def test_actionable_table_shows_both_picks_and_hides_wrong_tool():
     assert "wrong_tool" not in out
 
 
-def test_detail_block_renders_the_prompt_both_descriptions_and_the_trail():
+def test_detail_block_renders_the_prompt_both_descriptions_and_the_trail() -> None:
     """The table names the confusion pair; this block is what you rewrite
     against, so it must carry the prompt and both descriptions in full."""
     a = report("strong", [("f1", False, "wanted", False)])
     b = report("weak", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {
-        "selected_tool": "sibling",
-        "fail_reason": "wrong_tool",
-        "prompt": "Read me the entity-definition skill.",
-        "category": "unambiguous",
-        "meta_calls": [{"tool": "shopware-toolset-enable", "input": {"toolset": "dev-skills"}}],
-    }
-    b["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+    amend(
+        records_of(a)[0],
+        selected_tool="sibling",
+        fail_reason="wrong_tool",
+        prompt="Read me the entity-definition skill.",
+        category="unambiguous",
+        meta_calls=[MetaCall(tool="shopware-toolset-enable", input={"toolset": "dev-skills"})],
+    )
+    amend(records_of(b)[0], selected_tool="sibling", fail_reason="wrong_tool")
     catalogue = {"wanted": "Reads one skill body by name.", "sibling": "Lists every available skill."}
 
     out = C.render_detail(C.compare(a, b, catalogue), "strong", "weak")
@@ -362,37 +403,37 @@ def test_detail_block_renders_the_prompt_both_descriptions_and_the_trail():
     assert out.startswith("<details>") and "</details>" in out
 
 
-def test_detail_block_does_not_repeat_a_description_both_models_picked():
+def test_detail_block_does_not_repeat_a_description_both_models_picked() -> None:
     """Both models usually reach for the same wrong tool; printing its
     description twice doubles the block for no gain."""
     a = report("strong", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+    amend(records_of(a)[0], selected_tool="sibling", fail_reason="wrong_tool")
 
     out = C.render_detail(C.compare(a, a, {"wanted": "W.", "sibling": "Overlapping text."}))
 
     assert out.count("Overlapping text.") == 1
 
 
-def test_detail_block_is_empty_when_nothing_both_failed():
+def test_detail_block_is_empty_when_nothing_both_failed() -> None:
     a = report("strong", [("f1", True, "wanted", False)])
 
     assert C.render_detail(C.compare(a, a)) == ""
 
 
-def test_detail_block_says_so_when_a_description_is_missing_from_the_snapshot():
+def test_detail_block_says_so_when_a_description_is_missing_from_the_snapshot() -> None:
     """A tool added since the snapshot, or a snapshot that never got written —
     better to name the gap than to render a blank quote."""
     a = report("strong", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {"selected_tool": "sibling", "fail_reason": "wrong_tool"}
+    amend(records_of(a)[0], selected_tool="sibling", fail_reason="wrong_tool")
 
     out = C.render_detail(C.compare(a, a, {}))
 
     assert "description not in the catalogue snapshot" in out
 
 
-def test_actionable_table_keeps_reasons_the_columns_cannot_show():
+def test_actionable_table_keeps_reasons_the_columns_cannot_show() -> None:
     a = report("strong", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {"selected_tool": None, "fail_reason": "step_cap"}
+    amend(records_of(a)[0], selected_tool=None, fail_reason="step_cap")
 
     out = C.render_actionable(C.compare(a, a))
 
@@ -400,12 +441,12 @@ def test_actionable_table_keeps_reasons_the_columns_cannot_show():
     assert "(none)" in out
 
 
-def test_actionable_table_says_so_when_nothing_failed_twice():
+def test_actionable_table_says_so_when_nothing_failed_twice() -> None:
     a = report("strong", [("f1", True, "t1", False)])
     assert "No fixture failed for both models." in C.render_actionable(C.compare(a, a))
 
 
-def test_actionable_table_lists_one_row_per_fixture():
+def test_actionable_table_lists_one_row_per_fixture() -> None:
     a = report("strong", [("f1", False, "busy", False), ("f2", False, "busy", False), ("f3", False, "lonely", False)])
 
     out = C.render_actionable(C.compare(a, a))
@@ -415,7 +456,7 @@ def test_actionable_table_lists_one_row_per_fixture():
     assert out.index("`busy`") < out.index("`lonely`")
 
 
-def test_actionable_table_puts_core_failures_above_plugin_failures():
+def test_actionable_table_puts_core_failures_above_plugin_failures() -> None:
     """Owner decides urgency: a core description problem outranks a plugin one
     however many prompts the plugin lost."""
     a = report(
@@ -432,7 +473,7 @@ def test_actionable_table_puts_core_failures_above_plugin_failures():
     assert out.index("shopware-entity-read") < out.index("merchant-order-summary")
 
 
-def test_actionable_table_names_the_owning_repository():
+def test_actionable_table_names_the_owning_repository() -> None:
     a = report("strong", [("f1", False, "swag-dev-tools-load-skill", False)])
 
     out = C.render_actionable(C.compare(a, a))
@@ -440,7 +481,9 @@ def test_actionable_table_names_the_owning_repository():
     assert "| dev-tools |" in out
 
 
-def test_unreadable_report_exits_two(tmp_path, monkeypatch, capsys):
+def test_unreadable_report_exits_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr(sys, "argv", ["compare_runs.py", str(tmp_path / "nope.json"), str(tmp_path / "nope2.json")])
     assert C.main() == 2
     capsys.readouterr()
@@ -449,14 +492,14 @@ def test_unreadable_report_exits_two(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 # Catalogue loading and the remaining render edges
 # ---------------------------------------------------------------------------
-def test_catalogue_maps_tool_name_to_description(tmp_path):
+def test_catalogue_maps_tool_name_to_description(tmp_path: Path) -> None:
     snap = tmp_path / "snap.json"
     snap.write_text(json.dumps({"tools": [{"name": "a", "description": "A does things."}]}))
 
     assert C.load_catalogue(str(snap)) == {"a": "A does things."}
 
 
-def test_catalogue_normalises_a_null_description_to_empty():
+def test_catalogue_normalises_a_null_description_to_empty() -> None:
     """App tools from a manifest carry none; None would render as the word None."""
     import pathlib
     import tempfile
@@ -468,31 +511,34 @@ def test_catalogue_normalises_a_null_description_to_empty():
         assert C.load_catalogue(str(p)) == {"a": ""}
 
 
-def test_catalogue_is_optional(capsys):
+def test_catalogue_is_optional() -> None:
     assert C.load_catalogue(None) == {}
 
 
-def test_an_unreadable_catalogue_warns_but_does_not_fail_the_comparison(capsys, tmp_path):
+def test_an_unreadable_catalogue_warns_but_does_not_fail_the_comparison(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
     """The snapshot is a convenience; losing it must not lose the findings."""
     assert C.load_catalogue(str(tmp_path / "absent.json")) == {}
     assert "::warning::Could not read tool catalogue" in capsys.readouterr().err
 
 
-def test_note_distinguishes_the_two_models_when_only_one_stalled():
+def test_note_distinguishes_the_two_models_when_only_one_stalled() -> None:
     assert C._note("step_cap", "wrong_tool") == "primary: step_cap"
     assert C._note("wrong_tool", "no_tool_call") == "second: no_tool_call"
     assert C._note("step_cap", "no_tool_call") == "primary: step_cap, second: no_tool_call"
 
 
-def test_detail_block_reports_the_category_and_toolset_when_known():
+def test_detail_block_reports_the_category_and_toolset_when_known() -> None:
     a = report("strong", [("f1", False, "wanted", False)])
-    a["modes"]["discovery"]["results"][0] |= {
-        "selected_tool": "sibling",
-        "fail_reason": "wrong_tool",
-        "category": "disambiguation",
-        "expected_toolset": "dev-skills",
-        "notes": "the index vs one body",
-    }
+    amend(
+        records_of(a)[0],
+        selected_tool="sibling",
+        fail_reason="wrong_tool",
+        category="disambiguation",
+        expected_toolset="dev-skills",
+        notes="the index vs one body",
+    )
 
     out = C.render_detail(C.compare(a, a, {"wanted": "W", "sibling": "S"}))
 
@@ -501,7 +547,7 @@ def test_detail_block_reports_the_category_and_toolset_when_known():
     assert "Fixture note: the index vs one body" in out
 
 
-def test_unmatched_fixtures_warn_that_the_runs_are_not_comparable():
+def test_unmatched_fixtures_warn_that_the_runs_are_not_comparable() -> None:
     a = report("strong", [("f1", True, "t", False)])
     b = report("weak", [("f2", True, "t", False)])
 
@@ -511,7 +557,7 @@ def test_unmatched_fixtures_warn_that_the_runs_are_not_comparable():
     assert "not comparable" in out
 
 
-def test_no_warning_when_both_runs_graded_the_same_set():
+def test_no_warning_when_both_runs_graded_the_same_set() -> None:
     a = report("strong", [("f1", True, "t", False)])
 
     assert C.render_unmatched(C.compare(a, a)) == ""

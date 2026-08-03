@@ -5,20 +5,29 @@ These cover the ordering/limits contract only — no LLM or MCP calls.
 
 import threading
 import time
+from typing import cast
 
 from eval import runner as E
-
-FIXTURES = [{"id": f"f{i}", "expected_tool": "t", "prompt": "p", "category": "c"} for i in range(12)]
-
-
-def _worker(fixture):
-    return {"id": fixture["id"], "mode": "baseline", "passed": True, "_line": fixture["id"]}
+from eval.result_schema import Fixture, FixtureResult, JsonObject
 
 
-def test_results_keep_fixture_order_not_completion_order():
+def fx(fid: str) -> Fixture:
+    base: JsonObject = {"id": fid, "expected_tool": "t", "prompt": "p", "category": "c"}
+    return cast(Fixture, cast(object, base))
+
+
+FIXTURES = [fx(f"f{i}") for i in range(12)]
+
+
+def _worker(fixture: Fixture) -> FixtureResult:
+    base: JsonObject = {"id": fixture["id"], "mode": "baseline", "passed": True, "_line": fixture["id"]}
+    return cast(FixtureResult, cast(object, base))
+
+
+def test_results_keep_fixture_order_not_completion_order() -> None:
     """Fast fixtures finish first, but the report must stay in fixture order."""
 
-    def worker(fixture):
+    def worker(fixture: Fixture) -> FixtureResult:
         # Reverse the natural completion order: later fixtures finish sooner.
         time.sleep((len(FIXTURES) - int(fixture["id"][1:])) * 0.002)
         return _worker(fixture)
@@ -27,7 +36,7 @@ def test_results_keep_fixture_order_not_completion_order():
     assert [r["id"] for r in results] == [f["id"] for f in FIXTURES]
 
 
-def test_sequential_path_matches_parallel_path():
+def test_sequential_path_matches_parallel_path() -> None:
     seq = E.run_fixtures_concurrently(FIXTURES, _worker, workers=1)
     par = E.run_fixtures_concurrently(FIXTURES, _worker, workers=8)
     assert [r["id"] for r in seq] == [r["id"] for r in par]
@@ -39,7 +48,7 @@ def test_concurrency_limit_is_respected():
     peak = 0
     lock = threading.Lock()
 
-    def worker(fixture):
+    def worker(fixture: Fixture) -> FixtureResult:
         nonlocal active, peak
         with lock:
             active += 1
@@ -53,49 +62,49 @@ def test_concurrency_limit_is_respected():
     assert peak <= 3
 
 
-def test_every_fixture_produces_a_result():
+def test_every_fixture_produces_a_result() -> None:
     results = E.run_fixtures_concurrently(FIXTURES, _worker, workers=5)
     assert len(results) == len(FIXTURES)
     assert all(r is not None for r in results)
 
 
 # --- error/skip record shape -------------------------------------------------
-def test_error_result_shape_baseline():
+def test_error_result_shape_baseline() -> None:
     rec = E.error_result(FIXTURES[0], "baseline", RuntimeError("boom"))
     assert rec["passed"] is False
-    assert rec["error"] == "boom"
+    assert rec.get("error") == "boom"
     assert "steps" not in rec  # discovery-only fields stay out of baseline records
 
 
-def test_error_result_shape_discovery():
+def test_error_result_shape_discovery() -> None:
     rec = E.error_result(FIXTURES[0], "discovery", RuntimeError("boom"))
-    assert rec["steps"] == 0
-    assert rec["discovery_path"] == "none"
-    assert rec["meta_calls"] == []
+    assert rec.get("steps") == 0
+    assert rec.get("discovery_path") == "none"
+    assert rec.get("meta_calls") == []
 
 
-def test_count_rate_limited_recognises_throttle_shapes():
+def test_count_rate_limited_recognises_throttle_shapes() -> None:
     results = [
-        {"error": "429 Too Many Requests"},
-        {"error": "RateLimitError: rate limit exceeded"},
-        {"error": "quota exhausted for this model"},
-        {"error": "connection reset by peer"},  # not throttling
-        {"passed": True},  # no error at all
+        _err("429 Too Many Requests"),
+        _err("RateLimitError: rate limit exceeded"),
+        _err("quota exhausted for this model"),
+        _err("connection reset by peer"),  # not throttling
+        cast(FixtureResult, cast(object, {"passed": True})),  # no error at all
     ]
     assert E.count_rate_limited(results) == 3
 
 
-def test_count_rate_limited_catches_github_models_403():
+def test_count_rate_limited_catches_github_models_403() -> None:
     """GitHub Models throttles with 403 + an anti-scraping notice, not 429 — and
     half the fixtures surface only as a bare 'Error code: 403'."""
     results = [
-        {"error": "Error code: 403"},
-        {"error": "Too many requests. For more on scraping GitHub ... terms-of-service"},
+        _err("Error code: 403"),
+        _err("Too many requests. For more on scraping GitHub ... terms-of-service"),
     ]
     assert E.count_rate_limited(results) == 2
 
 
-def test_count_rate_limited_handles_none_and_empty():
+def test_count_rate_limited_handles_none_and_empty() -> None:
     assert E.count_rate_limited(None) == 0
     assert E.count_rate_limited([]) == 0
 
@@ -105,7 +114,7 @@ def test_count_rate_limited_handles_none_and_empty():
 # to tests/test_eval_summary_row.py.
 
 
-def test_github_provider_defaults_to_a_non_openai_publisher():
+def test_github_provider_defaults_to_a_non_openai_publisher() -> None:
     """The second validator's value is being an independent implementation, so
     its default must not be another OpenAI model."""
     model = E.PROVIDER_DEFAULTS["github"]
@@ -114,17 +123,18 @@ def test_github_provider_defaults_to_a_non_openai_publisher():
     assert E.GITHUB_MODELS_BASE_URL.startswith("https://")
 
 
-def test_every_provider_choice_has_a_default_model():
+def test_every_provider_choice_has_a_default_model() -> None:
     """The invariant, not a hardcoded list: argparse accepts a provider, then
     resolve_model indexes PROVIDER_DEFAULTS by it. A choice with no entry is a
     KeyError after the run has already started — which is exactly how `lmstudio`
     first failed, having been added to the choices and not to the defaults."""
     choices = next(a.choices for a in E.build_parser()._actions if a.dest == "provider")
 
+    assert choices is not None
     assert set(choices) == set(E.PROVIDER_DEFAULTS)
 
 
-def test_every_default_model_is_priced():
+def test_every_default_model_is_priced() -> None:
     """An unpriced model reports "unpriced" rather than a cost, which quietly
     turns the job total into an estimate. Free is a price; unknown is not."""
     from eval.cost import load_pricing, prices_for
@@ -135,10 +145,10 @@ def test_every_default_model_is_priced():
     assert not unpriced, f"no pricing.yaml entry for {unpriced}"
 
 
-def test_render_line_marks_pass_fail_skip():
-    passed = {"id": "a", "mode": "baseline", "passed": True, "selected_tool": "x", "latency_s": 1}
-    failed = {"id": "b", "mode": "baseline", "passed": False, "selected_tool": None, "latency_s": 1}
-    skipped = {"id": "c", "mode": "baseline", "skipped": True, "expected_tool": "x"}
+def test_render_line_marks_pass_fail_skip() -> None:
+    passed = _line("a", passed=True, selected_tool="x", latency_s=1)
+    failed = _line("b", passed=False, selected_tool=None, latency_s=1)
+    skipped = _line("c", skipped=True, expected_tool="x")
     assert "PASS" in E.render_line(passed)
     assert "FAIL" in E.render_line(failed)
     assert "SKIP" in E.render_line(skipped)
@@ -149,14 +159,24 @@ def test_render_line_marks_pass_fail_skip():
 # ---------------------------------------------------------------------------
 
 
-def _r(fid, passed, *, skipped=False, error=None):
-    rec = {"id": fid, "passed": passed, "skipped": skipped, "expected_tool": "t", "category": "c"}
+def _line(fid: str, **fields: object) -> FixtureResult:
+    """A record with just the fields render_line reads."""
+    return cast(FixtureResult, cast(object, {"id": fid, "mode": "baseline", **fields}))
+
+
+def _err(error: str) -> FixtureResult:
+    """A fixture that errored, for the throttle detector."""
+    return cast(FixtureResult, cast(object, {"error": error}))
+
+
+def _r(fid: str, passed: bool, *, skipped: bool = False, error: str | None = None) -> FixtureResult:
+    rec: JsonObject = {"id": fid, "passed": passed, "skipped": skipped, "expected_tool": "t", "category": "c"}
     if error:
         rec["error"] = error
-    return rec
+    return cast(FixtureResult, cast(object, rec))
 
 
-def test_executed_excludes_errored_and_skipped_fixtures():
+def test_executed_excludes_errored_and_skipped_fixtures() -> None:
     results = [
         _r("ok", True),
         _r("wrong", False),
@@ -169,7 +189,7 @@ def test_executed_excludes_errored_and_skipped_fixtures():
     assert [r["id"] for r in E.executed(results)] == ["ok", "wrong"]
 
 
-def test_executed_rate_matches_the_real_regression():
+def test_executed_rate_matches_the_real_regression() -> None:
     """The 45-fixture run that read as 53% was 89% over fixtures that ran.
 
     24 passed, 3 genuinely wrong, 18 errored. Averaging the errors in gives

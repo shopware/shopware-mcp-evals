@@ -18,7 +18,7 @@ Bump `SCHEMA_VERSION` when a key's meaning changes or a consumed key is removed,
 not for a purely additive field a reader already tolerates via `.get`.
 """
 
-from typing import Required, TypedDict, cast
+from typing import NotRequired, Required, TypedDict, cast
 
 # 1 is the first version to carry the field at all; rows written before it have
 # no `schema_version` key, so a reader treats its absence as version 0.
@@ -150,6 +150,8 @@ class MetaCall(TypedDict, total=False):
 
     tool: Required[str]
     input: Required[JsonObject]
+    # Absent on a report written before the trail was recorded, and on the hand
+    # built meta-calls the comparison tests use.
     result_preview: str
 
 
@@ -168,16 +170,16 @@ class TierBucket(TypedDict, total=False):
     failed_ids: list[str]
 
 
-class CostBlock(TypedDict, total=False):
+class CostBlock(TypedDict):
     """What a run cost, priced by pricing.yaml.
 
     `priced` false means the model is absent from pricing.yaml, which renders as
     "unpriced" rather than $0.00 — free and unknown are different claims.
     """
 
-    model: Required[str]
-    priced: Required[bool]
-    tokens: Required[TokenCounts]
+    model: str
+    priced: bool
+    tokens: TokenCounts
     total_usd: float | None
     unverified: bool
     verified: str
@@ -195,7 +197,7 @@ class CostBlock(TypedDict, total=False):
     surface_tokens_peak: float | None
 
 
-class SummaryRow(TypedDict, total=False):
+class SummaryRow(TypedDict):
     """One eval run's verdict — `results/rows/*.json`, written by
     --summary-row and read by eval/summary.py.
 
@@ -204,12 +206,12 @@ class SummaryRow(TypedDict, total=False):
     so each emits a row and the report job renders them together.
     """
 
-    suite: Required[str]
-    provider: Required[str]
-    model: Required[str]
-    rate: Required[float]
-    graded: Required[int]
-    gate: Required[str]
+    suite: str
+    provider: str
+    model: str
+    rate: float
+    graded: int
+    gate: str
     errored: int
     throttled: int
     advisory: bool
@@ -419,12 +421,25 @@ class GateVerdict(TypedDict):
     ok: bool
 
 
-class DiscoverySummary(TypedDict, total=False):
+class RecoverySummary(TypedDict, total=False):
+    """How often the model got it right first time, and how often it corrected
+    itself — the half of the discovery summary that a run where nothing was ever
+    attempted carries none of."""
+
+    first_try_rate: float
+    recovery_rate: float | None
+    recovered: int
+    avg_wrong_calls: float
+    avg_steps_to_correct: float | None
+    dry_run_forced: int
+    unexecuted: int
+
+
+class DiscoverySummary(RecoverySummary):
     """The aggregate block a report carries under `discovery_summary`.
 
-    Every key NotRequired because recovery_summary's fields are merged in and it
-    returns nothing at all when no fixture carries the recovery fields — reports
-    written before that existed are still read by compare_runs.
+    Everything declared here is computed on every run; the inherited recovery
+    half is not, which is why it lives in its own base.
     """
 
     fixtures: int
@@ -440,14 +455,6 @@ class DiscoverySummary(TypedDict, total=False):
     toolset_enable_graded: int
     toolset_enable_correct: int
     tokens: TokenCounts
-    # From recovery_summary.
-    first_try_rate: float
-    recovery_rate: float | None
-    recovered: int
-    avg_wrong_calls: float
-    avg_steps_to_correct: float | None
-    dry_run_forced: int
-    unexecuted: int
 
 
 class ContentBlock(TypedDict, total=False):
@@ -537,10 +544,10 @@ class PromptInventory(TypedDict, total=False):
 
     names: Required[list[str]]
     chars: Required[dict[str, int]]
+    total_chars: Required[int]
     instructions_chars: int
     available: list[str]
     excluded: list[str]
-    total_chars: int
     sha256: str
     # Which --context-prompts set produced this, and whether the arm withheld the
     # prompt entirely. `disabled` is not "no names": the store endpoint serves
@@ -592,7 +599,10 @@ class Pricing(TypedDict, total=False):
 
     verified: str
     models: dict[str, ModelPrice]
-    ci_usd_per_minute: float
+    # `ci.runner_usd_per_minute` — what cost.ci_cost_usd actually reads, and what
+    # pricing.yaml actually carries. This used to declare a flat
+    # `ci_usd_per_minute` that nothing wrote and nothing read.
+    ci: dict[str, float]
 
 
 class CombinedCost(TypedDict, total=False):
@@ -663,7 +673,7 @@ class Collision(TypedDict):
     mutual: bool
 
 
-class RunSide(TypedDict, total=False):
+class RunSide(TypedDict):
     """One model's half of the cross-model comparison."""
 
     model: str
@@ -673,7 +683,7 @@ class RunSide(TypedDict, total=False):
     errored: int
 
 
-class Comparison(TypedDict, total=False):
+class Comparison(TypedDict):
     """The cross-model split — `results/eval-comparison.json`.
 
     `both_fail` is the only actionable set: a fixture both models miss points at
@@ -691,7 +701,7 @@ class Comparison(TypedDict, total=False):
     both_fail_by_tool: dict[str, list[str]]
     both_fail_detail: list["BothFailDetail"]
     unmatched: list[str]
-    gate: JsonObject
+    gate: NotRequired[JsonObject]
 
 
 class PromptArm(TypedDict, total=False):

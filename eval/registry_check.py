@@ -56,7 +56,9 @@ def parse_tools(text: str) -> dict[str, str]:
     return tools
 
 
-def mutates(privileges: str) -> bool:
+def mutates(privileges: str | None) -> bool:
+    """`None` is a real registry value: a tool with no ACL at all, which is the
+    common case for a reader rather than a finding."""
     return any(verb in (privileges or "").lower() for verb in MUTATING_PRIVILEGES)
 
 

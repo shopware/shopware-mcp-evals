@@ -215,6 +215,17 @@ def compare(primary: Report, second: Report, catalogue: dict[str, str] | None = 
     )
 
 
+def _side_rate(cmp_: Comparison, side: str) -> float:
+    """One model's pass rate off a loaded comparison, or 0.0.
+
+    Defensive because the comparison may have been read back from JSON rather
+    than just built: `primary` is always written, but a truncated file is a
+    thing that happens and must not crash the gate.
+    """
+    loaded = cmp_.get("primary") if side == "primary" else cmp_.get("second")
+    return loaded.get("rate", 0.0) if loaded else 0.0
+
+
 def _verdict(rate: float, threshold: float) -> str:
     return "PASS" if rate >= threshold else "FAIL"
 
@@ -494,9 +505,9 @@ def main() -> int:
 
     if gate == "none":
         return 0
-    checks = [((cmp_.get("primary") or RunSide()).get("rate", 0.0), min_pass)]
+    checks = [(_side_rate(cmp_, "primary"), min_pass)]
     if gate == "both":
-        checks.append(((cmp_.get("second") or RunSide()).get("rate", 0.0), min_second))
+        checks.append((_side_rate(cmp_, "second"), min_second))
     return 0 if all(rate >= threshold for rate, threshold in checks) else 1
 
 

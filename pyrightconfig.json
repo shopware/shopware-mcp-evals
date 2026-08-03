@@ -36,12 +36,14 @@
 // pythonVersion: matches .python-version so stdlib and syntax are checked
 //   against the interpreter CI actually runs.
 //
-// scope: source for now; tests/ lands next, in its own commit. It is 850 more
-//   root annotations and two structural changes — typed factories for the fakes,
-//   and marking FixtureResult's always-present fields Required — which is a
-//   different review from this one. `exclude` AND `ignore` both name it until
-//   then: exclude keeps the CI run out, but an editor still checks any file you
-//   OPEN even when excluded, and `ignore` is what makes the two agree.
+// scope: everything, tests/ included. The test suite is where the shapes are
+//   asserted, so leaving it out meant the TypedDicts were only checked against
+//   the code that writes them and never against the code that reads them —
+//   which is half the point. Two things did most of that work: typed factories
+//   for the fakes (one per file, `fixture()`/`row()`/`result()`), and
+//   `tests/stubs.py`, because a lambda's parameters cannot be annotated and
+//   `monkeypatch.setattr(M, "mcp_call", lambda *a, **k: {...})` left both its
+//   arguments and its return value Unknown for everything downstream.
 {
   "typeCheckingMode": "recommended",
   "pythonVersion": "3.14",
@@ -57,15 +59,12 @@
     "ownership.py",
     "toolclass.py",
     "ucp.py",
-    "toollint.py"
+    "toollint.py",
+    "tests"
   ],
   "exclude": [
     "**/__pycache__",
     "**/node_modules",
-    ".venv",
-    "tests"
-  ],
-  "ignore": [
-    "tests"
+    ".venv"
   ]
 }

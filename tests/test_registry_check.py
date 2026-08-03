@@ -23,7 +23,7 @@ REAL_OUTPUT = """Tools (30)
 """
 
 
-def test_it_parses_the_real_table_and_ignores_the_rules_and_header():
+def test_it_parses_the_real_table_and_ignores_the_rules_and_header() -> None:
     tools = rc.parse_tools(REAL_OUTPUT)
 
     assert set(tools) == {
@@ -36,13 +36,13 @@ def test_it_parses_the_real_table_and_ignores_the_rules_and_header():
     assert tools["shopware-entity-schema"] == ""
 
 
-def test_the_real_table_is_clean():
+def test_the_real_table_is_clean() -> None:
     """These four are classified correctly today, so the check must stay quiet.
     A check that fires on correct input gets switched off."""
     assert rc.problems(rc.parse_tools(REAL_OUTPUT)) == []
 
 
-def test_a_read_only_tool_needing_write_privileges_is_caught():
+def test_a_read_only_tool_needing_write_privileges_is_caught() -> None:
     """The failure this exists for: it would be executed for real, no dryRun."""
     found = rc.problems({"shopware-entity-search": "<entity>:read, <entity>:update"})
 
@@ -50,32 +50,32 @@ def test_a_read_only_tool_needing_write_privileges_is_caught():
     assert "READ_ONLY" in found[0] and "no dryRun" in found[0]
 
 
-def test_an_unregistered_classification_is_not_this_check_s_business():
+def test_an_unregistered_classification_is_not_this_check_s_business() -> None:
     """toolclass may name tools this instance does not have (a plugin absent).
     That is not a safety problem and must not fail the build."""
     assert rc.problems({}) == []
 
 
-def test_a_tool_the_server_grew_is_flagged_as_unclassified():
+def test_a_tool_the_server_grew_is_flagged_as_unclassified() -> None:
     found = rc.problems({"shopware-brand-new-tool": "brand:delete"})
 
     assert len(found) == 1
     assert "unclassified" in found[0]
 
 
-def test_empty_privileges_never_read_as_mutating():
+def test_empty_privileges_never_read_as_mutating() -> None:
     """A read tool with no ACL at all is the common case, not a finding."""
     assert not rc.mutates("")
     assert not rc.mutates(None)
     assert not rc.mutates("order:read, product:read")
 
 
-def test_every_mutating_verb_is_detected():
+def test_every_mutating_verb_is_detected() -> None:
     for verb in rc.MUTATING_PRIVILEGES:
         assert rc.mutates(f"thing:{verb}"), verb
 
 
-def test_junk_input_parses_to_nothing_rather_than_exploding():
+def test_junk_input_parses_to_nothing_rather_than_exploding() -> None:
     """`debug:mcp` printing a help page or an error must be a visible zero — main()
     turns that into a failure — not a traceback or a silent pass."""
     assert rc.parse_tools("Command 'debug:mcp' is not defined.") == {}

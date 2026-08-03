@@ -18,6 +18,7 @@ from eval.result_schema import (
     FixtureResult,
     GateVerdict,
     PassCount,
+    RecoverySummary,
     Score,
     TokenCounts,
 )
@@ -123,7 +124,7 @@ def count_rate_limited(results: list[FixtureResult] | None) -> int:
     return sum(1 for r in results or [] if any(n in str(r.get("error", "")).lower() for n in needles))
 
 
-def recovery_summary(graded: list[FixtureResult]) -> DiscoverySummary:
+def recovery_summary(graded: list[FixtureResult]) -> RecoverySummary:
     """How often the model got there first time, and how often it corrected itself.
 
     A wrong first pick that the model recovers from is a different — and much
@@ -178,22 +179,35 @@ def discovery_summary(discovery: list[FixtureResult]) -> DiscoverySummary:
     ranks = sorted(rank for r in graded if (rank := r.get("search_rank")) is not None)
     toolset_graded = [r for r in graded if r.get("enabled_correct_toolset") is not None]
     toolset_correct = sum(1 for r in toolset_graded if r.get("enabled_correct_toolset"))
-    return {
-        "fixtures": n,
-        "skipped": sum(1 for r in discovery if r.get("skipped")),
-        "passed": passed,
-        "avg_steps": round(sum(steps) / n, 2) if n else 0,
-        "max_steps_hit": sum(1 for r in graded if r.get("fail_reason") == "step_cap"),
-        "path_distribution": paths,
-        "search_used": len(search_used),
-        "search_hit_rate": round(search_hits / len(search_used), 2) if search_used else None,
-        "search_rank_p50": ranks[len(ranks) // 2] if ranks else None,
-        "search_rank_worst": ranks[-1] if ranks else None,
-        "toolset_enable_graded": len(toolset_graded),
-        "toolset_enable_correct": toolset_correct,
-        **recovery_summary(graded),
-        "tokens": total_tokens(graded),
-    }
+    summary = DiscoverySummary(
+        fixtures=n,
+        skipped=sum(1 for r in discovery if r.get("skipped")),
+        passed=passed,
+        avg_steps=round(sum(steps) / n, 2) if n else 0,
+        max_steps_hit=sum(1 for r in graded if r.get("fail_reason") == "step_cap"),
+        path_distribution=paths,
+        search_used=len(search_used),
+        search_hit_rate=round(search_hits / len(search_used), 2) if search_used else None,
+        search_rank_p50=ranks[len(ranks) // 2] if ranks else None,
+        search_rank_worst=ranks[-1] if ranks else None,
+        toolset_enable_graded=len(toolset_graded),
+        toolset_enable_correct=toolset_correct,
+        tokens=total_tokens(graded),
+    )
+    # Merged key by key. A `**` splat into the literal above would collapse it to
+    # a plain dict and lose every per-key type, and dict.update() will not take a
+    # RecoverySummary either — pyright synthesizes `Partial[DiscoverySummary]`
+    # nominally, so a structurally identical shape is not assignable to it. The
+    # `.get` defaults never apply: the block only runs when the half is present.
+    if recovery := recovery_summary(graded):
+        summary["first_try_rate"] = recovery.get("first_try_rate", 0.0)
+        summary["recovery_rate"] = recovery.get("recovery_rate")
+        summary["recovered"] = recovery.get("recovered", 0)
+        summary["avg_wrong_calls"] = recovery.get("avg_wrong_calls", 0.0)
+        summary["avg_steps_to_correct"] = recovery.get("avg_steps_to_correct")
+        summary["dry_run_forced"] = recovery.get("dry_run_forced", 0)
+        summary["unexecuted"] = recovery.get("unexecuted", 0)
+    return summary
 
 
 def gate_verdict(

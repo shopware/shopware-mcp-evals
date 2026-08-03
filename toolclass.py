@@ -128,7 +128,7 @@ def is_executable(name: str) -> bool:
     return classify(name) in ("read_only", "dry_runnable")
 
 
-def prepare_call(name: str, args: JsonObject) -> tuple[JsonObject, bool]:
+def prepare_call(name: str, args: JsonObject | None) -> tuple[JsonObject, bool]:
     """Arguments to send, and whether dryRun had to be forced on.
 
     A model that passes `dryRun: false` is overridden rather than obeyed. It is

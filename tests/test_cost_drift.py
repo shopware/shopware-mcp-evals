@@ -7,17 +7,26 @@ into a red build nobody can fix.
 """
 
 import json
+from pathlib import Path
+from typing import cast
 
 import pytest
 
 from eval import cost_drift as D
+from eval.result_schema import JsonObject, Report
 
 
-def report(graded=100, input_tokens=1_000_000, cached=0, output=None, **cost_extra):
+def report(
+    graded: int = 100,
+    input_tokens: int = 1_000_000,
+    cached: int = 0,
+    output: int | None = None,
+    **cost_extra: object,
+) -> Report:
     # Output scales with the fixture count by default, so "the suite grew" is
     # genuinely a same-cost-per-fixture scenario rather than one that halves
     # output per fixture and trips the very check being tested.
-    return {
+    base: JsonObject = {
         "cost": {
             "graded": graded,
             "tokens": {
@@ -28,9 +37,10 @@ def report(graded=100, input_tokens=1_000_000, cached=0, output=None, **cost_ext
             **cost_extra,
         }
     }
+    return cast(Report, cast(object, base))
 
 
-def test_a_suite_that_grew_is_not_a_regression():
+def test_a_suite_that_grew_is_not_a_regression() -> None:
     """The reason everything is per fixture: twice the fixtures at the same cost
     each is twice the total and no change at all in what is being measured."""
     before = report(graded=100, input_tokens=1_000_000)
@@ -39,7 +49,7 @@ def test_a_suite_that_grew_is_not_a_regression():
     assert D.compare(after, before) == []
 
 
-def test_more_context_per_fixture_is_reported():
+def test_more_context_per_fixture_is_reported() -> None:
     findings = D.compare(report(input_tokens=2_000_000), report(input_tokens=1_000_000))
 
     assert [f["metric"] for f in findings] == ["input_tokens_per_fixture"]
@@ -47,7 +57,7 @@ def test_more_context_per_fixture_is_reported():
     assert "more context" in findings[0]["meaning"]
 
 
-def test_cached_tokens_count_toward_context_growth():
+def test_cached_tokens_count_toward_context_growth() -> None:
     """What moved is how much context the model was handed, not what it was
     billed for — otherwise a run that merely started hitting the cache would
     read as a 100% improvement."""
@@ -57,11 +67,11 @@ def test_cached_tokens_count_toward_context_growth():
     assert D.compare(after, before) == []
 
 
-def test_a_change_below_the_threshold_is_noise():
+def test_a_change_below_the_threshold_is_noise() -> None:
     assert D.compare(report(input_tokens=1_100_000), report(input_tokens=1_000_000)) == []
 
 
-def test_a_large_drop_is_reported_too():
+def test_a_large_drop_is_reported_too() -> None:
     """A sudden halving is the shape a silently-broken run takes — fewer steps
     because discovery stopped happening at all."""
     findings = D.compare(report(input_tokens=200_000), report(input_tokens=1_000_000))
@@ -70,7 +80,7 @@ def test_a_large_drop_is_reported_too():
     assert "▼" in D.render(findings)
 
 
-def test_payload_and_surface_growth_are_tracked_separately():
+def test_payload_and_surface_growth_are_tracked_separately() -> None:
     before = report(payload_bytes_p50=100, surface_tokens_peak=200)
     after = report(payload_bytes_p50=1000, surface_tokens_peak=800)
 
@@ -79,30 +89,30 @@ def test_payload_and_surface_growth_are_tracked_separately():
     assert metrics == {"payload_bytes_p50", "surface_tokens_peak"}
 
 
-def test_findings_are_ordered_by_how_much_moved():
+def test_findings_are_ordered_by_how_much_moved() -> None:
     before = report(input_tokens=1_000_000, payload_bytes_p50=100)
     after = report(input_tokens=1_500_000, payload_bytes_p50=1000)
 
     assert [f["metric"] for f in D.compare(after, before)][0] == "payload_bytes_p50"
 
 
-def test_a_field_the_older_report_predates_is_not_compared_against_zero():
+def test_a_field_the_older_report_predates_is_not_compared_against_zero() -> None:
     """Reports written before a field existed must produce no comparison rather
     than a fabricated one."""
     assert D.compare(report(payload_bytes_p50=500), report()) == []
     assert D.compare(report(), report(payload_bytes_p50=500)) == []
 
 
-def test_a_report_with_no_graded_fixtures_yields_no_metrics():
+def test_a_report_with_no_graded_fixtures_yields_no_metrics() -> None:
     assert D.metrics(report(graded=0)) == {}
-    assert D.metrics({}) == {}
+    assert D.metrics(cast(Report, cast(object, {}))) == {}
 
 
-def test_render_says_so_when_nothing_moved():
+def test_render_says_so_when_nothing_moved() -> None:
     assert "within 25%" in D.render([])
 
 
-def test_render_lists_what_moved_and_what_it_means():
+def test_render_lists_what_moved_and_what_it_means() -> None:
     out = D.render(D.compare(report(input_tokens=2_000_000), report(input_tokens=1_000_000)))
 
     assert "input tokens per fixture" in out
@@ -113,13 +123,15 @@ def test_render_lists_what_moved_and_what_it_means():
 # ---------------------------------------------------------------------------
 # CLI — advisory in every branch
 # ---------------------------------------------------------------------------
-def write(tmp_path, name, payload):
+def write(tmp_path: Path, name: str, payload: object) -> str:
     path = tmp_path / name
     path.write_text(json.dumps(payload))
     return str(path)
 
 
-def test_a_regression_warns_but_does_not_fail(tmp_path, monkeypatch, capsys):
+def test_a_regression_warns_but_does_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Provider-side changes move these numbers through no fault of the server.
     A red build for that is one people learn to bypass."""
     current = write(tmp_path, "now.json", report(input_tokens=3_000_000))
@@ -132,7 +144,9 @@ def test_a_regression_warns_but_does_not_fail(tmp_path, monkeypatch, capsys):
     assert "input tokens per fixture" in captured.out
 
 
-def test_an_improvement_is_shown_but_not_warned_about(tmp_path, monkeypatch, capsys):
+def test_an_improvement_is_shown_but_not_warned_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     current = write(tmp_path, "now.json", report(input_tokens=200_000))
     previous = write(tmp_path, "before.json", report(input_tokens=1_000_000))
     monkeypatch.setattr("sys.argv", ["cost_drift", "--current", current, "--previous", previous])
@@ -143,7 +157,9 @@ def test_an_improvement_is_shown_but_not_warned_about(tmp_path, monkeypatch, cap
     assert "▼" in captured.out
 
 
-def test_no_previous_report_is_a_normal_first_run_not_a_warning(tmp_path, monkeypatch, capsys):
+def test_no_previous_report_is_a_normal_first_run_not_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     current = write(tmp_path, "now.json", report())
     monkeypatch.setattr("sys.argv", ["cost_drift", "--current", current])
 
@@ -153,7 +169,9 @@ def test_no_previous_report_is_a_normal_first_run_not_a_warning(tmp_path, monkey
     assert "::warning::" not in captured.err
 
 
-def test_an_unreadable_previous_report_is_also_skipped(tmp_path, monkeypatch, capsys):
+def test_an_unreadable_previous_report_is_also_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     current = write(tmp_path, "now.json", report())
     monkeypatch.setattr("sys.argv", ["cost_drift", "--current", current, "--previous", str(tmp_path / "gone.json")])
 
@@ -161,14 +179,18 @@ def test_an_unreadable_previous_report_is_also_skipped(tmp_path, monkeypatch, ca
     assert "cost drift skipped" in capsys.readouterr().out
 
 
-def test_an_unreadable_current_report_warns_and_still_exits_clean(tmp_path, monkeypatch, capsys):
+def test_an_unreadable_current_report_warns_and_still_exits_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr("sys.argv", ["cost_drift", "--current", str(tmp_path / "gone.json")])
 
     assert D.main() == 0
     assert "::warning::" in capsys.readouterr().err
 
 
-def test_the_threshold_is_configurable(tmp_path, monkeypatch, capsys):
+def test_the_threshold_is_configurable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     current = write(tmp_path, "now.json", report(input_tokens=1_100_000))
     previous = write(tmp_path, "before.json", report(input_tokens=1_000_000))
     monkeypatch.setattr("sys.argv", ["cost_drift", "--current", current, "--previous", previous, "--threshold", "0.05"])

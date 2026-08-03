@@ -6,15 +6,24 @@ present with a version on every producer — so a dropped or renamed key fails h
 rather than as a KeyError mid-report.
 """
 
+from typing import cast
+
 from eval import runner as E
-from eval.result_schema import SCHEMA_VERSION, FixtureResult
+from eval.result_schema import SCHEMA_VERSION, AttemptRecord, Fixture, FixtureResult, JsonObject, MetaCall
 
 
-def _fixture(**over):
-    return {"id": "f1", "prompt": "p", "expected_tool": "shopware-entity-read", "category": "unambiguous", **over}
+def _fixture(**over: object) -> Fixture:
+    base: JsonObject = {
+        "id": "f1",
+        "prompt": "p",
+        "expected_tool": "shopware-entity-read",
+        "category": "unambiguous",
+        **over,
+    }
+    return cast(Fixture, cast(object, base))
 
 
-def test_to_result_carries_the_schema_version_and_every_declared_key():
+def test_to_result_carries_the_schema_version_and_every_declared_key() -> None:
     st = E.DiscoveryState(arm="discovery")
     result = st.to_result(_fixture(), passed=False, latency=1.2)
 
@@ -30,42 +39,45 @@ def test_to_result_carries_the_schema_version_and_every_declared_key():
     assert graded_only <= set(result)
 
 
-def test_discovery_path_is_derived_from_the_meta_calls_made():
+def test_discovery_path_is_derived_from_the_meta_calls_made() -> None:
     st = E.DiscoveryState(arm="discovery")
     st.selected_tool = "shopware-entity-read"
-    st.meta_calls = [{"tool": "shopware-tool-search"}, {"tool": "shopware-toolset-enable"}]
+    st.meta_calls = [
+        MetaCall(tool="shopware-tool-search", input={}),
+        MetaCall(tool="shopware-toolset-enable", input={}),
+    ]
 
-    assert st.to_result(_fixture(), passed=True, latency=0.0)["discovery_path"] == "mixed"
+    assert st.to_result(_fixture(), passed=True, latency=0.0).get("discovery_path") == "mixed"
 
 
-def test_no_answer_means_no_discovery_path():
+def test_no_answer_means_no_discovery_path() -> None:
     st = E.DiscoveryState(arm="discovery")  # selected_tool stays None
 
-    assert st.to_result(_fixture(), passed=False, latency=0.0)["discovery_path"] == "none"
+    assert st.to_result(_fixture(), passed=False, latency=0.0).get("discovery_path") == "none"
 
 
-def test_fail_reason_is_cleared_on_a_pass():
+def test_fail_reason_is_cleared_on_a_pass() -> None:
     st = E.DiscoveryState(arm="discovery", fail_reason="no_tool_call")
 
-    assert st.to_result(_fixture(), passed=True, latency=0.0)["fail_reason"] is None
+    assert st.to_result(_fixture(), passed=True, latency=0.0).get("fail_reason") is None
 
 
-def test_first_try_needs_both_the_right_tool_and_a_working_call():
+def test_first_try_needs_both_the_right_tool_and_a_working_call() -> None:
     st = E.DiscoveryState(arm="discovery")
-    st.attempted_tools = [{"tool": "t", "correct": True, "ok": False}]
+    st.attempted_tools = [AttemptRecord(tool="t", correct=True, step=1, ok=False)]
 
     # Right tool, but the call did not satisfy the assertion — not a first-try win.
-    assert st.to_result(_fixture(), passed=False, latency=0.0)["first_try"] is False
+    assert st.to_result(_fixture(), passed=False, latency=0.0).get("first_try") is False
 
 
-def test_enabled_correct_toolset_tracks_what_was_enabled():
+def test_enabled_correct_toolset_tracks_what_was_enabled() -> None:
     st = E.DiscoveryState(arm="discovery", enabled_toolsets=["entity"])
     result = st.to_result(_fixture(expected_toolset="entity"), passed=True, latency=0.0)
 
-    assert result["enabled_correct_toolset"] is True
+    assert result.get("enabled_correct_toolset") is True
 
 
-def test_skipped_and_error_results_are_versioned_too():
+def test_skipped_and_error_results_are_versioned_too() -> None:
     """The back-compat branches in summary.py key off the version, so every
     producer has to stamp it — not just the graded path."""
     assert E.skipped_result(_fixture(), "discovery")["schema_version"] == SCHEMA_VERSION

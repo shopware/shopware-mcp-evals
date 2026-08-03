@@ -9,16 +9,26 @@ should surface in a diff.
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import toolclass as TC
+from eval.result_schema import JsonObject, ToolDef, as_list, as_object
 
 ROOT = Path(__file__).resolve().parents[1]
-SNAPSHOT = json.loads((ROOT / "tool-history" / "latest.json").read_text())
-SNAPSHOT_TOOLS = sorted(t["name"] for t in SNAPSHOT["tools"])
+
+
+def snapshot_tools(path: Path) -> list[ToolDef]:
+    """The `tools` list out of a committed snapshot."""
+    snap = as_object(cast(object, json.loads(path.read_text())))
+    return [cast(ToolDef, cast(object, as_object(t))) for t in as_list(snap.get("tools"))]
+
+
+TOOLS = snapshot_tools(ROOT / "tool-history" / "latest.json")
+SNAPSHOT_TOOLS = sorted(t["name"] for t in TOOLS)
 SCHEMA_DRY_RUN = sorted(
-    t["name"] for t in SNAPSHOT["tools"] if TC.DRY_RUN_KEY in ((t.get("inputSchema") or {}).get("properties") or {})
+    t["name"] for t in TOOLS if TC.DRY_RUN_KEY in as_object(as_object(t.get("inputSchema")).get("properties"))
 )
 
 
@@ -26,14 +36,14 @@ SCHEMA_DRY_RUN = sorted(
 # Coverage against the committed snapshot
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize("tool", SNAPSHOT_TOOLS)
-def test_every_advertised_tool_is_classified(tool):
+def test_every_advertised_tool_is_classified(tool: str) -> None:
     assert TC.classify(tool) is not None, (
         f"{tool} is in the catalogue but in no class in toolclass.py — "
         "decide whether it is read-only, dry-runnable or unsafe"
     )
 
 
-def test_the_dry_runnable_set_matches_what_the_schemas_declare():
+def test_the_dry_runnable_set_matches_what_the_schemas_declare() -> None:
     """The server is the authority on which tools have a safe path.
 
     Drifting from the schemas in either direction is a real bug: a tool listed
@@ -47,13 +57,13 @@ def test_the_dry_runnable_set_matches_what_the_schemas_declare():
     assert admin == SCHEMA_DRY_RUN
 
 
-def test_no_tool_is_in_two_classes():
+def test_no_tool_is_in_two_classes() -> None:
     assert not (TC.READ_ONLY & TC.DRY_RUNNABLE)
     assert not (TC.READ_ONLY & TC.UNSAFE)
     assert not (TC.DRY_RUNNABLE & TC.UNSAFE)
 
 
-def test_the_admin_catalogue_is_fully_covered_with_no_stale_entries():
+def test_the_admin_catalogue_is_fully_covered_with_no_stale_entries() -> None:
     """Every admin tool classified, and nothing classified that admin dropped.
 
     Not equality: the Store endpoint has no committed snapshot, so its
@@ -67,20 +77,20 @@ def test_the_admin_catalogue_is_fully_covered_with_no_stale_entries():
     assert not stale, f"classified but no longer in the admin catalogue: {sorted(stale)}"
 
 
-def test_every_store_fixture_target_is_classified():
+def test_every_store_fixture_target_is_classified() -> None:
     """The gap this catches: the Store suite ran entirely on tools no class
     covered, so every one of its fixtures silently degraded to selection-only
     grading — the thing execution was added to stop."""
     import yaml
 
-    store = yaml.safe_load((ROOT / "eval" / "fixtures_store.yaml").read_text())["fixtures"]
-    targets = {f["expected_tool"] for f in store if f.get("expected_tool")}
+    loaded = as_object(cast(object, yaml.safe_load((ROOT / "eval" / "fixtures_store.yaml").read_text())))
+    targets = {str(t) for raw in as_list(loaded.get("fixtures")) if (t := as_object(raw).get("expected_tool"))}
     unclassified = sorted(t for t in targets if TC.classify(t) is None)
 
     assert not unclassified, f"Store fixture targets with no class: {unclassified}"
 
 
-def test_store_mutations_are_dry_runnable_now_that_the_plugin_declares_it():
+def test_store_mutations_are_dry_runnable_now_that_the_plugin_declares_it() -> None:
     """These were guessed unsafe while there was no Store schema to read. The
     plugin added dryRun to exactly its mutating tools, so they are executable
     again — checkout-complete is the one that can take money, and it is only
@@ -91,7 +101,7 @@ def test_store_mutations_are_dry_runnable_now_that_the_plugin_declares_it():
         assert args["dryRun"] is True and forced is True
 
 
-def test_unsafe_tools_have_no_dry_run_to_hide_behind():
+def test_unsafe_tools_have_no_dry_run_to_hide_behind() -> None:
     """What makes them unsafe. If one grows a dryRun property it should move to
     DRY_RUNNABLE and start participating in result assertions."""
     assert not (TC.UNSAFE & set(SCHEMA_DRY_RUN))
@@ -100,12 +110,12 @@ def test_unsafe_tools_have_no_dry_run_to_hide_behind():
 # ---------------------------------------------------------------------------
 # The execution boundary
 # ---------------------------------------------------------------------------
-def test_read_only_and_dry_runnable_are_executable():
+def test_read_only_and_dry_runnable_are_executable() -> None:
     assert TC.is_executable("shopware-entity-search") is True
     assert TC.is_executable("shopware-entity-delete") is True
 
 
-def test_unsafe_and_unknown_tools_are_not_executed():
+def test_unsafe_and_unknown_tools_are_not_executed() -> None:
     """Unknown defaults to no. A tool the server grew since the last snapshot
     has unknown blast radius, and 'probably fine' is how an eval deletes
     something."""
@@ -117,7 +127,7 @@ def test_unsafe_and_unknown_tools_are_not_executed():
 # ---------------------------------------------------------------------------
 # prepare_call
 # ---------------------------------------------------------------------------
-def test_a_mutating_call_gets_dry_run_forced_on():
+def test_a_mutating_call_gets_dry_run_forced_on() -> None:
     args, forced = TC.prepare_call("shopware-entity-delete", {"entity": "product", "ids": "[]"})
 
     assert args["dryRun"] is True
@@ -125,7 +135,7 @@ def test_a_mutating_call_gets_dry_run_forced_on():
     assert args["entity"] == "product", "the model's other arguments are untouched"
 
 
-def test_a_model_asking_for_a_real_delete_is_overridden():
+def test_a_model_asking_for_a_real_delete_is_overridden() -> None:
     """The eval's safety cannot depend on the thing under test agreeing to it."""
     args, forced = TC.prepare_call("shopware-entity-delete", {"dryRun": False})
 
@@ -133,14 +143,14 @@ def test_a_model_asking_for_a_real_delete_is_overridden():
     assert forced is True
 
 
-def test_a_model_that_already_asked_for_a_dry_run_is_not_recorded_as_overridden():
+def test_a_model_that_already_asked_for_a_dry_run_is_not_recorded_as_overridden() -> None:
     args, forced = TC.prepare_call("shopware-entity-delete", {"dryRun": True})
 
     assert args["dryRun"] is True
     assert forced is False, "nothing was overridden, so nothing should be reported as overridden"
 
 
-def test_a_read_only_call_is_passed_through_untouched():
+def test_a_read_only_call_is_passed_through_untouched() -> None:
     args, forced = TC.prepare_call("shopware-entity-search", {"entity": "product"})
 
     assert args == {"entity": "product"}
@@ -148,22 +158,22 @@ def test_a_read_only_call_is_passed_through_untouched():
     assert TC.DRY_RUN_KEY not in args, "adding dryRun to a tool without it would be a schema error"
 
 
-def test_prepare_call_does_not_mutate_the_callers_arguments():
+def test_prepare_call_does_not_mutate_the_callers_arguments() -> None:
     """The original is what gets recorded as `selected_input` — the graded
     artefact must be what the model actually said, not what we rewrote."""
-    original = {"entity": "product"}
+    original: JsonObject = {"entity": "product"}
 
     TC.prepare_call("shopware-entity-delete", original)
 
     assert original == {"entity": "product"}
 
 
-def test_prepare_call_tolerates_no_arguments():
+def test_prepare_call_tolerates_no_arguments() -> None:
     assert TC.prepare_call("shopware-entity-search", None) == ({}, False)
     assert TC.prepare_call("shopware-entity-delete", None) == ({"dryRun": True}, True)
 
 
-def test_an_unclassified_tool_is_not_given_a_dry_run():
+def test_an_unclassified_tool_is_not_given_a_dry_run() -> None:
     """It is not executed at all, so silently adding an argument it may not
     accept would only muddy the record."""
     args, forced = TC.prepare_call("unknown-tool", {"a": 1})
@@ -190,20 +200,21 @@ store_snapshot_required = pytest.mark.skipif(
 
 
 @store_snapshot_required
-def test_every_store_tool_is_classified():
-    tools = [t["name"] for t in json.loads(STORE_SNAPSHOT.read_text())["tools"]]
+def test_every_store_tool_is_classified() -> None:
+    tools = [t["name"] for t in snapshot_tools(STORE_SNAPSHOT)]
     unclassified = sorted(t for t in tools if TC.classify(t) is None)
 
     assert not unclassified, f"Store tools with no class: {unclassified}"
 
 
 @store_snapshot_required
-def test_store_tools_that_declare_dry_run_are_not_guessed_unsafe():
+def test_store_tools_that_declare_dry_run_are_not_guessed_unsafe() -> None:
     """A Store tool with a dryRun can be executed safely, so leaving it unsafe
     costs real signal — result assertions and recovery both switch off for it."""
-    snap = json.loads(STORE_SNAPSHOT.read_text())
     declares = {
-        t["name"] for t in snap["tools"] if TC.DRY_RUN_KEY in ((t.get("inputSchema") or {}).get("properties") or {})
+        t["name"]
+        for t in snapshot_tools(STORE_SNAPSHOT)
+        if TC.DRY_RUN_KEY in as_object(as_object(t.get("inputSchema")).get("properties"))
     }
     misfiled = sorted(declares & TC.UNSAFE)
 
@@ -213,7 +224,7 @@ def test_store_tools_that_declare_dry_run_are_not_guessed_unsafe():
 # ---------------------------------------------------------------------------
 # The agentic-commerce plugin is isolated in ucp.py
 # ---------------------------------------------------------------------------
-def test_ucp_tools_are_classified_in_their_own_module():
+def test_ucp_tools_are_classified_in_their_own_module() -> None:
     """The plugin is optional and may go away. Its specifics live in one file so
     removing it is deleting that file, not picking entries out of three sets."""
     import ucp
@@ -223,7 +234,7 @@ def test_ucp_tools_are_classified_in_their_own_module():
     assert all(t.startswith("shopware-ucp-") for t in ucp.all_classified())
 
 
-def test_toolclass_carries_no_ucp_entries_of_its_own():
+def test_toolclass_carries_no_ucp_entries_of_its_own() -> None:
     """The regression this split prevents: a UCP tool added straight into
     toolclass would survive deleting ucp.py and quietly keep being executed."""
     import ucp
@@ -233,7 +244,7 @@ def test_toolclass_carries_no_ucp_entries_of_its_own():
         assert not strays, f"{name} has UCP tools that ucp.py does not own: {sorted(strays)}"
 
 
-def test_store_api_context_is_core_and_stays_behind():
+def test_store_api_context_is_core_and_stays_behind() -> None:
     """It rides the Store endpoint but is Shopware core, so dropping the plugin
     must not take it with them."""
     import ucp
@@ -242,7 +253,7 @@ def test_store_api_context_is_core_and_stays_behind():
     assert TC.classify("shopware-store-api-context") == "read_only"
 
 
-def test_the_agent_header_carries_a_quoted_profile_uri():
+def test_the_agent_header_carries_a_quoted_profile_uri() -> None:
     """The SDK reads it with /profile="([^"]+)"/ — an unquoted or absent URI is
     rejected before the tool runs."""
     import re
@@ -251,16 +262,18 @@ def test_the_agent_header_carries_a_quoted_profile_uri():
 
     header = ucp.agent_header("http://shop.example.com/")
 
-    assert re.search(r'profile="([^"]+)"', header).group(1) == "http://shop.example.com/.well-known/ucp"
+    profile = re.search(r'profile="([^"]+)"', header)
+    assert profile is not None
+    assert profile.group(1) == "http://shop.example.com/.well-known/ucp"
 
 
-def test_an_explicit_profile_uri_wins():
+def test_an_explicit_profile_uri_wins() -> None:
     import ucp
 
     assert 'profile="https://agent.example/p"' in ucp.agent_header("http://shop.test", "https://agent.example/p")
 
 
-def test_mutating_ucp_calls_carry_an_idempotency_key():
+def test_mutating_ucp_calls_carry_an_idempotency_key() -> None:
     """Without it every dry run fails on "Idempotency key is required for
     mutating UCP requests" before the tool does any work, which reads as a
     tool-quality failure in the results and is not one."""
@@ -270,7 +283,7 @@ def test_mutating_ucp_calls_carry_an_idempotency_key():
         assert ucp.call_headers(tool).get("Idempotency-Key"), tool
 
 
-def test_reads_and_non_ucp_tools_get_no_extra_headers():
+def test_reads_and_non_ucp_tools_get_no_extra_headers() -> None:
     """The key identifies a mutation. Sending one on a read is noise, and sending
     one on an admin tool would leak plugin specifics onto the other endpoint."""
     import ucp
@@ -279,7 +292,7 @@ def test_reads_and_non_ucp_tools_get_no_extra_headers():
         assert ucp.call_headers(tool) == {}, tool
 
 
-def test_each_call_gets_a_fresh_key():
+def test_each_call_gets_a_fresh_key() -> None:
     """The server replays a completed response for a repeated key, so a shared
     one would serve the previous fixture's answer to the next."""
     import ucp

@@ -24,8 +24,9 @@ import os
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import requests
 
@@ -154,7 +155,30 @@ def _as_object(value: object) -> JsonObject:
     return cast(JsonObject, value) if isinstance(value, dict) else {}
 
 
-def _json_body(resp: requests.Response) -> object:
+class HttpReply(Protocol):
+    """The four things this module reads off an HTTP response.
+
+    Narrower than requests.Response on purpose: the reply-parsing helpers below
+    are pure, and the tests drive them with a hand-built stand-in rather than
+    faking a whole requests object. This is the contract that stand-in has to
+    meet, stated once.
+    """
+
+    # Read-only properties, not attributes: requests.Response exposes all three
+    # as properties, and a Protocol declaring them writable would exclude it.
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+    def json(self) -> object: ...
+
+
+def _json_body(resp: HttpReply) -> object:
     """The decoded body, as `object`.
 
     `requests` types `.json()` as `Any`, and an Any spreads: every reader that
@@ -163,10 +187,10 @@ def _json_body(resp: requests.Response) -> object:
     `object` once, here, means the digging has to narrow explicitly — and the
     isinstance checks this module already had stop being decorative.
     """
-    return cast(object, resp.json())
+    return resp.json()
 
 
-def _throttle_wait(resp: requests.Response) -> float:
+def _throttle_wait(resp: HttpReply) -> float:
     """Seconds to wait before retrying a 429, from Retry-After or the server's
     'throttled for N seconds' hint, capped so a run can never stall for long."""
     retry_after = resp.headers.get("Retry-After", "")
@@ -250,7 +274,7 @@ def _pick(messages: list[McpResponse], rpc_id: int) -> McpResponse:
     return {}
 
 
-def _response(resp: requests.Response, rpc_id: int) -> McpResponse:
+def _response(resp: HttpReply, rpc_id: int) -> McpResponse:
     """Extract the JSON-RPC response from an MCP reply, handling both Content-Types
     the Streamable HTTP transport allows: a single JSON object (application/json)
     or an SSE stream (text/event-stream) carrying the response plus any server
@@ -418,6 +442,7 @@ def mcp_fetch_context_prompts(
     inventory: PromptInventory = {
         "names": [],
         "chars": {},
+        "total_chars": 0,
         "instructions_chars": len(server_instructions or ""),
         # What the server offered, as distinct from what we took. Without this a
         # narrowed run is indistinguishable from an endpoint that ships nothing —

@@ -77,13 +77,16 @@ MIN_DESCRIPTION_CHARS = 200
 CHARS_PER_TOKEN = 4
 
 
-def tokens(text: str) -> set[str]:
-    """Content words of a description, lowercased and de-duplicated."""
+def tokens(text: str | None) -> set[str]:
+    """Content words of a description, lowercased and de-duplicated.
+
+    `None` is a real catalogue value: an app-manifest tool ships without a
+    description, which is what the `no_description` finding is for."""
     words: list[str] = re.findall(r"[a-z0-9]+", (text or "").lower())
     return {w for w in words if w not in STOPWORDS and len(w) > 2}
 
 
-def similarity(left: str, right: str) -> float:
+def similarity(left: str | None, right: str | None) -> float:
     """Jaccard overlap of two descriptions' content words, 0.0 to 1.0.
 
     See the module docstring for why this is an explainer and not a predictor.

@@ -20,7 +20,7 @@ DEAD_LANE = "http://localhost:0"
 
 
 @pytest.fixture(autouse=True)
-def _no_developer_shop(monkeypatch):
+def no_developer_shop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Point every test at a lane that cannot exist.
 
     These are offline tests, but "offline" was an intention rather than a fact:
