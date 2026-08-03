@@ -406,14 +406,19 @@ with no change to descriptions or fixtures in between, and later failed a run at
 88% core while the primary was clean. 85% still catches a collapse, which is what
 the gate is for. Re-measure before swapping either model.
 
-**The second validator's gate is currently advisory** (`REBASELINE: 'true'` in
-`.github/workflows/mcp-evals.yml`, which also drops the comparison step to
-`--gate primary`). The 0.90/0.85 pair was calibrated against first-tool-correct,
-and the first runs under execute-and-assert did not measure what they appeared
-to: the models were being failed for ids the fixtures had invented, not for
-picking the wrong tool. Those are fixed; the number is not yet known. Set both
-from a run of nightlies — `first_try_rate` and `recovery_rate` are in the report
-— and delete the flag. The primary is deliberately still gating.
+**Both numbers survived the change to what `passed` means**, and both arms gate.
+The pair was calibrated against first-tool-correct, so when grading started
+executing the call they were suspected of no longer describing the same
+quantity, and the second validator was held advisory while that was re-derived.
+Measured under the new definition: primary **99%** (95/96, core 100%), second
+validator **88%** (84/96, core 88%). Both clear their own gate, so the window
+was removed without touching a threshold.
+
+The 79% that prompted the suspicion was the fixtures, not the models — every one
+of the primary's failures and six of the validator's twenty were the right tool
+called with an id the YAML had invented. Fixing that moved the validator from
+79% to 88%. Worth remembering before reaching for a suppression: a warning on a
+gate nobody enforces is a red build that has learned to look green.
 
 **Core is additionally gated on its own denominator.** The admin suite spans
 four repositories, so one aggregate rate lets a core regression hide behind

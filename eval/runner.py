@@ -1844,10 +1844,11 @@ def run_suite(args) -> int:
 
 
 # Exit codes, because the workflow treats them differently. 1 means the run
-# happened and the gate said no, which is what the advisory windows (REBASELINE,
-# catalogue drift) are allowed to downgrade to a warning. CRASH_EXIT means the
-# run did not produce a verdict at all, and no advisory window may swallow that:
-# a green job that actually crashed is worse than a red one.
+# happened and the gate said no, which an advisory window is allowed to downgrade
+# to a warning — catalogue drift is the one that remains, since a verdict about
+# descriptions that are not the ones the baseline recorded is not attributable.
+# CRASH_EXIT means the run produced no verdict at all, and no window may swallow
+# that: a green job that actually crashed is worse than a red one.
 CRASH_EXIT = 3
 
 

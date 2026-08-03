@@ -224,14 +224,18 @@ python -m functional.runner --endpoint store --allow-mutations
 ```
 
 > **Measured under the new definition of `passed`** (tool executed, result
-> asserted, recovery allowed). Two runs of the same commit read primary
-> **97%**/**95%** and second validator **95%**/**79%** — and the spread was not
-> the models. Five of the primary's five failures and six of the validator's
-> twenty were fixtures naming an id the lane could not supply: the model picked
-> the right tool and the server refused the call. Those are fixed (see the
-> `{placeholder}` rules in `eval/fixtures.yaml`); until a run of nightlies says
-> where gpt-4o-mini actually sits, `REBASELINE` in the workflow holds the second
-> validator's gate advisory.
+> asserted, recovery allowed): primary **99%** (95/96, core 100%), second
+> validator **88%** (84/96, core 88%). Both clear 0.90/0.85, so neither
+> threshold moved.
+>
+> Getting there took one detour worth knowing about. Earlier runs read 95% and
+> **79%**, and the spread was not the models: all five of the primary's failures
+> and six of the validator's twenty were fixtures naming an id the lane could not
+> supply — right tool picked, call refused. A `REBASELINE` flag was added to hold
+> the validator's gate advisory while the number was re-derived; fixing the ids
+> (see the `{placeholder}` rules in `eval/fixtures.yaml`) moved it 79% -> 88% and
+> the flag was deleted without ever changing a verdict. The lesson is the
+> ordering: find out what the number is measuring before deciding it is wrong.
 >
 > The store suite's 64% is a real finding, not a threshold problem: every UCP
 > tool is unsafe to execute, so that suite is graded on selection alone, and its
