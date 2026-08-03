@@ -944,9 +944,9 @@ jobs:
               cp -r "${dir}results/." results/
             else
               cp -r "${dir}"*.json results/ 2>/dev/null || true
-              [ -d "${dir}rows" ] && cp -r "${dir}rows/." results/rows/ || true
+              if [ -d "${dir}rows" ]; then cp -r "${dir}rows/." results/rows/ || true; fi
             fi
-            [ -d "${dir}tool-history" ] && cp -r "${dir}tool-history/." tool-history/ || true
+            if [ -d "${dir}tool-history" ]; then cp -r "${dir}tool-history/." tool-history/ || true; fi
           done
           echo "Collected:"; ls -1 results/ results/rows 2>/dev/null || true
 

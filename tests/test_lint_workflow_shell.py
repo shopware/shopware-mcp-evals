@@ -5,6 +5,7 @@ writing it: a substitution that invented findings, a declaration that reported
 itself, and a default severity at which a planted bug sailed through.
 """
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,18 +19,15 @@ import lint_workflow_shell as L  # noqa: E402 — needs the path above
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_the_repos_own_workflow_shell_is_clean() -> None:
-    """The gate starts green, which is why it can be gating rather than advisory.
-    If this fails, something new was added that ShellCheck objects to."""
-    result = subprocess.run(  # noqa: S603 — fixed argv
-        [sys.executable, "scripts/lint_workflow_shell.py"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
+# Deliberately NOT asserting that this repo's own workflow shell is clean. That
+# version of the test failed in CI while passing locally: ShellCheck 0.11.0 here
+# does not report SC2015 on `[ -d x ] && cp … || true`, and the runner's older
+# build does. Whose linter is right is beside the point — a unit test that fails
+# because of the version a developer happens to have installed is a test people
+# learn to ignore. The workflow step is the gate; these cover the script's logic,
+# which is what can actually be wrong in this repo.
+SHELLCHECK = shutil.which("shellcheck")
+needs_shellcheck = pytest.mark.skipif(SHELLCHECK is None, reason="shellcheck is not installed")
 
 
 def test_a_gha_expression_does_not_invent_findings() -> None:
@@ -60,6 +58,7 @@ def test_the_shell_options_match_what_github_runs() -> None:
     assert "set -e\n" in L.as_script("true\n", pipefail=False)
 
 
+@needs_shellcheck
 def test_the_default_severity_catches_an_unquoted_expansion(tmp_path: Path) -> None:
     """The regression that matters. The first version defaulted to `warning`, and a
     planted `echo $unquoted` passed — SC2086 is info. A gate that passes a real bug

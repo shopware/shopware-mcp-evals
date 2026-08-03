@@ -94,6 +94,13 @@ jobs:
       #
       # Gating rather than advisory: it was clean when added, so it starts green and
       # can only go red on something new.
+      #
+      # It IS sensitive to the runner's ShellCheck version, which is worth knowing
+      # before someone spends time on a confusing failure: 0.11.0 does not report
+      # SC2015 on `[ -d x ] && cp … || true` and the runner's build does, so this
+      # step went red on a tree that was clean locally. The findings were real and
+      # got fixed; if the runner's version moves again, expect the same shape of
+      # surprise — new findings on unchanged shell.
       # Name quoted: an unquoted `run:` inside it reads as a mapping and breaks the
       # file. Caught by this step's own YAML parse, immediately.
       - name: 'ShellCheck (workflow run: blocks)'
