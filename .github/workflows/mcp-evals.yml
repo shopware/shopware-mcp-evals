@@ -52,6 +52,10 @@ on:
         description: 'shopware/agentic-commerce ref (used when the Store suite runs). Default: empty = the repo default branch (latest).'
         required: false
         default: ''
+      ucp_sdk_ref:
+        description: 'ucp-php-sdk ref to pin (temporary, for diagnosing the store preflight). Default: the 107+108 debug branch.'
+        required: false
+        default: ''
       run_store:
         description: 'Run the Store API / UCP suite. On by default; set false to skip it (saves the agentic-commerce checkout and ~42 LLM fixtures).'
         required: false

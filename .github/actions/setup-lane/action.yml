@@ -227,6 +227,33 @@ runs:
         path: shopware/custom/plugins/SwagAgenticCommerce
         fetch-depth: 1
 
+    # TEMPORARY PIN — remove once ucp-php-sdk#107 and #108 are released and the
+    # plugin's `^0.0.2` is bumped to a version that carries them.
+    #
+    # Without this, CI runs the plugin's in-band error handling against the
+    # RELEASED SDK, which types no profile-fetch failure — so MCP answers
+    # `internal: The tool call failed unexpectedly.` and REST answers
+    # `500 Internal server error.` with the real message discarded. Measured:
+    # that is exactly what run 30827918658 reported. Both channels throw the
+    # cause away, so the Store suite's actual blocker cannot be identified from
+    # CI at all, which is what this pin is for.
+    #
+    # The branch is #107 + #108 merged, carrying a `version` field so a path
+    # repository can resolve it — see its own commit for why 0.0.2.1 and not
+    # 0.0.2.
+    - name: Checkout ucp-php-sdk (107 + 108, to diagnose the store preflight)
+      if: inputs.run_store == 'true'
+      id: sdk_checkout
+      # Non-fatal for the same reason as the plugin checkout below it: falling
+      # back to the released SDK is the old behaviour, which still runs.
+      continue-on-error: true
+      uses: actions/checkout@v7
+      with:
+        repository: BrocksiNet/ucp-php-sdk
+        ref: ${{ github.event.inputs.ucp_sdk_ref || 'debug/ucp-107-108' }}
+        path: shopware/custom/ucp-php-sdk
+        fetch-depth: 1
+
     - name: Wire up MCP bundle + plugin
       id: plugins
       shell: bash
@@ -261,11 +288,33 @@ runs:
         elif [ "${STORE_CHECKOUT_OK}" != "true" ]; then
           STORE_SKIP_REASON="the \`shopware/agentic-commerce\` checkout failed — \`PLUGINS_PAT\` is most likely not scoped to that repository (the API answers \`Not Found\`). Grant the token access to it."
         else
+          # Declared BEFORE the plugin require, so its ucp-php-sdk dependency
+          # resolves to the pinned checkout instead of Packagist. Guarded on the
+          # directory: if the checkout above did not happen, the released SDK
+          # applies and the suite still runs, just without the typed errors.
+          if [ -d custom/ucp-php-sdk/packages/core ]; then
+            composer config repositories.ucp-sdk-core \
+              path custom/ucp-php-sdk/packages/core
+            composer config repositories.ucp-sdk-symfony-bundle \
+              path custom/ucp-php-sdk/packages/symfony-bundle
+          fi
           composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
           if composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts; then
             STORE_PLUGIN_OK=true
           else
             STORE_SKIP_REASON="\`composer require shopware/agentic-commerce\` failed against this Shopware ref — see the step log for the resolver output."
+          fi
+        fi
+
+        # A pin nobody checks is a pin that lapses without telling anyone, and the
+        # symptom would be CI quietly measuring the released SDK again — which is
+        # indistinguishable from the bug it was pinned to diagnose. Assert on the
+        # one file only the pinned branch has.
+        if [ "${STORE_PLUGIN_OK}" = "true" ]; then
+          if [ -f vendor/ucp-php-sdk/core/src/Exception/AgentProfileException.php ]; then
+            echo "ucp-php-sdk: pinned copy installed (AgentProfileException present)"
+          else
+            echo "::warning::ucp-php-sdk resolved WITHOUT AgentProfileException, so the store diagnosis will still report a bare \`internal\`. The path-repository pin did not take."
           fi
         fi
 
