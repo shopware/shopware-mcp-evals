@@ -73,6 +73,12 @@ is the whole design: the per-tool scorecard names which tool is over-broad and
 which pair collides, and `--triage` says whether a failure belongs to the
 tool's own description, a cross-group collision, or the discovery layer.
 
+The product here is a **measurement**, not a library. Nothing imports this repo,
+nothing is published from it, and it has no consumers beyond the people reading
+its reports — so it carries no compatibility obligations and none of the
+ceremony that goes with them. What it does owe is that its numbers mean what
+they say; see the first bullet of `AGENTS.md` for where that line falls.
+
 ## Repository layout
 
 ```

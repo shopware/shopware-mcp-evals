@@ -10,6 +10,25 @@ brief for coding agents.
 
 ## Conventions
 
+- **Nothing consumes this repo, so there is almost no compatibility surface.**
+  It is a test harness: no package is published, nothing imports it, there is no
+  release and no downstream. Renaming a function, restructuring a module or
+  redefining what `passed` means costs one thing — updating the callers in here.
+  So don't spend effort on `BREAKING CHANGE:` trailers, `feat!:` titles,
+  deprecation windows, aliases kept "for compatibility", or shims around our own
+  code. Delete and move on.
+  The one real exception is the **on-disk report schema**: `eval/compare_runs.py`
+  and `eval/cost_drift.py` read reports from *earlier* runs (a cached nightly
+  baseline, the files in `results/`), so a renamed or dropped result key breaks
+  the comparison against history rather than a caller you can grep for. That is
+  what `SCHEMA_VERSION` and the `.get()`-with-default reads in `eval/scoring.py`
+  are for — add fields, tolerate their absence, and don't rename in place.
+  None of this excuses the two things that do matter: a red build, and a
+  threshold that has stopped measuring what it claims. When `passed` changed from
+  "named the expected tool" to "the call ran and satisfied the fixture", the
+  0.90/0.85 gates kept their numbers and silently stopped describing the same
+  quantity. That is a real problem, and it is not a compatibility one — fix the
+  gate, skip the ceremony.
 - **No shell scripts for test logic.** Both layers are Python; the functional
   runner (`functional/runner.py`) reuses `mcp_client.py`. Don't add `.sh` runners —
   extend the Python runner or add a helper module. The shell that belongs here is
