@@ -392,6 +392,25 @@ jobs:
             # localhost:8000, which makes a runner-side fetch equivalent to the
             # server's own. This is the single most likely cause and the one the
             # error text can never name.
+            # Which host is which, stated rather than assumed. The whole failure
+            # class here is three addresses for one shop that are not
+            # interchangeable: what the runner uses, what the server believes it is
+            # (its own APP_URL), and what the server can actually resolve from
+            # inside. On a proxied lane those diverge — APP_URL came back as the one
+            # host the container could NOT resolve — and every message about it
+            # names a URL without saying whose view it is. In CI they should all
+            # agree; if they ever stop agreeing, this is the line that says so.
+            echo "--- addresses in play ---"
+            echo "  runner -> shop:                  ${APP_URL}"
+            server_app_url=$(grep -hE '^APP_URL=' shopware/.env.local shopware/.env 2>/dev/null \
+              | tail -1 | cut -d= -f2- | tr -d '"' || true)
+            echo "  APP_URL as the SERVER sees it:   ${server_app_url:-(not set in shopware/.env*)}"
+            profile_uri=$(sed -n 's/.*profile="\([^"]*\)".*/\1/p' /tmp/preflight.log | head -1)
+            echo "  profile URI the server fetches:  ${profile_uri:-(not printed)}"
+            if [ -n "${server_app_url}" ] && [ "${server_app_url%/}" != "${APP_URL%/}" ]; then
+              echo "  ^ these disagree, which is enough on its own to break the profile fetch"
+            fi
+
             echo "--- can the profile URI actually be fetched? ---"
             profile="${APP_URL}/.well-known/ucp"
             code=$(curl -s -o /tmp/profile.json -w '%{http_code}' --max-time 10 "${profile}" || echo "000")
@@ -454,7 +473,7 @@ jobs:
             err=$(sed -n 's/^  error: //p' /tmp/preflight.log | head -1)
             rest_status=$(printf '%s' "${rest_out}" | tail -1)
             rest_code=$(printf '%s' "${rest_out}" | sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p' | head -1)
-            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AFull diagnosis in the Static checks log."
+            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AAddresses: runner=${APP_URL} server-APP_URL=${server_app_url:-unset} profile=${profile_uri:-unknown}%0AFull diagnosis in the Static checks log."
           fi
 
       - name: Run Store API functional tests
