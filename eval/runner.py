@@ -1502,6 +1502,31 @@ def _referenced(fixtures: list[dict], key: str) -> bool:
     return any("{" + key + "}" in f.get("prompt", "") for f in fixtures)
 
 
+# A resolver talks to the server, so it can fail the way any network call fails.
+# requests raises ConnectionError (an OSError), mcp_init raises RuntimeError for a
+# protocol problem, and a malformed body surfaces as ValueError.
+LANE_LOOKUP_ERRORS = (OSError, RuntimeError, ValueError)
+
+
+def _resolved_or_none(key: str, resolver, endpoint) -> str | dict[str, str] | None:
+    """One resolver's value, or None with the reason printed.
+
+    `str` for a read-only resolver, `dict` for a seeding one that fills several
+    placeholders from a single cart — the caller knows which it asked for.
+
+    Wrapped because a failed lookup must not be the thing that ends a run. The
+    unresolved placeholder already has a defined meaning — the fixtures naming it
+    are skipped — so degrading to that is strictly better than dying at startup
+    before a single fixture has been graded, which is the exact failure this
+    file's own regression test was written for.
+    """
+    try:
+        return resolver(endpoint)
+    except LANE_LOOKUP_ERRORS as exc:
+        print(f"::warning::resolving {{{key}}} off the lane failed ({type(exc).__name__}: {exc})")
+        return None
+
+
 def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool = False) -> dict[str, str]:
     """Values for every `{placeholder}` the loaded fixtures actually reference.
 
@@ -1514,7 +1539,7 @@ def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool =
     for key, resolver in PLACEHOLDER_RESOLVERS.items():
         if not _referenced(fixtures, key):
             continue
-        value = resolver(endpoint)
+        value = _resolved_or_none(key, resolver, endpoint)
         if value:
             subs[key] = value
             print(f"Lane id: {key} = {value}")
@@ -1531,7 +1556,7 @@ def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool =
                 "to the shop, so their fixtures are skipped."
             )
             continue
-        for key, value in resolver(endpoint).items():
+        for key, value in (_resolved_or_none("/".join(wanted), resolver, endpoint) or {}).items():
             if value:
                 subs[key] = value
                 print(f"Lane id (seeded): {key} = {value}")

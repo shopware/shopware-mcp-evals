@@ -82,6 +82,48 @@ def test_resolve_calls_the_resolver_when_the_token_is_present(monkeypatch):
     assert subs == {"sales_channel_id": "sc-id"}
 
 
+@pytest.mark.parametrize(
+    "boom",
+    [
+        ConnectionError("Connection refused"),  # requests raises this (an OSError)
+        RuntimeError("No Mcp-Session-Id in response headers"),  # mcp_init, protocol problem
+        ValueError("Expecting value: line 1 column 1"),  # a body that is not JSON
+    ],
+)
+def test_a_lane_that_cannot_be_reached_degrades_instead_of_ending_the_run(monkeypatch, capsys, boom):
+    """A resolver talks to the server, so it fails the way any network call does.
+    Letting that propagate kills the run at startup before a single fixture is
+    graded — the exact failure mode test_startup_survives_the_real_fixtures was
+    written for, reintroduced one layer up. The unresolved placeholder already
+    means something (its fixtures are skipped), so degrade to that.
+    """
+
+    def explode(_endpoint):
+        raise boom
+
+    monkeypatch.setitem(E.PLACEHOLDER_RESOLVERS, "sales_channel_id", explode)
+    fixtures = [{"id": "x", "prompt": "for {sales_channel_id}"}]
+
+    subs = E.resolve_lane_substitutions(fixtures, endpoint="EP")
+    E.apply_substitutions(fixtures, subs)
+
+    assert subs == {}
+    assert fixtures[0]["unresolved_placeholder"] == "sales_channel_id"
+    assert "resolving {sales_channel_id} off the lane failed" in capsys.readouterr().out
+
+
+def test_a_seeding_resolver_that_throws_is_caught_too(monkeypatch, capsys):
+    def explode(_endpoint):
+        raise ConnectionError("Connection refused")
+
+    monkeypatch.setitem(E.SEEDING_RESOLVERS, ("cart_token", "line_item_id"), explode)
+
+    subs = E.resolve_lane_substitutions([{"id": "x", "prompt": "cart {cart_token}"}], endpoint="EP", seed_lane=True)
+
+    assert subs == {}
+    assert "off the lane failed" in capsys.readouterr().out
+
+
 def test_an_unresolvable_placeholder_is_left_in_place_not_guessed(monkeypatch):
     """Resolver returns None (no lane / empty shop): the token stays, so the
     fixture fails visibly rather than grading against a literal brace string."""
