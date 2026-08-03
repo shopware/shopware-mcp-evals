@@ -61,10 +61,17 @@
 #   fine       a phantom 32-char hex id whose only failure mode is "not found".
 #              On the `accepted` tier a well-formed call that finds nothing PASSES
 #              — the point being that the call was valid, which is all the model
-#              could control without knowing a real id. Shopware keys are
-#              Uuid::randomHex (32 lowercase hex, no dashes) and cart tokens share
-#              that shape, so a fake must too: 'abc123' or a Stripe-style
-#              'ord_55501' is the wrong shape and reads as a different platform.
+#              could control without knowing a real id. Shopware ENTITY keys are
+#              Uuid::randomHex (32 lowercase hex, no dashes), so a fake must be
+#              too: 'abc123' or a Stripe-style 'ord_55501' is the wrong shape and
+#              reads as a different platform.
+#              CART TOKENS ARE NOT that shape — observed off a live instance they
+#              are 32 mixed-case alphanumerics ('GC9UKeQdxupDWRBI07d1JIcUTXCYFHCX'),
+#              Random::getAlphanumericString rather than a UUID. The old fake
+#              'abc12345d6e7f8091a2b3c4d5e6f7081' was hex and read as plausible
+#              for exactly that reason. It does not matter any more — cart tokens
+#              are `{cart_token}` now, resolved for real — but do not reintroduce a
+#              hand-written one on the theory that it looks right.
 #              Skill names ('storefront-controller') are the same — none of the
 #              three any load-skill fixture uses exists, and they pass regardless.
 #   {placeholder}
