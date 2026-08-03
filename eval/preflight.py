@@ -306,7 +306,8 @@ def profile_report(error: str) -> str:
 
     The server fetches this URI itself, mid-request, which is why the URI has to
     be one the SERVER can reach and why a published host:port is not automatically
-    it.
+    it. This function probes it from HERE, which is a different question — see the
+    note it prints when the two can disagree.
     """
     import ucp
 
@@ -320,9 +321,32 @@ def profile_report(error: str) -> str:
             "SERVER can reach that serves a real profile."
         )
     elif "internal" in error.lower():
+        # This used to read "the profile is fine, so `internal` is something else",
+        # which sent a real investigation down the wrong path for an afternoon. The
+        # probe above ran from the machine running the eval; the fetch that matters
+        # runs inside the server. Reproduced on a proxied local lane, where the
+        # runner got a valid 200 and the server got, from its own network:
+        #
+        #   TransportException: Failed to connect to trunk.localhost port 8088
+        #   for "http://trunk.localhost:8088/.well-known/ucp"
+        #
+        # The SDK throws a plain \RuntimeException/TransportException there rather
+        # than a UcpException, so the plugin's failure() flattens it to `internal`
+        # with nothing logged (HttpAgentProfileFetcher::fetch, UcpMcpToolContext).
         lines.append(
-            "  The profile is fine, so `internal` is something else — and the plugin logs "
-            "nothing for this path. The server log is the only place left to look."
+            f"  Reachable FROM HERE — which is not the question. The server fetches {uri} "
+            "over its own network, and a containerised or proxied instance does not share "
+            "this one. That fetch failing is still the most likely cause of `internal`."
+        )
+        lines.append(
+            "  To see it, run the same operation over REST — that path is not swallowed, so "
+            f"the exception reaches the log: POST {mc.SW_BASE_URL}/ucp/v1/catalog/search "
+            "with the same sw-access-key and UCP-Agent headers, then read var/log/<env>-<date>.log."
+        )
+        lines.append(
+            "  Then point UCP_PROFILE_URI at a URL the SERVER can reach (inside a container "
+            "that is usually its own http://localhost:<internal-port>), and expect the next "
+            "error to be a real one — an allowlist or signature verdict rather than `internal`."
         )
     return "\n".join(lines)
 

@@ -145,16 +145,37 @@ def test_a_broken_profile_is_reported_as_the_cause(monkeypatch: pytest.MonkeyPat
     assert "UCP_PROFILE_URI" in out
 
 
-def test_a_working_profile_sends_the_reader_to_the_server_log(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If the profile is fine then `internal` is something else, and the plugin
-    logs nothing — saying so beats implying the profile is still suspect."""
+def test_a_profile_this_machine_can_fetch_does_not_clear_the_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The report used to say "the profile is fine, so `internal` is something
+    else", and that sent a real investigation down the wrong path. probe_profile
+    runs from the machine running the eval; the fetch that matters runs inside the
+    server. On a proxied lane the runner got a valid 200 while the server got
+    `TransportException: Failed to connect to trunk.localhost port 8088` — the
+    profile was the cause, and the report had just ruled it out."""
     monkeypatch.setattr(preflight, "probe_profile", const((200, "valid UCP profile")))
     monkeypatch.setattr(preflight.mc, "SW_BASE_URL", "http://shop")
 
     out = preflight.profile_report("internal: The tool call failed unexpectedly.")
 
-    assert "This is the cause" not in out
-    assert "server log" in out
+    assert "This is the cause" not in out, "a 200 from here is not proof either way"
+    assert "FROM HERE" in out, "it has to say whose network answered"
+    assert "still the most likely cause" in out
+    assert "UCP_PROFILE_URI" in out, "and how to point it somewhere the server can reach"
+
+
+def test_the_report_names_the_path_that_does_not_swallow_the_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP tool catches the throwable and reports `internal` with nothing
+    logged. The REST route for the same operation does not, so the exception
+    reaches the log — which is how this was finally diagnosed."""
+    monkeypatch.setattr(preflight, "probe_profile", const((200, "valid UCP profile")))
+    monkeypatch.setattr(preflight.mc, "SW_BASE_URL", "http://shop")
+
+    out = preflight.profile_report("internal: The tool call failed unexpectedly.")
+
+    assert "/ucp/v1/catalog/search" in out
+    assert "var/log" in out
 
 
 # ---------------------------------------------------------------------------
