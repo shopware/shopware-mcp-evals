@@ -88,3 +88,17 @@ def test_the_type_checker_sees_the_root_modules() -> None:
     missing = sorted(_root_modules() - included)
 
     assert not missing, f"root modules outside pyrightconfig.json include: {missing}"
+
+
+def test_the_test_suite_is_a_package_so_shared_helpers_import() -> None:
+    """`tests/__init__.py` has to exist for `from tests.stubs import ...` to work.
+
+    Without it pytest puts `tests/` on sys.path and never the repo root, so the
+    import resolves under `python -m pytest` (which adds the CWD) and fails under
+    plain `pytest` — which is what CI runs. That asymmetry is invisible locally:
+    the suite collected clean and CI failed with `ModuleNotFoundError: No module
+    named 'tests'` on 14 modules at once.
+    """
+    assert (ROOT / "tests" / "__init__.py").exists(), (
+        "tests/__init__.py is missing; a cross-test import will fail under plain `pytest`"
+    )

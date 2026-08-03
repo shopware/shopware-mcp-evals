@@ -42,6 +42,9 @@ eval = ["*.yaml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Import the installed package rather than fiddling with sys.path per test file.
+# tests/ is a package (see its __init__.py) purely so a shared helper module is
+# importable the same way under `pytest` and `python -m pytest` — only the latter
+# puts the CWD on sys.path, and relying on that failed CI while passing locally.
 addopts = "-q"
 
 [tool.coverage.run]
