@@ -321,6 +321,9 @@ jobs:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_ACCESS_KEY: ${{ steps.lane.outputs.sw_access_key }}
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
+          # Served by the shop itself (see setup-lane), so the media-upload check
+          # does not depend on a third-party host being reachable from the runner.
+          MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
         run: python -m functional.runner --endpoint admin
 
       # The Store catalogue has never been snapshotted, so everything that

@@ -75,8 +75,14 @@ class ToolCheck:
 
 
 # A real, fetchable image. The previous value (assets.shopware.com) answers 403,
-# so every run reported the tool broken when the fixture was. Override for an
-# instance with no outbound network.
+# so every run reported the tool broken when the fixture was.
+#
+# CI does not use this default: setup-lane serves a PNG out of the shop's own
+# public/ directory and points MCP_MEDIA_UPLOAD_URL at it, because a third-party
+# host is a way for a green run to depend on somebody else's rate limiter —
+# upload.wikimedia.org answered "Cannot open source stream" once and failed the
+# whole static job. This default is for a local run against a shop with outbound
+# network; override it for one without.
 MEDIA_UPLOAD_URL = os.environ.get(
     "MCP_MEDIA_UPLOAD_URL",
     "https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png",
