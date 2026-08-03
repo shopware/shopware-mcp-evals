@@ -266,3 +266,83 @@ def test_store_fixtures_declare_the_toolset_their_tool_is_actually_in():
     }
 
     assert not wrong, f"expected_toolset disagrees with the snapshot (declared, actual): {wrong}"
+
+
+# ---------------------------------------------------------------------------
+# The shape of a hand-written id.
+#
+# Grading executes the call, so a value in a prompt reaches the server. Shopware
+# generates TWO shapes and a phantom has to match the right one — one hex literal
+# used to serve as a UCP cart id (right kind) and an admin cart token (wrong
+# kind) in the same breath, and it was not a valid UUID either.
+#
+# Verified against trunk rather than guessed:
+#   src/Core/Framework/Uuid/Uuid.php            randomHex() = bin2hex(UnixTimeGenerator)
+#                                               -> UUIDv7; VALID_PATTERN ^[0-9a-f]{32}$
+#   src/Core/Framework/Util/Random.php          getAlphanumericString(): a-zA-Z0-9
+#   .../SalesChannelContextService.php          cart token = Random::getAlphanumericString(32)
+#   SwagAgenticCommerce ContextTokenGenerator   UCP cart/checkout id = Uuid::randomHex()
+#
+# Version nibble `4` OR `7` is accepted: trunk writes v7, and demodata rows
+# already in a shop are v4, so both read as real to a model.
+UUID_HEX = re.compile(r"^[0-9a-f]{12}[47][0-9a-f]{3}[89ab][0-9a-f]{15}$")
+ALNUM_TOKEN = re.compile(r"^(?=.*[A-Z])(?=.*[0-9])[0-9A-Za-z]{32}$")
+
+# Fixtures whose prompt carries an ADMIN cart token — the one non-hex shape.
+# merchant-cart-manage is toolclass.UNSAFE so it is never executed, which is why
+# these keep a literal instead of taking `{cart_token}`.
+ADMIN_CART_TOKEN_FIXTURES = {"cart_manage_add", "cart_manage_remove", "disambig_cart_manage_quantity"}
+
+
+def _literals(prompt):
+    """Every 32-character id-ish run in a prompt, placeholders excluded."""
+    return re.findall(r"\b[0-9A-Za-z]{32}\b", prompt)
+
+
+@pytest.mark.parametrize("label,fixtures", ALL_FILES)
+def test_hand_written_ids_have_a_shape_shopware_actually_generates(label, fixtures):
+    """A phantom id has to be indistinguishable from a real one.
+
+    Not cosmetic: `Uuid::VALID_PATTERN` accepts any 32 hex, so a bad version
+    nibble will not fail a call — it just feeds the model an id no shop would
+    ever produce, in a suite whose entire subject is how the model behaves on
+    realistic input. The kind being wrong (hex where a cart token belongs) is
+    the harder failure: the tool rejects it by shape, which the `accepted` tier
+    does not forgive.
+    """
+    offenders = [
+        (f["id"], lit)
+        for f in fixtures
+        for lit in _literals(f["prompt"])
+        if not (UUID_HEX.match(lit) or ALNUM_TOKEN.match(lit))
+    ]
+
+    assert not offenders, f"{label}: ids Shopware would never generate: {offenders}"
+
+
+def test_the_admin_cart_fixtures_carry_a_cart_token_and_not_a_uuid():
+    """The kind being wrong is the harder failure, and the one that actually
+    happened: a hex literal stood in for an admin cart token, which
+    `Random::getAlphanumericString` never produces. These prompts hold both
+    shapes at once — a cart token and a product or line-item id — so the rule is
+    that exactly one of them is the non-hex one.
+    """
+    wrong = {}
+    for f in ADMIN:
+        if f["id"] not in ADMIN_CART_TOKEN_FIXTURES:
+            continue
+        lits = _literals(f["prompt"])
+        tokens = [lit for lit in lits if ALNUM_TOKEN.match(lit) and not UUID_HEX.match(lit)]
+        if len(tokens) != 1:
+            wrong[f["id"]] = lits
+
+    assert not wrong, f"expected exactly one alphanumeric cart token per fixture, got: {wrong}"
+
+
+def test_the_admin_cart_token_fixtures_still_exist():
+    """ADMIN_CART_TOKEN_FIXTURES above is the only place that knows a prompt
+    carries the non-hex shape. A renamed fixture would silently drop back to
+    being checked as a UUID and pass for the wrong reason."""
+    ids = {f["id"] for f in ADMIN}
+
+    assert ADMIN_CART_TOKEN_FIXTURES <= ids, f"stale ids: {sorted(ADMIN_CART_TOKEN_FIXTURES - ids)}"

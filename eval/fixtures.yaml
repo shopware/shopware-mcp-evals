@@ -58,22 +58,39 @@
 # allowed), so a value in a prompt IS sent to the server. What a fake value costs
 # therefore depends on how the tool rejects it:
 #
-#   fine       a phantom 32-char hex id whose only failure mode is "not found".
-#              On the `accepted` tier a well-formed call that finds nothing PASSES
-#              — the point being that the call was valid, which is all the model
-#              could control without knowing a real id. Shopware ENTITY keys are
-#              Uuid::randomHex (32 lowercase hex, no dashes), so a fake must be
-#              too: 'abc123' or a Stripe-style 'ord_55501' is the wrong shape and
-#              reads as a different platform.
-#              CART TOKENS ARE NOT that shape — observed off a live instance they
-#              are 32 mixed-case alphanumerics ('GC9UKeQdxupDWRBI07d1JIcUTXCYFHCX'),
-#              Random::getAlphanumericString rather than a UUID. The old fake
-#              'abc12345d6e7f8091a2b3c4d5e6f7081' was hex and read as plausible
-#              for exactly that reason. It does not matter any more — cart tokens
-#              are `{cart_token}` now, resolved for real — but do not reintroduce a
-#              hand-written one on the theory that it looks right.
-#              Skill names ('storefront-controller') are the same — none of the
-#              three any load-skill fixture uses exists, and they pass regardless.
+#   fine       a phantom id whose only failure mode is "not found". On the
+#              `accepted` tier a well-formed call that finds nothing PASSES — the
+#              point being that the call was valid, which is all the model could
+#              control without knowing a real id.
+#
+#              "Well-formed" is not a matter of taste. Shopware generates TWO
+#              different shapes and a phantom has to match the right one, or the
+#              prompt hands the model a value the tool would reject by shape:
+#
+#                entity keys / UCP ids     32 lowercase hex, no dashes.
+#                  Uuid::randomHex() is bin2hex(UnixTimeGenerator), i.e. a UUIDv7
+#                  — 12 hex of unix-ms, then the version nibble `7`, 3 hex, and a
+#                  variant nibble in [89ab]. Older rows (demodata) are v4, so both
+#                  read as real. UCP cart and checkout ids are these too:
+#                  SwagAgenticCommerce's ContextTokenGenerator::generate() is just
+#                  Uuid::randomHex(). Note Uuid::VALID_PATTERN is only
+#                  '^[0-9a-f]{32}$', so Shopware ACCEPTS any 32 hex — a wrong
+#                  version nibble will not fail a call, it just makes the fixture
+#                  off-distribution input for the thing we are measuring.
+#                admin cart tokens         32 mixed-case alphanumerics, NOT hex.
+#                  Random::getAlphanumericString(32) over a-zA-Z0-9, from
+#                  SalesChannelContextService. Observed live:
+#                  'GC9UKeQdxupDWRBI07d1JIcUTXCYFHCX'.
+#
+#              These two were confused for a long time: one hex literal served as
+#              a UCP cart id (right kind) and as an admin cart token (wrong kind)
+#              in the same breath, and it was not a valid UUID either.
+#              tests/test_fixtures.py now enforces both patterns, so a
+#              hand-written id of the wrong shape fails the unit tests.
+#
+#              Skill names ('storefront-controller') are outside all of this —
+#              none of the three any load-skill fixture uses exists, and they pass
+#              regardless.
 #   {placeholder}
 #              a value the tool does not answer with a plain "not found", so a
 #              fake can never pass. Two ways that happens, both measured:
@@ -375,20 +392,20 @@ fixtures:
 
   - id: entity_delete_media
     category: unambiguous
-    prompt: "Delete the media file 5c4b3a2918273645ac9e8f7d6b5a4938 for good."
+    prompt: "Delete the media file 019efaa55600747b89ba85246b03de71 for good."
     expected_tool: shopware-entity-delete
     expected_toolset: entity
 
   - id: cart_manage_add
     category: unambiguous
-    prompt: "Add 2 units of product 001cd6c6df7e42c38530de7b53dfcf25 to cart token abc12345d6e7f8091a2b3c4d5e6f7081 in the Storefront sales channel."
+    prompt: "Add 2 units of product 001cd6c6df7e42c38530de7b53dfcf25 to cart token he7ZpIgQ3oPlJmHHfDxqvJMGqxK3Dkmp in the Storefront sales channel."
     expected_tool: merchant-cart-manage
     expected_toolset: merchant-sales
     notes: Modifying an existing cart's line items → cart-manage (action=add).
 
   - id: cart_manage_remove
     category: unambiguous
-    prompt: "Take line item 44f9e8d7c6b5a4938271605f4e3d2c1b out of cart token abc12345d6e7f8091a2b3c4d5e6f7081 in the Storefront sales channel."
+    prompt: "Take line item 019f8ffdc200729fb072f64182bfbef4 out of cart token he7ZpIgQ3oPlJmHHfDxqvJMGqxK3Dkmp in the Storefront sales channel."
     expected_tool: merchant-cart-manage
     expected_toolset: merchant-sales
     notes: The remove action of the same tool.
@@ -643,7 +660,7 @@ fixtures:
 
   - id: disambig_delete_vs_upsert
     category: disambiguation
-    prompt: "Remove the customer record 11111111111111111111111111111111 from the database entirely."
+    prompt: "Remove the customer record 019effcbb2007321bcf51628224f2ccd from the database entirely."
     expected_tool: shopware-entity-delete
     expected_toolset: entity
     notes: >
@@ -652,7 +669,7 @@ fixtures:
 
   - id: disambig_cart_manage_quantity
     category: disambiguation
-    prompt: "Change the quantity of line item 44f9e8d7c6b5a4938271605f4e3d2c1b in cart abc12345d6e7f8091a2b3c4d5e6f7081 to 5 in the Storefront sales channel."
+    prompt: "Change the quantity of line item 019f8ffdc200729fb072f64182bfbef4 in cart he7ZpIgQ3oPlJmHHfDxqvJMGqxK3Dkmp to 5 in the Storefront sales channel."
     expected_tool: merchant-cart-manage
     expected_toolset: merchant-sales
     notes: Editing an existing cart's line items → cart-manage (action=update), not cart-checkout.
