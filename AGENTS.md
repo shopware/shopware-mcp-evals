@@ -10,10 +10,31 @@ brief for coding agents.
 
 ## Conventions
 
+- **Nothing consumes this repo, so there is almost no compatibility surface.**
+  It is a test harness: no package is published, nothing imports it, there is no
+  release and no downstream. Renaming a function, restructuring a module or
+  redefining what `passed` means costs one thing — updating the callers in here.
+  So don't spend effort on `BREAKING CHANGE:` trailers, `feat!:` titles,
+  deprecation windows, aliases kept "for compatibility", or shims around our own
+  code. Delete and move on.
+  The one real exception is the **on-disk report schema**: `eval/compare_runs.py`
+  and `eval/cost_drift.py` read reports from *earlier* runs (a cached nightly
+  baseline, the files in `results/`), so a renamed or dropped result key breaks
+  the comparison against history rather than a caller you can grep for. That is
+  what `SCHEMA_VERSION` and the `.get()`-with-default reads in `eval/scoring.py`
+  are for — add fields, tolerate their absence, and don't rename in place.
+  None of this excuses the two things that do matter: a red build, and a
+  threshold that has stopped measuring what it claims. When `passed` changed from
+  "named the expected tool" to "the call ran and satisfied the fixture", the
+  0.90/0.85 gates kept their numbers and silently stopped describing the same
+  quantity. That is a real problem, and it is not a compatibility one — fix the
+  gate, skip the ceremony.
 - **No shell scripts for test logic.** Both layers are Python; the functional
   runner (`functional/runner.py`) reuses `mcp_client.py`. Don't add `.sh` runners —
-  extend the Python runner or add a helper module. The only shell that belongs
-  here is small CI glue under `functional/ci/*.sh`, which is shellcheck-linted.
+  extend the Python runner or add a helper module. The shell that belongs here is
+  CI glue under `functional/ci/*.sh` and the local-first entry point
+  `scripts/trunk-lane.sh`, which sequences existing Python commands rather than
+  implementing anything. Both trees are shellcheck-linted.
 - **Add unit tests for new logic.** New functional / eval / client behavior gets
   a pytest test under `tests/` — offline, faking the MCP server (see the existing
   tests). CI runs `ruff` + `pytest` + `shellcheck` on every push, so keep them green.
@@ -25,14 +46,22 @@ brief for coding agents.
   (plus id/prompt uniqueness and toolset correctness) against
   `tool-history/latest.json`, so a new server-side tool fails the unit tests
   until it has prompts.
-- **Two workflows.** `lint.yml` is the fast gate (ruff + format + pytest +
-  shellcheck) and runs on every PR. `mcp-evals.yml` is the heavy one: it installs
-  Shopware at the pinned `shopware.sha`, checks the plugin repos out at their
-  **default branch** (so plugin churn can turn a run red without a change here),
-  and runs the functional + LLM layers. The Store/UCP part runs by default too;
-  skip it with `run_store=false`. If `agentic-commerce` fails to resolve against
-  the pinned Shopware ref, the store steps skip with a warning rather than
-  taking down the admin evals.
+- **Two workflows, and the heavy one is four jobs.** `lint.yml` is the fast gate
+  (ruff + format + pytest + shellcheck) on every PR. `mcp-evals.yml` runs
+  `static` → (`admin-eval`, `store-eval`) → `report`, each building its own lane
+  via `.github/actions/setup-lane`. It installs Shopware at the pinned
+  `shopware.sha` and checks the plugin repos out at their **default branch**, so
+  plugin churn can turn a run red without a change here — except
+  `agentic-commerce`, temporarily pinned to the #154 branch.
+  The lane cannot be shared between jobs: it is a live MySQL plus a daemonised
+  server. Each job pays ~140s for its own, in parallel. What that buys is a
+  failure you can locate — one job failing no longer skips the rest, which used
+  to make an admin fixture failure look like "the plugin is missing".
+  The Store/UCP part runs by default; skip it with `run_store=false`.
+- **Never let a job write state you care about.** `--allow-mutations` places a
+  real order. CI sets it because the instance dies with the job; a developer's
+  shop does not. If you add anything that commits, gate it the same way and
+  record the skip rather than omitting it silently.
 - **The eval workflow is opt-in on PRs.** It runs nightly and on
   `workflow_dispatch` unconditionally, but on a pull request only when the PR
   carries the **`run-evals`** label — it costs a Shopware install and real OpenAI
@@ -77,6 +106,35 @@ brief for coding agents.
   `shopware-tool-search`, `shopware-toolsets-list`, `shopware-toolset-enable`.
 - `shopware-toolset-enable` persists per `Mcp-Session-Id`. Discovery-mode eval
   therefore opens a **fresh session per fixture** so enablement can't leak.
+- **A tool can fail while the transport succeeds.** UCP reports every failure as
+  HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
+  asserting on a tool call must go through `eval/assertions.py:inband_error`, or
+  it is blind to the entire Store failure mode — which is exactly what happened
+  to 27 admin checks for months.
+
+## UCP: four gates before a tool runs
+
+All defaults, none visible in any tool description, and each fails the whole
+Store suite. In order of when they fire:
+
+| gate | symptom | fix |
+|---|---|---|
+| `signaturePolicy` | `Missing signature headers` | defaults to `strict`; `ucp:config:set --signature-policy=off` on a throwaway lane |
+| `agentAllowlist` | `Agent profile host is not allowed` | falls back to the sales-channel domains; `--agent-allowlist=<host>` |
+| `platformAllowlist` | `Platform profile host is not allowed` | falls back to the **host of the incoming request**; `--platform-allowlist=<host>` |
+| plain http | `Plain http is only allowed for local development hosts` | needs `SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1` **and** a host `isLocalHost()` accepts — which is `localhost`/`127.0.0.1`/`::1` only, *not* `.localhost` subdomains |
+
+Two more things that look like tool bugs and are not:
+
+- **UCP resolves its config from the domain the request arrives at**, not from
+  the `sw-access-key`. Measured: one key, one configured channel, answering OK
+  through a registered domain and `Missing signature headers` through an
+  unregistered one, because the unregistered host silently reads defaults.
+- **The profile URI is fetched by the server, mid-request.** It must name a
+  host:port *the server* can reach — a host-mapped port is not one. A failure
+  there escapes as a bare `internal` with nothing logged: measured, a valid
+  profile answers in ~0.16s and a 404 fails in ~0.19s with exactly that error.
+  `eval/preflight.py` probes the URI and says which it is.
 
 ## Setup
 
@@ -90,6 +148,23 @@ pip install -e . --no-deps   # makes `from mcp_client import ...` resolve anywhe
 ## Running tests
 
 ```bash
+# Layer 0 — static: description checks over the committed catalogue snapshot.
+# No server, no model, no tokens. Advisory: always exits 0.
+python -m toollint
+
+# Everything free, against a local trunk lane, before spending CI.
+scripts/trunk-lane.sh
+scripts/trunk-lane.sh --eval
+
+# Registry: does the server's declared ACL agree with toolclass? Admin only —
+# debug:mcp has no endpoint flag and lists no Store tools (shopware/shopware#18848).
+bin/console debug:mcp --tools --no-ansi > /tmp/m.txt
+python -m eval.registry_check --from-file /tmp/m.txt
+
+# Can ONE tool actually run? ~1s, no model. Fails with a named cause, and on a
+# store failure fetches the UCP profile URI to say whether it is one.
+python -m eval.preflight --endpoint store
+
 # Layer 1 — functional: v2 discovery mechanics + per-tool dryRun-safe calls
 python -m functional.runner
 python -m functional.runner --skip-media-upload
@@ -109,18 +184,63 @@ python -m functional.runner --skip-dev-tools
 .venv/bin/python3 -m eval.runner --id disambig_count_vs_search
 .venv/bin/python3 -m eval.runner --no-system-prompt       # ad-hoc, skip system prompt
 .venv/bin/python3 -m eval.runner --output results/x.json  # custom report path
+.venv/bin/python3 -m eval.runner --triage                 # re-run ONLY the failures under
+                                                          # the isolated + full arms.
+                                                          # In CI: nightly, the `run-triage`
+                                                          # PR label, or the `triage`
+                                                          # workflow_dispatch input.
+
+# Cost of a run vs the previous one, per fixture. Warns, never gates.
+.venv/bin/python3 -m eval.cost_drift --current results/eval-primary.json \
+                                     --previous baseline/eval-primary.json
 
 # Snapshot the full catalogue for drift detection
 .venv/bin/python3 eval/snapshot_tools.py --output tool-history/latest.json
 
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
 python -m functional.runner --endpoint store
-.venv/bin/python3 -m eval.runner --endpoint store
+
+# The UCP buyer journey. COMMITS: creates a cart and a checkout and PLACES A REAL
+# ORDER. Disposable lanes only. Without the flag every step is skipped with that
+# reason, and a test asserts no call escapes the guard.
+python -m functional.runner --endpoint store --allow-mutations
+
+# Gate the eval on what the static layer proved. A fixture whose expected tool
+# failed is skipped WITH THAT REASON rather than graded, so a plugin bug is not
+# charged to the model. An absent file grades everything.
+.venv/bin/python3 -m eval.runner --endpoint store \
+    --tool-health results/tool-health-store.json
+
+# Which context prompts to send, named after the install each mirrors.
+.venv/bin/python3 -m eval.runner --context-prompts core     # vanilla Shopware
+.venv/bin/python3 -m eval.runner --context-prompts none     # the control arm
+
+# A local model. Reads /v1/models to record which one actually answered.
+.venv/bin/python3 -m eval.runner --provider lmstudio --discovery-concurrency 1
 
 # Unit tests (offline, no server) — reporting, runner logic, throttle retry
 .venv/bin/python3 -m pytest tests -q
-.venv/bin/python3 -m pytest tests -q --cov   # enforces the 85% branch-coverage floor
+.venv/bin/python3 -m pytest tests -q --cov   # enforces the 90% branch-coverage floor
 ```
+
+> **Measured under the new definition of `passed`** (tool executed, result
+> asserted, recovery allowed): primary **99%** (95/96, core 100%), second
+> validator **88%** (84/96, core 88%). Both clear 0.90/0.85, so neither
+> threshold moved.
+>
+> Getting there took one detour worth knowing about. Earlier runs read 95% and
+> **79%**, and the spread was not the models: all five of the primary's failures
+> and six of the validator's twenty were fixtures naming an id the lane could not
+> supply — right tool picked, call refused. A `REBASELINE` flag was added to hold
+> the validator's gate advisory while the number was re-derived; fixing the ids
+> (see the `{placeholder}` rules in `eval/fixtures.yaml`) moved it 79% -> 88% and
+> the flag was deleted without ever changing a verdict. The lesson is the
+> ordering: find out what the number is measuring before deciding it is wrong.
+>
+> The store suite's 64% is a real finding, not a threshold problem: every UCP
+> tool is unsafe to execute, so that suite is graded on selection alone, and its
+> failures cluster on `order-get`/`checkout-get`. It is advisory, so it shows up
+> as a red annotation on an otherwise green job.
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
 itself, and `compare_runs.py --gate both --min-pass-rate 0.9
@@ -128,6 +248,21 @@ itself, and `compare_runs.py --gate both --min-pass-rate 0.9
 slack on purpose: its worth is the intersection with the primary, and at a shared
 90% it flapped (89% on one commit, 90% on the next, nothing changed in between).
 Failed fixtures are retried once, so a reported failure is two lost attempts.
+
+**A fixture may not invent an id.** Grading executes the call, so a value in a
+prompt is sent to the server. Where the tool answers a missing id with a plain
+"not found" a phantom one is fine — the `accepted` tier exists for exactly that.
+Where it does anything else, it is not: `entity-upsert` tries to CREATE the
+product and fails on the required fields it was never given, and
+`merchant-cart-checkout` answers "Cart is empty". Those prompts carry
+`{product_id}`, `{order_id}`, `{customer_id}`, `{cart_token}`,
+`{line_item_id}` or `{sales_channel_id}`, resolved off the live lane at startup
+by `PLACEHOLDER_RESOLVERS` in `eval/runner.py` (lookups in `lane.py`, shared with
+the functional suite). A placeholder the lane cannot fill **skips** its fixtures
+by name rather than grading them. `{cart_token}` and `{line_item_id}` need a cart
+created, so they resolve only under `--seed-lane` / `EVAL_SEED_LANE=true` — CI
+sets it because the instance is destroyed with the job; do not set it against a
+shop you care about.
 
 The rate is over fixtures that **ran**. Skipped ones (expected tool not
 registered) never gate. Errored ones (server 500, throttling 429) are excluded
@@ -149,11 +284,23 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 |---|---|
 | `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
-| `functional/reporting.py` | Reusable pass/fail/skip harness + JSON report writer |
+| `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
+| `functional/journeys.py` | The UCP buyer journey. Those tools are one flow, so an isolated call mostly measures how the server words "not found". Commits, behind `--allow-mutations` |
+| `eval/preflight.py` | One read-only call, no model, ~1s. Fails with a named cause and, on the Store endpoint, probes the UCP profile URI — the one cause the error text can never name |
+| `eval/registry_check.py` | The server's declared ACL privileges against `toolclass`. Two independent sources disagreeing is what catches a tool wrongly filed as READ_ONLY, which would then be executed for real |
+| `.github/actions/setup-lane/` | Everything up to "a live lane with credentials". Values that used to cross step boundaries via `$GITHUB_ENV` are outputs here, because neither survives a job boundary |
+| `scripts/trunk-lane.sh` | The local-first path: preflight, static checks, journey, and optionally the eval via LM Studio |
 | `eval/fixtures_store.yaml` | Store API / UCP buyer-journey fixtures |
 | `eval/fixtures.yaml` | Natural language prompts mapped to expected tool names |
-| `eval/runner.py` | Baseline vs discovery LLM eval, scores tool selection accuracy |
+| `eval/runner.py` | Discovery-mode LLM eval: finds the tool, executes it, asserts the result, allows recovery |
 | `eval/scoring.py` | Results → counts, rates and the gate verdict. Pure, and what the gate is decided by |
+| `toolclass.py` | **Read before touching execution.** May a tool be called, and how to make it safe (read-only / dry-runnable / unsafe / unclassified) |
+| `ucp.py` | Everything specific to the optional `agentic-commerce` plugin — its tool classification and the `UCP-Agent` header. Isolated so the plugin can be dropped by deleting this file; `toolclass.py` merges it in. `shopware-store-api-context` is core and deliberately stays out of it |
+| `toollint.py` | Layer 0 static description checks; advisory, runs in lint.yml |
+| `eval/assertions.py` | `expect_result` tiers, and the line between a call the server rejected and one that returned nothing |
+| `eval/tool_scorecard.py` | Per-tool recall, **precision**, F1, confusion pairs. The half a pass rate cannot show |
+| `eval/cost.py` / `eval/cost_drift.py` | What a run costs, and whether that moved |
+| `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
@@ -186,17 +333,33 @@ Where the tools come from:
 
 ## Improving tool descriptions / groups
 
-When an LLM eval fixture fails:
-1. Note the failing prompt, the mode, and (discovery mode) the meta-call trail.
-2. Edit the `#[McpTool(description: '...')]`, `#[McpToolGroup('...')]`, or
-   `meta: ['deferred' => ...]` PHP attribute in the Shopware repo.
-3. Restart the Shopware server.
-4. Re-run `eval/runner.py --id <fixture-id>` to verify improvement.
+Do not start from the failing prompt — start from where the failure *is*. Three
+different problems produce an identical failure in the gating arm, and each
+wants a different edit:
+
+1. **Run `--triage`** (or read the "Where the failures are" table in the job
+   summary). It re-runs the failures with only their own toolset enabled, then
+   with the whole catalogue enabled:
+   - fails both → the tool's own `#[McpTool(description:)]`
+   - passes isolated, fails full → a **cross-group collision**; fix the pair,
+     not the tool. The scorecard's `steals_from` column names the other half
+   - passes both → the **discovery layer**: `#[McpToolGroup]` description, or
+     tool-search ranking (check `search_rank`)
+2. **Check the per-tool scorecard** for precision. A tool with high recall and
+   low precision is over-broad and is quietly taking its siblings' prompts —
+   that is invisible in the pass rate and is usually the real bug.
+3. Edit the PHP attribute in the Shopware repo, restart the server, and re-run
+   `eval/runner.py --id <fixture-id>`.
+
+`python -m toollint` is free and catches some of this before a run: a
+description that never says *when* to call the tool fires on half the catalogue.
 
 ## Adding fixtures
 
 Add entries to `eval/fixtures.yaml`. Required fields: `id`, `category`,
-`prompt`, `expected_tool`. Optional: `expected_toolset` (for deferred tools —
+`prompt`, `expected_tool`. Optional: `expect_result` (assertion tier — defaults
+to `accepted`; see the header of fixtures.yaml for why everything is on that
+default for now), `expected_toolset` (for deferred tools —
 grades whether the right toolset was enabled), `max_steps` (per-fixture
 discovery step cap), `notes`. Categories:
 
@@ -209,3 +372,24 @@ discovery step cap), `notes`. Categories:
 After editing a tool's PHP attributes in the Shopware repo, restart the
 Shopware server before re-running — the tool list is read at MCP `initialize`
 time.
+
+### Negative fixtures
+
+`category: negative` + `expect_no_tool: true`, no `expected_tool`. The right
+answer is that nothing applies, which is the only way to catch an over-broad
+description directly rather than waiting for it to steal a sibling's fixture.
+
+Two rules, both learned the hard way:
+
+- **No legitimate first step.** "Export all orders to CSV and email it" is not a
+  valid negative — fetching the orders is a reasonable opening move, so a model
+  calling `entity-search` is behaving correctly and the fixture would punish it.
+  Keep them external or infrastructural.
+- **Plausible and adjacent.** "What is the weather" measures nothing. The point
+  is a request a shop admin would really make, next to a group that might bite.
+
+Meta calls are free — searching, finding nothing, then declining is the
+behaviour under test and passes. Running out of steps does **not** pass: that is
+a model still rummaging, not one that concluded. `notes` must say what
+capability would answer the prompt, because the fixture becomes a false
+accusation the moment the server grows it.

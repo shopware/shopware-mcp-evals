@@ -8,26 +8,46 @@ error that is not a protocol error.
 """
 
 import json
+from pathlib import Path
+from typing import cast, override
 
 import pytest
 import requests
 
 import mcp_client as C
+from eval.result_schema import JsonObject, McpResponse
+from tests.stubs import const
+
+
+def reply(body: JsonObject) -> McpResponse:
+    """A JSON-RPC reply built key by key, including the shapes a well-formed one
+    could not have — a null `_meta`, an `error` with no message."""
+    return cast(McpResponse, cast(object, body))
 
 
 class FakeResp:
-    def __init__(self, status_code, *, headers=None, body=None, text=""):
-        self.status_code = status_code
-        self.headers = headers or {}
-        self._body = body if body is not None else {}
-        self.text = text
+    """A stand-in for the four things mcp_client reads off a reply — see
+    C.HttpReply, which is the contract this satisfies."""
 
-    def json(self):
+    def __init__(
+        self,
+        status_code: int,
+        *,
+        headers: dict[str, str] | None = None,
+        body: object = None,
+        text: str = "",
+    ) -> None:
+        self.status_code: int = status_code
+        self.headers: dict[str, str] = headers or {}
+        self._body: object = body if body is not None else {}
+        self.text: str = text
+
+    def json(self) -> object:
         return self._body
 
-    def raise_for_status(self):
+    def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise requests.exceptions.HTTPError(f"{self.status_code} error", response=self)
+            raise requests.exceptions.HTTPError(f"{self.status_code} error")
 
 
 # --- response parsing: application/json object, SSE stream, and (defensive) array ---
@@ -41,77 +61,80 @@ SSE_BODY = (
 )
 
 
-def test_parse_sse_extracts_all_messages():
+def test_parse_sse_extracts_all_messages() -> None:
     msgs = C._parse_sse(SSE_BODY)
     assert len(msgs) == 2
-    assert msgs[0]["method"] == "notifications/tools/list_changed"
-    assert msgs[1]["id"] == 4
+    assert cast(JsonObject, cast(object, msgs[0]))["method"] == "notifications/tools/list_changed"
+    assert msgs[1].get("id") == 4
 
 
-def test_pick_returns_matching_id():
-    msgs = [{"method": "notifications/tools/list_changed"}, {"id": 4, "result": {"ok": True}}]
-    assert C._pick(msgs, 4)["result"] == {"ok": True}
+def test_pick_returns_matching_id() -> None:
+    msgs = [reply({"method": "notifications/tools/list_changed"}), reply({"id": 4, "result": {"ok": True}})]
+    assert C._pick(msgs, 4).get("result") == {"ok": True}
 
 
-def test_pick_empty_when_no_match():
-    assert C._pick([{"method": "notifications/x"}], 4) == {}
+def test_pick_empty_when_no_match() -> None:
+    assert C._pick([reply({"method": "notifications/x"})], 4) == {}
 
 
-def test_response_json_object():
+def test_response_json_object() -> None:
     resp = FakeResp(
         200, headers={"Content-Type": "application/json"}, body={"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}
     )
-    assert C._response(resp, 2)["result"] == {"tools": []}
+    assert C._response(resp, 2).get("result") == {"tools": []}
 
 
-def test_response_sse_stream_picks_response_over_notification():
+def test_response_sse_stream_picks_response_over_notification() -> None:
     resp = FakeResp(200, headers={"Content-Type": "text/event-stream; charset=UTF-8"}, text=SSE_BODY)
-    assert C._response(resp, 4)["result"]["tools"] == [{"name": "x"}]
+    assert (C._response(resp, 4).get("result") or {}).get("tools") == [{"name": "x"}]
 
 
-def test_response_tolerates_json_array():
+def test_response_tolerates_json_array() -> None:
     resp = FakeResp(
         200,
         headers={"Content-Type": "application/json"},
         body=[{"method": "notifications/x"}, {"id": 4, "result": {"ok": 1}}],
     )
-    assert C._response(resp, 4)["result"] == {"ok": 1}
+    assert C._response(resp, 4).get("result") == {"ok": 1}
 
 
-def test_throttle_wait_from_retry_after_header():
+def test_throttle_wait_from_retry_after_header() -> None:
     assert C._throttle_wait(FakeResp(429, headers={"Retry-After": "16"})) == 16.0
 
 
-def test_throttle_wait_caps_retry_after():
+def test_throttle_wait_caps_retry_after() -> None:
     assert C._throttle_wait(FakeResp(429, headers={"Retry-After": "999"})) == C.THROTTLE_MAX_WAIT_S
 
 
-def test_throttle_wait_parses_body_hint():
+def test_throttle_wait_parses_body_hint() -> None:
     resp = FakeResp(429, body={"error": {"message": "MCP endpoint throttled for 8 seconds."}})
     assert C._throttle_wait(resp) == 8.0
 
 
-def test_throttle_wait_caps_body_hint():
+def test_throttle_wait_caps_body_hint() -> None:
     resp = FakeResp(429, body={"error": {"message": "throttled for 999 seconds"}})
     assert C._throttle_wait(resp) == C.THROTTLE_MAX_WAIT_S
 
 
-def test_throttle_wait_default_when_no_hint():
+def test_throttle_wait_default_when_no_hint() -> None:
     assert C._throttle_wait(FakeResp(429, body={})) == 5.0
 
 
-def test_rpc_retries_then_succeeds(monkeypatch):
+def test_rpc_retries_then_succeeds(monkeypatch: pytest.MonkeyPatch):
     throttled = FakeResp(429, body={"error": {"message": "throttled for 1 seconds"}})
     ok = FakeResp(200, body={"result": {}})
     responses = [throttled, throttled, ok]
     calls = {"post": 0, "sleep": 0}
 
-    def fake_post(*_a, **_k):
+    def sleep(_seconds: float) -> None:
+        calls["sleep"] += 1
+
+    def fake_post(*_args: object, **_kwargs: object) -> FakeResp:
         calls["post"] += 1
         return responses.pop(0)
 
     monkeypatch.setattr(C.requests, "post", fake_post)
-    monkeypatch.setattr(C.time, "sleep", lambda _s: calls.__setitem__("sleep", calls["sleep"] + 1))
+    monkeypatch.setattr(C.time, "sleep", sleep)
 
     resp = C._rpc("tools/list", {})
     assert resp is ok
@@ -119,11 +142,11 @@ def test_rpc_retries_then_succeeds(monkeypatch):
     assert calls["sleep"] == 2  # slept before each retry
 
 
-def test_rpc_raises_after_exhausting_retries(monkeypatch):
+def test_rpc_raises_after_exhausting_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        C.requests, "post", lambda *_a, **_k: FakeResp(429, body={"error": {"message": "throttled for 1 seconds"}})
+        C.requests, "post", const(FakeResp(429, body={"error": {"message": "throttled for 1 seconds"}}))
     )
-    monkeypatch.setattr(C.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(C.time, "sleep", const(None))
 
     with pytest.raises(requests.exceptions.HTTPError):
         C._rpc("tools/list", {})
@@ -138,12 +161,12 @@ def test_rpc_raises_after_exhausting_retries(monkeypatch):
 # point at a different server, so these factories exist alongside the constants.
 
 
-def test_admin_endpoint_defaults_to_the_process_configuration():
+def test_admin_endpoint_defaults_to_the_process_configuration() -> None:
     assert C.admin_endpoint().url == C.ADMIN.url
     assert C.admin_endpoint().auth_headers == C.ADMIN.auth_headers
 
 
-def test_endpoint_can_target_another_server_without_touching_the_environment():
+def test_endpoint_can_target_another_server_without_touching_the_environment() -> None:
     ep = C.admin_endpoint(access_key="k", secret_access_key="s", base_url="http://other:9000")
 
     assert ep.url == "http://other:9000/api/_mcp"
@@ -153,29 +176,29 @@ def test_endpoint_can_target_another_server_without_touching_the_environment():
     assert C.ADMIN.url != ep.url
 
 
-def test_base_url_trailing_slash_does_not_double_up():
+def test_base_url_trailing_slash_does_not_double_up() -> None:
     assert C.admin_endpoint(base_url="http://x:8000/").url == "http://x:8000/api/_mcp"
 
 
-def test_every_endpoint_carries_the_json_content_type():
+def test_every_endpoint_carries_the_json_content_type() -> None:
     for ep in (C.admin_endpoint(), C.store_endpoint()):
         assert ep.auth_headers["Content-Type"] == "application/json"
 
 
-def test_store_endpoints_get_distinct_context_tokens():
+def test_store_endpoints_get_distinct_context_tokens() -> None:
     """Two endpoints mean two carts; that is why the runner reuses one STORE."""
     a, b = C.store_endpoint(), C.store_endpoint()
 
     assert a.auth_headers["sw-context-token"] != b.auth_headers["sw-context-token"]
 
 
-def test_store_context_token_can_be_pinned():
+def test_store_context_token_can_be_pinned() -> None:
     ep = C.store_endpoint(context_token="fixed-token")
 
     assert ep.auth_headers["sw-context-token"] == "fixed-token"
 
 
-def test_endpoint_by_name_returns_the_shared_defaults_not_fresh_ones():
+def test_endpoint_by_name_returns_the_shared_defaults_not_fresh_ones() -> None:
     """A runner that rebuilt its endpoint mid-run would lose the cart it had
     been filling, so lookup must hand back the same object every time."""
     assert C.endpoint_by_name("store") is C.STORE
@@ -185,37 +208,39 @@ def test_endpoint_by_name_returns_the_shared_defaults_not_fresh_ones():
 # ---------------------------------------------------------------------------
 # Session init
 # ---------------------------------------------------------------------------
-def json_resp(body, headers=None):
+def json_resp(body: object, headers: dict[str, str] | None = None) -> FakeResp:
     return FakeResp(200, headers={"Content-Type": "application/json", **(headers or {})}, body=body)
 
 
-def test_init_returns_the_session_id_and_server_instructions(monkeypatch):
+def test_init_returns_the_session_id_and_server_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         C.requests,
         "post",
-        lambda *_a, **_k: json_resp(
-            {"jsonrpc": "2.0", "id": 1, "result": {"instructions": "Use entity tools."}},
-            headers={"Mcp-Session-Id": "sid-1"},
+        const(
+            json_resp(
+                {"jsonrpc": "2.0", "id": 1, "result": {"instructions": "Use entity tools."}},
+                headers={"Mcp-Session-Id": "sid-1"},
+            )
         ),
     )
 
     assert C.mcp_init() == ("sid-1", "Use entity tools.")
 
 
-def test_init_without_a_session_header_is_fatal(monkeypatch):
+def test_init_without_a_session_header_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every later call is keyed by Mcp-Session-Id; continuing without one would
     silently run each request in a fresh session."""
-    monkeypatch.setattr(C.requests, "post", lambda *_a, **_k: json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}))
+    monkeypatch.setattr(C.requests, "post", const(json_resp({"jsonrpc": "2.0", "id": 1, "result": {}})))
 
     with pytest.raises(RuntimeError, match="No Mcp-Session-Id"):
         C.mcp_init()
 
 
-def test_init_tolerates_a_server_that_sends_no_instructions(monkeypatch):
+def test_init_tolerates_a_server_that_sends_no_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         C.requests,
         "post",
-        lambda *_a, **_k: json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s"}),
+        const(json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s"})),
     )
 
     assert C.mcp_init() == ("s", "")
@@ -224,64 +249,64 @@ def test_init_tolerates_a_server_that_sends_no_instructions(monkeypatch):
 # ---------------------------------------------------------------------------
 # Result / error extraction
 # ---------------------------------------------------------------------------
-def test_result_text_takes_the_first_text_block():
-    resp = {"result": {"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}}
+def test_result_text_takes_the_first_text_block() -> None:
+    resp = reply({"result": {"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}})
 
     assert C.mcp_result_text(resp) == "first"
 
 
-def test_result_text_skips_a_non_text_block():
-    resp = {"result": {"content": [{"type": "image", "data": "..."}, {"type": "text", "text": "wanted"}]}}
+def test_result_text_skips_a_non_text_block() -> None:
+    resp = reply({"result": {"content": [{"type": "image", "data": "..."}, {"type": "text", "text": "wanted"}]}})
 
     assert C.mcp_result_text(resp) == "wanted"
 
 
-def test_result_text_treats_a_block_without_a_type_as_text():
-    assert C.mcp_result_text({"result": {"content": [{"text": "implicit"}]}}) == "implicit"
+def test_result_text_treats_a_block_without_a_type_as_text() -> None:
+    assert C.mcp_result_text(reply({"result": {"content": [{"text": "implicit"}]}})) == "implicit"
 
 
-def test_result_text_of_an_empty_response_is_empty():
-    assert C.mcp_result_text({}) == ""
-    assert C.mcp_result_text({"result": {"content": []}}) == ""
+def test_result_text_of_an_empty_response_is_empty() -> None:
+    assert C.mcp_result_text(reply({})) == ""
+    assert C.mcp_result_text(reply({"result": {"content": []}})) == ""
 
 
-def test_result_meta_defaults_to_a_dict_even_when_null():
-    assert C.mcp_result_meta({"result": {"_meta": None}}) == {}
-    assert C.mcp_result_meta({"result": {"_meta": {"listChanged": True}}}) == {"listChanged": True}
+def test_result_meta_defaults_to_a_dict_even_when_null() -> None:
+    assert C.mcp_result_meta(reply({"result": {"_meta": None}})) == {}
+    assert C.mcp_result_meta(reply({"result": {"_meta": {"listChanged": True}}})) == {"listChanged": True}
 
 
-def test_call_error_reports_a_protocol_error():
-    assert C.mcp_call_error({"error": {"message": "Tool not found"}}) == "Tool not found"
+def test_call_error_reports_a_protocol_error() -> None:
+    assert C.mcp_call_error(reply({"error": {"message": "Tool not found"}})) == "Tool not found"
 
 
-def test_call_error_names_an_unlabelled_protocol_error():
-    assert C.mcp_call_error({"error": {}}) == "unknown error"
+def test_call_error_names_an_unlabelled_protocol_error() -> None:
+    assert C.mcp_call_error(reply({"error": {}})) == "unknown error"
 
 
-def test_call_error_reports_a_tool_level_error_from_the_text_block():
+def test_call_error_reports_a_tool_level_error_from_the_text_block() -> None:
     """isError puts the message in the content, not in error.message — missing
     this reads a failed tool call as a success."""
-    resp = {"result": {"isError": True, "content": [{"type": "text", "text": "entity not found"}]}}
+    resp = reply({"result": {"isError": True, "content": [{"type": "text", "text": "entity not found"}]}})
 
     assert C.mcp_call_error(resp) == "entity not found"
 
 
-def test_call_error_falls_back_when_an_is_error_response_has_no_text():
-    assert C.mcp_call_error({"result": {"isError": True, "content": []}}) == "tool error"
+def test_call_error_falls_back_when_an_is_error_response_has_no_text() -> None:
+    assert C.mcp_call_error(reply({"result": {"isError": True, "content": []}})) == "tool error"
 
 
-def test_call_error_of_a_successful_response_is_empty():
-    assert C.mcp_call_error({"result": {"content": [{"type": "text", "text": "ok"}]}}) == ""
+def test_call_error_of_a_successful_response_is_empty() -> None:
+    assert C.mcp_call_error(reply({"result": {"content": [{"type": "text", "text": "ok"}]}})) == ""
 
 
 # ---------------------------------------------------------------------------
 # tools/list pagination
 # ---------------------------------------------------------------------------
-def paginated(monkeypatch, pages):
+def paginated(monkeypatch: pytest.MonkeyPatch, pages: list[object]) -> dict[str, int]:
     """Serve `pages` in order, one per tools/list request."""
     calls = {"n": 0}
 
-    def post(*_a, **kwargs):
+    def post(*_args: object, **_kwargs: object) -> FakeResp:
         page = pages[min(calls["n"], len(pages) - 1)]
         calls["n"] += 1
         return json_resp({"jsonrpc": "2.0", "id": 2, "result": page})
@@ -290,7 +315,7 @@ def paginated(monkeypatch, pages):
     return calls
 
 
-def test_tools_list_follows_next_cursor_across_pages(monkeypatch):
+def test_tools_list_follows_next_cursor_across_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = paginated(
         monkeypatch,
         [
@@ -305,14 +330,14 @@ def test_tools_list_follows_next_cursor_across_pages(monkeypatch):
     assert calls["n"] == 2
 
 
-def test_tools_list_stops_on_a_single_page(monkeypatch):
+def test_tools_list_stops_on_a_single_page(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = paginated(monkeypatch, [{"tools": [{"name": "a"}]}])
 
     assert len(C.mcp_tools_list_all("sid")) == 1
     assert calls["n"] == 1
 
 
-def test_tools_list_treats_an_empty_next_cursor_as_the_end(monkeypatch):
+def test_tools_list_treats_an_empty_next_cursor_as_the_end(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = paginated(monkeypatch, [{"tools": [{"name": "a"}], "nextCursor": ""}])
 
     C.mcp_tools_list_all("sid")
@@ -320,7 +345,7 @@ def test_tools_list_treats_an_empty_next_cursor_as_the_end(monkeypatch):
     assert calls["n"] == 1, "an empty cursor string must not trigger another page"
 
 
-def test_tools_list_rejects_a_tool_repeated_across_pages(monkeypatch):
+def test_tools_list_rejects_a_tool_repeated_across_pages(monkeypatch: pytest.MonkeyPatch) -> None:
     """A server that repeats a tool is paginating wrong; silently de-duplicating
     it would hide the bug and undercount the catalogue."""
     paginated(
@@ -332,11 +357,11 @@ def test_tools_list_rejects_a_tool_repeated_across_pages(monkeypatch):
         C.mcp_tools_list_all("sid")
 
 
-def test_tools_list_gives_up_on_a_cursor_that_never_ends(monkeypatch):
+def test_tools_list_gives_up_on_a_cursor_that_never_ends(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the guard a server that always returns a cursor loops forever."""
     n = {"i": 0}
 
-    def post(*_a, **_k):
+    def post(*_args: object, **_kwargs: object) -> FakeResp:
         n["i"] += 1
         return json_resp({"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": f"t{n['i']}"}], "nextCursor": "c"}})
 
@@ -347,7 +372,7 @@ def test_tools_list_gives_up_on_a_cursor_that_never_ends(monkeypatch):
     assert n["i"] == 50
 
 
-def test_tools_list_of_an_empty_surface_is_an_empty_list(monkeypatch):
+def test_tools_list_of_an_empty_surface_is_an_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
     paginated(monkeypatch, [{"tools": []}])
 
     assert C.mcp_tools_list_all("sid") == []
@@ -356,10 +381,16 @@ def test_tools_list_of_an_empty_surface_is_an_empty_list(monkeypatch):
 # ---------------------------------------------------------------------------
 # Toolsets
 # ---------------------------------------------------------------------------
-def tool_call_resp(monkeypatch, payload=None, error=None, capture=None):
-    def post(_url, **kwargs):
+def tool_call_resp(
+    monkeypatch: pytest.MonkeyPatch,
+    payload: object = None,
+    error: str | None = None,
+    capture: list[JsonObject] | None = None,
+) -> None:
+    def post(_url: str, **kwargs: object) -> FakeResp:
+        body_sent = cast(JsonObject, kwargs["json"])
         if capture is not None:
-            capture.append(kwargs["json"])
+            capture.append(body_sent)
         if error:
             return json_resp({"jsonrpc": "2.0", "id": 99, "error": {"message": error}})
         body = {"result": {"content": [{"type": "text", "text": json.dumps(payload)}]}, "jsonrpc": "2.0", "id": 99}
@@ -368,27 +399,27 @@ def tool_call_resp(monkeypatch, payload=None, error=None, capture=None):
     monkeypatch.setattr(C.requests, "post", post)
 
 
-def test_toolsets_list_parses_the_payload(monkeypatch):
+def test_toolsets_list_parses_the_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     tool_call_resp(monkeypatch, {"data": {"toolsets": [{"name": "entity", "enabled": False}]}})
 
     assert C.mcp_toolsets_list("sid") == [{"name": "entity", "enabled": False}]
 
 
-def test_toolsets_list_raises_when_the_meta_tool_itself_fails(monkeypatch):
+def test_toolsets_list_raises_when_the_meta_tool_itself_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     tool_call_resp(monkeypatch, error="Tool not found")
 
     with pytest.raises(RuntimeError, match="shopware-toolsets-list failed: Tool not found"):
         C.mcp_toolsets_list("sid")
 
 
-def test_toolsets_list_of_a_payload_without_toolsets_is_empty(monkeypatch):
+def test_toolsets_list_of_a_payload_without_toolsets_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     tool_call_resp(monkeypatch, {"data": {}})
 
     assert C.mcp_toolsets_list("sid") == []
 
 
-def test_enable_toolset_sends_the_toolset_name(monkeypatch):
-    sent = []
+def test_enable_toolset_sends_the_toolset_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[JsonObject] = []
     tool_call_resp(monkeypatch, {"success": True}, capture=sent)
 
     C.enable_toolset("sid", "entity")
@@ -396,14 +427,14 @@ def test_enable_toolset_sends_the_toolset_name(monkeypatch):
     assert sent[0]["params"] == {"name": "shopware-toolset-enable", "arguments": {"toolset": "entity"}}
 
 
-def test_enable_all_toolsets_skips_the_ones_already_enabled(monkeypatch):
+def test_enable_all_toolsets_skips_the_ones_already_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     """Re-enabling is wasted round trips against a throttled endpoint."""
-    sent = []
+    sent: list[str] = []
 
-    def post(_url, **kwargs):
-        body = kwargs["json"]
-        sent.append(body["params"].get("name"))
-        if body["params"].get("name") == "shopware-toolsets-list":
+    def post(_url: str, **kwargs: object) -> FakeResp:
+        params = cast(JsonObject, cast(JsonObject, kwargs["json"])["params"])
+        sent.append(str(params.get("name", "")))
+        if params.get("name") == "shopware-toolsets-list":
             payload = {"data": {"toolsets": [{"name": "a", "enabled": True}, {"name": "b", "enabled": False}]}}
         else:
             payload = {"success": True}
@@ -417,9 +448,10 @@ def test_enable_all_toolsets_skips_the_ones_already_enabled(monkeypatch):
     assert sent.count("shopware-toolset-enable") == 1, "only the disabled toolset needs a call"
 
 
-def test_enable_all_toolsets_names_the_toolset_that_failed(monkeypatch):
-    def post(_url, **kwargs):
-        if kwargs["json"]["params"].get("name") == "shopware-toolsets-list":
+def test_enable_all_toolsets_names_the_toolset_that_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    def post(_url: str, **kwargs: object) -> FakeResp:
+        params = cast(JsonObject, cast(JsonObject, kwargs["json"])["params"])
+        if params.get("name") == "shopware-toolsets-list":
             payload = {"data": {"toolsets": [{"name": "broken", "enabled": False}]}}
             return json_resp(
                 {"jsonrpc": "2.0", "id": 99, "result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}
@@ -435,19 +467,20 @@ def test_enable_all_toolsets_names_the_toolset_that_failed(monkeypatch):
 # ---------------------------------------------------------------------------
 # System prompt assembly
 # ---------------------------------------------------------------------------
-def prompts_server(monkeypatch, prompts, bodies):
-    def post(_url, **kwargs):
-        body = kwargs["json"]
+def prompts_server(monkeypatch: pytest.MonkeyPatch, prompts: list[str], bodies: dict[str, JsonObject]) -> None:
+    def post(_url: str, **kwargs: object) -> FakeResp:
+        body = cast(JsonObject, kwargs["json"])
         if body["method"] == "prompts/list":
-            result = {"prompts": [{"name": n} for n in prompts]}
+            result: JsonObject = {"prompts": [{"name": n} for n in prompts]}
         else:
-            result = bodies[body["params"]["name"]]
+            params = cast(JsonObject, body["params"])
+            result = bodies[str(params["name"])]
         return json_resp({"jsonrpc": "2.0", "id": body["id"], "result": result})
 
     monkeypatch.setattr(C.requests, "post", post)
 
 
-def test_system_prompt_joins_instructions_and_every_context_prompt(monkeypatch):
+def test_system_prompt_joins_instructions_and_every_context_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts_server(
         monkeypatch,
         ["ctx-a", "ctx-b"],
@@ -462,13 +495,13 @@ def test_system_prompt_joins_instructions_and_every_context_prompt(monkeypatch):
     assert out == "Server says hello\n\n---\n\nA body\n\n---\n\nB body"
 
 
-def test_system_prompt_omits_absent_server_instructions(monkeypatch):
+def test_system_prompt_omits_absent_server_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts_server(monkeypatch, ["ctx"], {"ctx": {"messages": [{"content": {"text": "only body"}}]}})
 
     assert C.mcp_fetch_system_prompt("sid", "") == "only body"
 
 
-def test_system_prompt_drops_blank_prompt_bodies(monkeypatch):
+def test_system_prompt_drops_blank_prompt_bodies(monkeypatch: pytest.MonkeyPatch) -> None:
     """A registered prompt with no text would otherwise contribute an empty
     section and a stray separator."""
     prompts_server(monkeypatch, ["empty"], {"empty": {"messages": [{"content": {"text": "   "}}]}})
@@ -476,13 +509,13 @@ def test_system_prompt_drops_blank_prompt_bodies(monkeypatch):
     assert C.mcp_fetch_system_prompt("sid", "instructions") == "instructions"
 
 
-def test_system_prompt_accepts_a_non_dict_content_block(monkeypatch):
+def test_system_prompt_accepts_a_non_dict_content_block(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts_server(monkeypatch, ["odd"], {"odd": {"messages": [{"content": "bare string"}]}})
 
     assert "bare string" in C.mcp_fetch_system_prompt("sid", "")
 
 
-def test_system_prompt_with_no_prompts_registered_is_just_the_instructions(monkeypatch):
+def test_system_prompt_with_no_prompts_registered_is_just_the_instructions(monkeypatch: pytest.MonkeyPatch) -> None:
     prompts_server(monkeypatch, [], {})
 
     assert C.mcp_fetch_system_prompt("sid", "instructions only") == "instructions only"
@@ -491,39 +524,39 @@ def test_system_prompt_with_no_prompts_registered_is_just_the_instructions(monke
 # ---------------------------------------------------------------------------
 # SSE parsing and env loading — the remaining transport edges
 # ---------------------------------------------------------------------------
-def test_sse_parses_an_event_terminated_by_a_blank_line():
+def test_sse_parses_an_event_terminated_by_a_blank_line() -> None:
     body = 'data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n'
 
     assert C._parse_sse(body) == [{"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}]
 
 
-def test_sse_parses_a_trailing_event_with_no_blank_line():
+def test_sse_parses_a_trailing_event_with_no_blank_line() -> None:
     """The server does not always terminate the last event, and dropping it would
     lose the response while keeping the notification."""
     assert C._parse_sse('data: {"id":1}') == [{"id": 1}]
 
 
-def test_sse_joins_a_payload_split_across_data_lines():
+def test_sse_joins_a_payload_split_across_data_lines() -> None:
     assert C._parse_sse('data: {"id":\ndata: 1}\n\n') == [{"id": 1}]
 
 
-def test_sse_skips_a_malformed_event_rather_than_failing_the_call():
+def test_sse_skips_a_malformed_event_rather_than_failing_the_call() -> None:
     body = 'data: not json\n\ndata: {"id":2}\n\n'
 
     assert C._parse_sse(body) == [{"id": 2}]
 
 
-def test_sse_skips_a_malformed_trailing_event():
+def test_sse_skips_a_malformed_trailing_event() -> None:
     assert C._parse_sse('data: {"id":1}\n\ndata: {oops') == [{"id": 1}]
 
 
-def test_sse_ignores_non_data_lines():
+def test_sse_ignores_non_data_lines() -> None:
     body = 'event: message\nid: 7\ndata: {"id":1}\n\n'
 
     assert C._parse_sse(body) == [{"id": 1}]
 
 
-def test_response_picks_the_reply_and_ignores_a_pushed_notification():
+def test_response_picks_the_reply_and_ignores_a_pushed_notification() -> None:
     """After a toolset-enable the server pushes tools/list_changed alongside the
     response; matching on id is what keeps them apart."""
     body = (
@@ -535,40 +568,42 @@ def test_response_picks_the_reply_and_ignores_a_pushed_notification():
     assert C._response(resp, 99) == {"jsonrpc": "2.0", "id": 99, "result": {"ok": 1}}
 
 
-def test_response_is_empty_when_no_message_matches_the_id():
+def test_response_is_empty_when_no_message_matches_the_id() -> None:
     resp = FakeResp(200, headers={"Content-Type": "text/event-stream"}, text='data: {"id":1}\n\n')
 
     assert C._response(resp, 99) == {}
 
 
-def test_response_tolerates_a_top_level_json_array():
+def test_response_tolerates_a_top_level_json_array() -> None:
     """A spec-removed batch shape, accepted defensively."""
-    resp = FakeResp(200, headers={"Content-Type": "application/json"}, body=[{"id": 5, "result": {}}])
+    batch: list[JsonObject] = [{"id": 5, "result": {}}]
+    resp = FakeResp(200, headers={"Content-Type": "application/json"}, body=batch)
 
     assert C._response(resp, 5) == {"id": 5, "result": {}}
 
 
-def test_response_of_a_non_object_json_body_is_empty():
+def test_response_of_a_non_object_json_body_is_empty() -> None:
     resp = FakeResp(200, headers={"Content-Type": "application/json"}, body="just a string")
 
     assert C._response(resp, 1) == {}
 
 
-def test_throttle_wait_falls_back_when_neither_hint_is_parseable():
+def test_throttle_wait_falls_back_when_neither_hint_is_parseable() -> None:
     assert C._throttle_wait(FakeResp(429, body={"error": {"message": "slow down"}})) == 5.0
 
 
-def test_throttle_wait_survives_a_body_that_is_not_json():
+def test_throttle_wait_survives_a_body_that_is_not_json() -> None:
     """raise_for_status has not run yet, so a proxy's HTML 429 page reaches here."""
 
     class NoJson(FakeResp):
-        def json(self):
+        @override
+        def json(self) -> object:
             raise ValueError("not json")
 
     assert C._throttle_wait(NoJson(429)) == 5.0
 
 
-def test_load_env_is_a_no_op_without_an_env_file(monkeypatch, tmp_path):
+def test_load_env_is_a_no_op_without_an_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(C, "BASE", tmp_path)
 
     C.load_env()  # must not raise

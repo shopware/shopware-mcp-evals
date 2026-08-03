@@ -1,9 +1,13 @@
 .env
 .claude/
-# Editor / type-checker setup, kept personal like .claude/ above. Unlike
-# .editorconfig and ruff.toml, which are shared because CI enforces them.
+# Editor setup, kept personal like .claude/ above. Unlike .editorconfig,
+# ruff.toml and pyrightconfig.json, which are shared because CI enforces them.
 .zed/
-pyrightconfig.json
+# pyrightconfig.json is NOT here on purpose. lint.yml runs `basedpyright` as a
+# gating step, and an ignored config means CI type-checks with the tool's own
+# stricter defaults over the whole tree — including tests/, which the config
+# deliberately excludes. That is how this landed red on 10 errors in
+# eval/compare_runs.py that are 0 locally.
 .basedpyright/
 results/*.json
 # Per-run job-summary rows (eval/runner.py --summary-row); `results/*.json` above
@@ -21,3 +25,25 @@ __pycache__/
 
 # tool-history is tracked deliberately (audit trail of MCP descriptions)
 !tool-history/
+
+# --- shopware-dev (managed by sw-dev) ---
+# MCP / LSP tooling configs (symlinked from ~/shopware-dev)
+.mcp-php-tooling.json
+.mcp-js-tooling.json
+.mcp-gh-tooling.json
+.lsp-php-tooling.json
+.mcp-php-tooling.json.bak.shopware-dev
+.mcp-js-tooling.json.bak.shopware-dev
+.mcp-gh-tooling.json.bak.shopware-dev
+.lsp-php-tooling.json.bak.shopware-dev
+compose.override.yaml.bak.shopware-dev
+# skills.sh CLI (obsolete when using sw-dev link — do not commit)
+skills-lock.json
+.skills-version
+# Agent skills symlinked by sw-dev (source: ai-skills-shopware/skills)
+.cursor/skills/
+.claude/skills/
+.codex/skills/
+.agents/skills/
+.agents/
+# --- /shopware-dev ---

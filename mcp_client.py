@@ -18,14 +18,21 @@ MCP Server v2 notes:
   - Deferred tools stay callable directly; the allowlist is the call boundary.
 """
 
+import hashlib
 import json
 import os
 import re
 import secrets
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Protocol, cast
 
 import requests
+
+import ucp
+from eval.result_schema import JsonObject, McpResponse, PromptInventory, ToolDef, Toolset
+from ownership import owner_of
 
 # The MCP endpoint throttles bursts (HTTP 429). Retry a bounded number of times,
 # honoring the server's advertised wait, so a functional run pacing ~100 calls
@@ -78,10 +85,10 @@ class Endpoint:
     It defaults to the configured value, which is what every real caller wants.
     """
 
-    def __init__(self, name: str, path: str, auth_headers: dict, base_url: str | None = None):
-        self.name = name
-        self.url = f"{(base_url or SW_BASE_URL).rstrip('/')}{path}"
-        self.auth_headers = {"Content-Type": "application/json", **auth_headers}
+    def __init__(self, name: str, path: str, auth_headers: dict[str, str], base_url: str | None = None):
+        self.name: str = name
+        self.url: str = f"{(base_url or SW_BASE_URL).rstrip('/')}{path}"
+        self.auth_headers: dict[str, str] = {"Content-Type": "application/json", **auth_headers}
 
 
 def admin_endpoint(
@@ -100,7 +107,10 @@ def admin_endpoint(
 
 
 def store_endpoint(
-    access_key: str | None = None, context_token: str | None = None, base_url: str | None = None
+    access_key: str | None = None,
+    context_token: str | None = None,
+    base_url: str | None = None,
+    profile_uri: str | None = None,
 ) -> Endpoint:
     """Build a Store API endpoint, defaulting to the process configuration.
 
@@ -115,6 +125,9 @@ def store_endpoint(
         {
             "sw-access-key": access_key if access_key is not None else SW_SC_ACCESS_KEY,
             "sw-context-token": context_token or secrets.token_hex(16),
+            # UCP-specific, and deliberately the only UCP reference in this
+            # module — see ucp.py for why it is isolated.
+            "UCP-Agent": ucp.agent_header(base_url or SW_BASE_URL, profile_uri),
         },
         base_url,
     )
@@ -132,25 +145,77 @@ MCP_URL = ADMIN.url
 AUTH_HEADERS = ADMIN.auth_headers
 
 
-def _throttle_wait(resp: requests.Response) -> float:
+def _as_object(value: object) -> JsonObject:
+    """A decoded JSON value as a string-keyed map, or {} if it was not one.
+
+    `isinstance(x, dict)` on an `object` narrows to `dict[Unknown, Unknown]`, so
+    narrowing alone left every subsequent `.get` unknown. This states the key and
+    value types once, at the single point where the shape is checked.
+    """
+    return cast(JsonObject, value) if isinstance(value, dict) else {}
+
+
+class HttpReply(Protocol):
+    """The four things this module reads off an HTTP response.
+
+    Narrower than requests.Response on purpose: the reply-parsing helpers below
+    are pure, and the tests drive them with a hand-built stand-in rather than
+    faking a whole requests object. This is the contract that stand-in has to
+    meet, stated once.
+    """
+
+    # Read-only properties, not attributes: requests.Response exposes all three
+    # as properties, and a Protocol declaring them writable would exclude it.
+    @property
+    def status_code(self) -> int: ...
+
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+    def json(self) -> object: ...
+
+
+def _json_body(resp: HttpReply) -> object:
+    """The decoded body, as `object`.
+
+    `requests` types `.json()` as `Any`, and an Any spreads: every reader that
+    touched it inherited it, which is how a module whose whole job is digging
+    through untrusted JSON ended up with no type information at all. Casting to
+    `object` once, here, means the digging has to narrow explicitly — and the
+    isinstance checks this module already had stop being decorative.
+    """
+    return resp.json()
+
+
+def _throttle_wait(resp: HttpReply) -> float:
     """Seconds to wait before retrying a 429, from Retry-After or the server's
     'throttled for N seconds' hint, capped so a run can never stall for long."""
     retry_after = resp.headers.get("Retry-After", "")
     if retry_after.isdigit():
         return min(float(retry_after), THROTTLE_MAX_WAIT_S)
     try:
-        match = re.search(r"(\d+)\s*second", resp.json().get("error", {}).get("message", ""))
+        error = _as_object(_as_object(_json_body(resp)).get("error"))
+        message = error.get("message", "")
+        match = re.search(r"(\d+)\s*second", str(message))
         if match:
             return min(float(match.group(1)), THROTTLE_MAX_WAIT_S)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         pass
     return 5.0
 
 
 def _rpc(
-    method: str, params: dict, session_id: str | None = None, rpc_id: int = 1, endpoint: Endpoint = ADMIN
+    method: str,
+    params: JsonObject,
+    session_id: str | None = None,
+    rpc_id: int = 1,
+    endpoint: Endpoint = ADMIN,
+    extra_headers: dict[str, str] | None = None,
 ) -> requests.Response:
-    headers = dict(endpoint.auth_headers)
+    headers = {**endpoint.auth_headers, **(extra_headers or {})}
     # Streamable HTTP requires the client to accept both reply shapes; the server
     # answers application/json for a lone response and text/event-stream when it
     # also has to push a notification (e.g. tools/list_changed after an enable).
@@ -158,47 +223,58 @@ def _rpc(
     if session_id is not None:
         headers["Mcp-Session-Id"] = session_id
     body = {"jsonrpc": "2.0", "method": method, "params": params, "id": rpc_id}
+    resp: requests.Response | None = None
     for attempt in range(THROTTLE_MAX_RETRIES + 1):
-        resp = requests.post(endpoint.url, headers=headers, json=body, timeout=30)
+        # The ignore is about requests' stub, not about this body. `JsonType` there
+        # is a closed recursive union that does not admit a dict whose values are
+        # typed `object`, which every decoded-JSON map here is. The alternative was
+        # `data=json.dumps(body)` — identical bytes, since Content-Type is already
+        # application/json — but that reshapes the call four test fakes assert on,
+        # and reshaping tested production code to satisfy a third-party stub is the
+        # wrong way round.
+        resp = requests.post(endpoint.url, headers=headers, json=body, timeout=30)  # pyright: ignore[reportArgumentType]
         if resp.status_code == 429 and attempt < THROTTLE_MAX_RETRIES:
             time.sleep(_throttle_wait(resp))
             continue
         break
+    # range(THROTTLE_MAX_RETRIES + 1) is never empty, so the loop always assigns
+    # resp at least once; the assert states that invariant for the type checker.
+    assert resp is not None
     resp.raise_for_status()
     return resp
 
 
-def _parse_sse(text: str) -> list[dict]:
+def _parse_sse(text: str) -> list[McpResponse]:
     """Parse an SSE body into its JSON-RPC messages (the `data:` payloads)."""
-    messages: list[dict] = []
+    messages: list[McpResponse] = []
     data: list[str] = []
     for line in text.splitlines():
         if line.startswith("data:"):
             data.append(line[len("data:") :].lstrip())
         elif not line and data:  # a blank line terminates an event
             try:
-                messages.append(json.loads("\n".join(data)))
+                messages.append(cast(McpResponse, json.loads("\n".join(data))))
             except ValueError:
                 pass
             data = []
     if data:  # trailing event with no terminating blank line
         try:
-            messages.append(json.loads("\n".join(data)))
+            messages.append(cast(McpResponse, json.loads("\n".join(data))))
         except ValueError:
             pass
     return messages
 
 
-def _pick(messages: list, rpc_id: int) -> dict:
+def _pick(messages: list[McpResponse], rpc_id: int) -> McpResponse:
     """Return the JSON-RPC response whose id matches rpc_id; server-initiated
     notifications (which carry no id) are ignored. {} if none match."""
     for msg in messages:
-        if isinstance(msg, dict) and msg.get("id") == rpc_id:
+        if msg.get("id") == rpc_id:
             return msg
     return {}
 
 
-def _response(resp: requests.Response, rpc_id: int) -> dict:
+def _response(resp: HttpReply, rpc_id: int) -> McpResponse:
     """Extract the JSON-RPC response from an MCP reply, handling both Content-Types
     the Streamable HTTP transport allows: a single JSON object (application/json)
     or an SSE stream (text/event-stream) carrying the response plus any server
@@ -206,17 +282,22 @@ def _response(resp: requests.Response, rpc_id: int) -> dict:
     defensively (a spec-removed batch shape)."""
     if "text/event-stream" in resp.headers.get("Content-Type", ""):
         return _pick(_parse_sse(resp.text), rpc_id)
-    payload = resp.json()
+    payload = _json_body(resp)
     if isinstance(payload, list):
-        return _pick(payload, rpc_id)
-    return payload if isinstance(payload, dict) else {}
+        return _pick(cast(list[McpResponse], payload), rpc_id)
+    return cast(McpResponse, cast(object, _as_object(payload)))
 
 
 def _rpc_json(
-    method: str, params: dict, session_id: str | None = None, rpc_id: int = 1, endpoint: Endpoint = ADMIN
-) -> dict:
+    method: str,
+    params: JsonObject,
+    session_id: str | None = None,
+    rpc_id: int = 1,
+    endpoint: Endpoint = ADMIN,
+    extra_headers: dict[str, str] | None = None,
+) -> McpResponse:
     """_rpc plus response extraction (single JSON object or SSE stream)."""
-    return _response(_rpc(method, params, session_id, rpc_id, endpoint), rpc_id)
+    return _response(_rpc(method, params, session_id, rpc_id, endpoint, extra_headers), rpc_id)
 
 
 def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
@@ -237,25 +318,34 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
     return session_id, instructions
 
 
-def mcp_call(session_id: str, tool: str, arguments: dict, endpoint: Endpoint = ADMIN) -> dict:
+def mcp_call(session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:
     """Call a tool. Returns the full JSON-RPC response dict."""
-    return _rpc_json("tools/call", {"name": tool, "arguments": arguments}, session_id, rpc_id=99, endpoint=endpoint)
+    return _rpc_json(
+        "tools/call",
+        {"name": tool, "arguments": arguments},
+        session_id,
+        rpc_id=99,
+        endpoint=endpoint,
+        # UCP-specific, and the only other UCP reference in this module — see
+        # ucp.py. Empty for every non-UCP tool, so the admin path is untouched.
+        extra_headers=ucp.call_headers(tool),
+    )
 
 
-def mcp_result_text(resp: dict) -> str:
+def mcp_result_text(resp: McpResponse) -> str:
     """Extract the first text content block from a tools/call response."""
     content = resp.get("result", {}).get("content", [])
     for block in content:
-        if isinstance(block, dict) and block.get("type", "text") == "text":
+        if block.get("type", "text") == "text":
             return block.get("text", "")
     return ""
 
 
-def mcp_result_meta(resp: dict) -> dict:
+def mcp_result_meta(resp: McpResponse) -> JsonObject:
     return resp.get("result", {}).get("_meta", {}) or {}
 
 
-def mcp_call_error(resp: dict) -> str:
+def mcp_call_error(resp: McpResponse) -> str:
     """Return the error message of a tools/call response ('' if none).
 
     Covers both protocol-level errors (error.message) and tool-level errors
@@ -268,15 +358,15 @@ def mcp_call_error(resp: dict) -> str:
     return ""
 
 
-def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[dict]:
+def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[ToolDef]:
     """Fetch the full advertised tools/list for this session, following
     nextCursor pagination. Raises on duplicate tool names across pages
     (that would be a server-side pagination bug)."""
-    tools: list[dict] = []
+    tools: list[ToolDef] = []
     seen: set[str] = set()
     cursor = None
     for _ in range(50):  # runaway guard
-        params = {} if cursor is None else {"cursor": cursor}
+        params: JsonObject = {} if cursor is None else {"cursor": cursor}
         result = _rpc_json("tools/list", params, session_id, rpc_id=2, endpoint=endpoint).get("result", {})
         for t in result.get("tools", []):
             name = t.get("name", "")
@@ -290,18 +380,19 @@ def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[dict
     raise RuntimeError("tools/list pagination did not terminate within 50 pages")
 
 
-def mcp_toolsets_list(session_id: str, endpoint: Endpoint = ADMIN) -> list[dict]:
+def mcp_toolsets_list(session_id: str, endpoint: Endpoint = ADMIN) -> list[Toolset]:
     """Call shopware-toolsets-list and return the parsed toolsets array:
     [{name, title, description, tools, enabled}, ...]"""
     resp = mcp_call(session_id, "shopware-toolsets-list", {}, endpoint=endpoint)
     err = mcp_call_error(resp)
     if err:
         raise RuntimeError(f"shopware-toolsets-list failed: {err}")
-    payload = json.loads(mcp_result_text(resp))
-    return payload.get("data", {}).get("toolsets", [])
+    data = _as_object(_as_object(cast(object, json.loads(mcp_result_text(resp)))).get("data"))
+    toolsets = data.get("toolsets")
+    return cast(list[Toolset], toolsets) if isinstance(toolsets, list) else []
 
 
-def enable_toolset(session_id: str, toolset: str, endpoint: Endpoint = ADMIN) -> dict:
+def enable_toolset(session_id: str, toolset: str, endpoint: Endpoint = ADMIN) -> McpResponse:
     """Enable one toolset for this session. Returns the tools/call response."""
     return mcp_call(session_id, "shopware-toolset-enable", {"toolset": toolset}, endpoint=endpoint)
 
@@ -309,7 +400,7 @@ def enable_toolset(session_id: str, toolset: str, endpoint: Endpoint = ADMIN) ->
 def enable_all_toolsets(session_id: str, endpoint: Endpoint = ADMIN) -> list[str]:
     """Enable every not-yet-enabled toolset for this session.
     Returns the names of all toolsets enabled afterwards."""
-    enabled = []
+    enabled: list[str] = []
     for toolset in mcp_toolsets_list(session_id, endpoint=endpoint):
         if not toolset.get("enabled"):
             resp = enable_toolset(session_id, toolset["name"], endpoint=endpoint)
@@ -321,24 +412,82 @@ def enable_all_toolsets(session_id: str, endpoint: Endpoint = ADMIN) -> list[str
 
 
 def mcp_fetch_system_prompt(session_id: str, server_instructions: str, endpoint: Endpoint = ADMIN) -> str:
-    """Fetch all MCP context prompts and combine with server instructions."""
-    result = _rpc_json("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint).get("result", {})
-    prompt_names = [p["name"] for p in result.get("prompts", [])]
+    """Fetch all MCP context prompts and combine with server instructions.
 
-    parts = []
+    Prompts are optional in MCP, and an endpoint that does not serve them is not
+    a broken endpoint. A 404 here used to abort the whole suite before a single
+    fixture ran — the run reported a crash, not a result, over a feature the
+    Store endpoint answers with an empty list anyway. Degrade to the server
+    instructions instead, and say so, so a genuinely missing prompt set is
+    visible without being fatal.
+    """
+    return mcp_fetch_context_prompts(session_id, server_instructions, endpoint=endpoint)[0]
+
+
+def mcp_fetch_context_prompts(
+    session_id: str, server_instructions: str, endpoint: Endpoint = ADMIN, owners: frozenset[str] | None = None
+) -> tuple[str, PromptInventory]:
+    """The context prompt, plus an inventory of what went into it.
+
+    The inventory is the point. The two endpoints are not comparable and nothing
+    said so: admin serves four prompts totalling ~20k characters — a guide naming
+    every tool and its parameters — while store serves none at all and gets ~460
+    characters of server instructions. A pass rate from each was being read side
+    by side as if they were the same measurement.
+
+    Returns (prompt_text, {"names": [...], "chars": {name: n}, "total_chars": n,
+    "sha256": "..."}). The digest is there so two runs can be told apart when the
+    prompt *content* changes — a boolean cannot.
+    """
+    inventory: PromptInventory = {
+        "names": [],
+        "chars": {},
+        "total_chars": 0,
+        "instructions_chars": len(server_instructions or ""),
+        # What the server offered, as distinct from what we took. Without this a
+        # narrowed run is indistinguishable from an endpoint that ships nothing —
+        # and the store endpoint really does ship nothing.
+        "available": [],
+        "excluded": [],
+    }
+    try:
+        result = _rpc_json("prompts/list", {}, session_id, rpc_id=3, endpoint=endpoint).get("result", {})
+    except requests.HTTPError as exc:
+        print(f"WARNING: {endpoint.name} endpoint does not serve prompts/list ({exc}); using server instructions only")
+        text = server_instructions.strip()
+        inventory["total_chars"] = len(text)
+        inventory["sha256"] = hashlib.sha256(text.encode()).hexdigest()[:12]
+        return text, inventory
+    prompt_names = [p["name"] for p in result.get("prompts") or []]
+
+    parts: list[str] = []
     if server_instructions:
         parts.append(server_instructions.strip())
 
+    inventory["available"] = list(prompt_names)
     for name in prompt_names:
+        # Attribution by the same prefix rule that maps tools to owners, so a
+        # prompt and the tools it describes can never end up in different areas.
+        if owners is not None and owner_of(name) not in owners:
+            inventory.setdefault("excluded", []).append(name)
+            continue
         result = _rpc_json("prompts/get", {"name": name}, session_id, rpc_id=4, endpoint=endpoint).get("result", {})
-        messages = result.get("messages", [])
+        messages = result.get("messages") or []
+        collected = 0
         for msg in messages:
             content = msg.get("content", {})
             text = content.get("text", "") if isinstance(content, dict) else str(content)
+            text = text or ""
             if text.strip():
                 parts.append(text.strip())
+                collected += len(text.strip())
+        inventory["names"].append(name)
+        inventory["chars"][name] = collected
 
-    return "\n\n---\n\n".join(parts)
+    prompt = "\n\n---\n\n".join(parts)
+    inventory["total_chars"] = len(prompt)
+    inventory["sha256"] = hashlib.sha256(prompt.encode()).hexdigest()[:12]
+    return prompt, inventory
 
 
 def endpoint_by_name(name: str) -> Endpoint:

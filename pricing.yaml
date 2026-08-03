@@ -1,0 +1,70 @@
+# Model prices, in US dollars per 1,000,000 tokens.
+#
+# Hand-maintained on purpose: no provider exposes an API that returns its own
+# price list, so this table cannot be derived and will go stale silently. Two
+# things keep it honest:
+#
+#   * `verified` is rendered next to every cost figure the summary prints, so a
+#     stale table is visible rather than authoritative. Update it when you check.
+#   * tests/test_cost.py asserts that every model eval/runner.py can resolve has
+#     an entry here. A new default model fails the unit tests rather than
+#     quietly costing $0.00 in the report.
+#
+# `cached_input` is the rate for a cached prompt prefix. It is not an
+# optimisation this harness opts into — OpenAI caches automatically above ~1k
+# tokens — but the discount lands on the bill either way, so it is priced.
+# Cache *writes* are not modelled: they only occur with an explicit
+# cache_control, which this harness never sets. If that changes, add the bucket.
+
+verified: "2026-07-30"
+
+models:
+  # Primary gating model (eval/runner.py PROVIDER_DEFAULTS["openai"]).
+  # The input rate is the one quoted in that module's own comment.
+  gpt-5.4-mini:
+    input: 0.75
+    output: 3.00
+    cached_input: 0.375
+    # output and cached_input are estimates from the usual mini-tier ratios and
+    # have NOT been checked against the price list. Output is ~0.5% of this
+    # suite's token volume so the total barely moves, but the flag renders in
+    # the summary rather than being a comment nobody reads.
+    unverified: true
+
+  # Pinned second validator.
+  gpt-4o-mini:
+    input: 0.15
+    output: 0.60
+    cached_input: 0.075
+
+  # PROVIDER_DEFAULTS["anthropic"].
+  claude-sonnet-4-6:
+    input: 3.00
+    output: 15.00
+    cached_input: 0.30
+
+  # PROVIDER_DEFAULTS["github"] — GitHub Models bills nothing per token; it is
+  # rate-limited instead, which is why the suite tracks throttling separately.
+  mistral-ai/mistral-medium-2505:
+    input: 0.0
+    output: 0.0
+    cached_input: 0.0
+
+  # A model running on the developer's own machine via LM Studio. Genuinely
+  # free, so 0.0 is the true rate and not a placeholder — the run renders
+  # $0.00 rather than "unpriced", which is the honest reading.
+  #
+  # The name is what PROVIDER_DEFAULTS resolves for --provider lmstudio when no
+  # --model is given. A real local model name (qwen/qwen3.6-35b-a3b and the
+  # like) has no entry and will render "unpriced", which is also honest: nothing
+  # here knows it is free.
+  local-model:
+    input: 0.0
+    output: 0.0
+    cached_input: 0.0
+
+ci:
+  # GitHub-hosted Linux runners are free on public repositories. Set the real
+  # per-minute rate here if this repo is billed, so the summary's headline
+  # figure is the whole cost of a run rather than just the LLM half.
+  runner_usd_per_minute: 0.0

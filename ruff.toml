@@ -1,9 +1,13 @@
 # Lint config for the Python eval + functional layers.
-# Tracks .python-version, which is what CI resolves the interpreter from
-# (actions/setup-python with python-version-file in lint.yml and mcp-evals.yml).
-# Keeping this behind the real version silently disables the pyupgrade (UP)
-# rewrites for everything newer than the target.
-target-version = "py314"
+# Deliberately one minor behind .python-version (the runtime is 3.14; see
+# lint.yml / mcp-evals.yml). 3.14 legalises the bare `except A, B:` tuple, and
+# ruff's formatter then STRIPS the parentheses — which reads exactly like the
+# Python-2 `except A, e:` binding and is a hard syntax error on every interpreter
+# older than 3.14. Targeting py313 keeps `ruff format` writing the parenthesised
+# form and lets `ruff check` reject a bare one, so the bug class that had to be
+# hand-fixed several times here cannot come back. The only thing given up is the
+# pyupgrade (UP) rewrites specific to 3.14, of which there are none that matter.
+target-version = "py313"
 line-length = 120
 
 [lint]

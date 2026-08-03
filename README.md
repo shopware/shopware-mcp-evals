@@ -29,20 +29,55 @@ exercises both. Three things can go wrong:
    the default surface. Static tests can't catch this; only running real
    prompts through a real model does.
 
-This repo addresses all three:
+Four different questions have to be asked, and each can be green while the next
+is broken. Keeping them apart is what makes a failure mean something:
 
+| question | asked by | catches |
+|---|---|---|
+| Is the tool **registered**? | `eval/registry_check.py` over `bin/console debug:mcp` | a tool the server never wired up, and a tool whose declared ACL privileges disagree with our safety classification |
+| Is it **advertised**? | `eval/snapshot_tools.py`, `functional/runner.py` | discovery-layer breakage: a deferred tool leaking into the default surface, enablement leaking across sessions, a tool no toolset contains |
+| Is it **callable**? | `functional/runner.py`, `functional/journeys.py`, `eval/preflight.py` | a tool that is offered and rejects every call. This is the one that hid the longest |
+| Is it **chosen well**? | `eval/runner.py` | ambiguous descriptions, cross-group collisions, and whether the model recovers from a wrong first pick |
+
+The order matters and is enforced: the LLM eval is gated on the callable check
+(`--tool-health`), because grading a model on a tool that cannot run charges a
+plugin bug to the model and pays full model price per fixture to rediscover what
+one direct call already established.
+
+This repo addresses all of them, cheapest layer first:
+
+- **Layer 0 (static)**: `toollint.py` reads the committed catalogue snapshot and
+  flags description problems with no server, no model and no tokens — runs on
+  every push. What it checks was chosen by measuring the catalogue, not by
+  listing plausible smells: two obvious-looking checks were cut because they
+  fire on 102/102 parameters and 74/74 string parameters respectively, and a
+  check that fires on everything says nothing.
 - **Layer 1 (functional)**: a Python runner verifies the v2 discovery mechanics
   (default surface, toolsets, enable/isolation, pagination, tool-search) and
   then calls every tool with a minimal valid payload. Mutating tools use
   `dryRun=true`. Catches transport / schema / handler / discovery regressions.
-- **Layer 2 (LLM eval)**: natural-language prompts are sent to Claude (or
-  GPT-4o) in **discovery** mode — the default advertised surface only, with the
-  runner executing meta-tool calls for real in an agentic loop. It answers the
-  core question: *can the model find the right tool through dynamic discovery,
-  which discovery path does it take, and what does it cost in steps and tokens?*
+  On the Store endpoint it also walks the **UCP buyer journey** (below), because
+  those tools are one flow and an isolated call to any of them mostly measures
+  how the server words "not found".
+- **Layer 2 (LLM eval)**: natural-language prompts are sent to a real model in
+  **discovery** mode — the default advertised surface only, with the runner
+  executing meta-tool calls for real in an agentic loop, then executing the
+  tool the model chose and asserting on what came back. It answers the core
+  question: *can the model find the right tool through dynamic discovery, does
+  the call it makes actually work, does it recover when it guesses wrong, and
+  what does that cost in steps, tokens and dollars?*
 
 The output drives improvements to the `#[McpTool(description: '…')]` and
-`#[McpToolGroup('…')]` attributes in the Shopware repo.
+`#[McpToolGroup('…')]` attributes in the Shopware repo. Where a failure points
+is the whole design: the per-tool scorecard names which tool is over-broad and
+which pair collides, and `--triage` says whether a failure belongs to the
+tool's own description, a cross-group collision, or the discovery layer.
+
+The product here is a **measurement**, not a library. Nothing imports this repo,
+nothing is published from it, and it has no consumers beyond the people reading
+its reports — so it carries no compatibility obligations and none of the
+ceremony that goes with them. What it does owe is that its numbers mean what
+they say; see the first bullet of `AGENTS.md` for where that line falls.
 
 ## Repository layout
 
@@ -54,7 +89,12 @@ The output drives improvements to the `#[McpTool(description: '…')]` and
 ├── pyproject.toml         # package metadata; `pip install -e .` makes the imports work
 ├── shopware.sha           # pinned Shopware commit for reproducible CI runs
 ├── mcp_client.py          # shared MCP HTTP helpers (admin + store endpoints)
+├── lane.py                # real ids read off the instance, so no fixture has to invent one
 ├── ownership.py           # tool name → owning repository, and what a failure there costs
+├── toolclass.py           # Layer 0/2: may a tool be executed, and how to make it safe
+├── ucp.py                 # optional agentic-commerce plugin, isolated so it can be deleted whole
+├── toollint.py            # Layer 0: static description checks over the catalogue snapshot
+├── pricing.yaml           # $/1M per model, hand-maintained with a verified date
 ├── functional/
 │   ├── runner.py          # Layer 1: v2 discovery mechanics + per-tool dryRun calls (--endpoint admin|store)
 │   ├── checks.py          # the per-tool assertion table (payloads, labels, prerequisites)
@@ -63,6 +103,10 @@ The output drives improvements to the `#[McpTool(description: '…')]` and
 ├── eval/
 │   ├── runner.py          # Layer 2: discovery-mode LLM eval (--endpoint admin|store)
 │   ├── scoring.py         # results → counts, rates and the gate verdict (pure)
+│   ├── assertions.py      # did the executed call satisfy the fixture (pure)
+│   ├── tool_scorecard.py  # per-tool recall, precision, F1, confusion (pure)
+│   ├── cost.py            # tokens + rates → dollars, percentiles (pure)
+│   ├── cost_drift.py      # this run vs the previous nightly, per fixture; warns, never gates
 │   ├── report.py          # terminal rendering of a run (pure of scoring)
 │   ├── compare_runs.py    # primary vs second validator; the both-fail set to act on
 │   ├── summary.py         # one GitHub job summary for every run in the job
@@ -177,22 +221,114 @@ python -m functional.runner --endpoint store
 ```
 
 Pass / fail / skip per check is printed to stdout. A JSON report is saved to
-`results/functional-<timestamp>.json`. Exit code is non-zero if any check fails.
+`results/functional-<timestamp>.json`, and a per-tool verdict to
+`results/tool-health-<endpoint>.json` — that file is what gates Layer 2.
+
+A check passes only if the call neither errored **nor reported failure in band**.
+That distinction is load-bearing: UCP reports every failure as HTTP 200, no
+JSON-RPC error, and `{"success": false}` in the body. Checking only the transport
+made 27 admin checks green over a mechanism that could not have seen a single
+Store failure — and hid six admin fixtures that were calling their tools wrong.
+
+### The UCP buyer journey
+
+`cart-get` needs an id only `cart-create` can produce; `checkout-*` needs a
+checkout; `order-get` needs a completed order. Calling them in isolation with
+invented ids measures almost nothing, which is most of what the Store suite used
+to report.
+
+Dry-run does not rescue it: the plugin rolls every mutating call back, so a
+dry-run `cart-create` returns a plausible id for a cart that no longer exists and
+the next step fails on a well-formed request. **A chained journey has to commit.**
+
+```bash
+# Skipped, with a recorded reason, unless you opt in:
+python -m functional.runner --endpoint store
+
+# Commits. Creates a cart and a checkout and PLACES A REAL ORDER.
+# Only for a disposable lane — CI, or a local trunk lane.
+python -m functional.runner --endpoint store --allow-mutations
+
+# discount-apply needs a promotion code; without one that step skips.
+UCP_JOURNEY_PROMO_CODE=WELCOME10 python -m functional.runner --endpoint store --allow-mutations
+```
+
+Each step's assertion is the next step's precondition, so a break is *located*
+rather than counted: a failure at `checkout-update` with `cart-create` green is a
+different bug report from both failing. Steps whose preconditions never arrived
+are skipped naming the missing key, not failed.
 
 ## Layer 2: LLM eval
 
 Loads `eval/fixtures.yaml` and runs each fixture in **discovery** mode:
 
-| Mode | Tool surface | Loop | Grading |
-|---|---|---|---|
-| `discovery` | default advertised surface only | agentic, up to `--max-steps` turns; meta-tool calls (`shopware-tool-search`, `shopware-toolsets-list`, `shopware-toolset-enable`) are executed for real against the server and their results fed back; after an enable the tool list is re-fetched (simulating `tools/list_changed`) | first **non-meta** tool call == `expected_tool`; meta steps are free but counted |
+| Arm | Tool surface | Gates? |
+|---|---|---|
+| `discovery` | default advertised surface only (three meta-tools); the model must find the rest | **yes** — this is what a production client sees |
+| `isolated` | only the fixture's own toolset, meta-tools withheld | no — triage |
+| `full` | the whole catalogue enabled, meta-tools withheld | no — triage |
 
-The first non-meta tool call is never executed (grading is on selection, so
-nothing mutates). Discovery opens a **fresh MCP session per fixture** because
-toolset enablement persists per session. For fixtures in the `meta` category
-(where the meta-tool itself is the right answer), the first tool call of any kind
-is graded. Each failing fixture is retried once, so a reported failure is two
-lost attempts.
+Meta-tool calls (`shopware-tool-search`, `shopware-toolsets-list`,
+`shopware-toolset-enable`) are executed for real and their results fed back;
+after an enable the tool list is re-fetched (simulating `tools/list_changed`).
+Meta steps are free but counted. Discovery opens a **fresh MCP session per
+fixture** because toolset enablement persists per session.
+
+**A fixture passes when the chosen tool actually ran and its result satisfied
+the fixture** — not merely when the right name was emitted. A wrong first pick
+does not end the run: the real server response is handed back and the model gets
+to correct itself, because recovering from a mistake is a materially different
+(and milder) problem than never getting there. Each failing fixture is also
+retried once from scratch, so a reported failure is two lost attempts.
+
+Executing means sometimes executing a *wrong* pick, so `toolclass.py` draws the
+safety boundary mechanically, from the schemas rather than from judgement:
+
+| Class | Behaviour |
+|---|---|
+| read-only | called as-is |
+| dry-runnable | called with `dryRun: true` **forced on**, overriding the model if it asked for a real write. Exactly the tools whose `inputSchema` declares `dryRun` — the server saying "this mutates, here is the safe path" |
+| unsafe | never called; graded on selection alone. Mutating tools with no `dryRun` to hide behind |
+| unclassified | never called. A tool the snapshot has never seen has unknown blast radius |
+
+Three admin tools are unsafe (`shopware-media-upload`, `merchant-cart-manage`,
+`swag-dev-tools-scaffold`), so they cannot participate in result assertions or
+recovery. Adding `dryRun` to them server-side is what would fix that. Most of
+the **Store** surface is unsafe for a different reason — that endpoint has no
+committed snapshot, so there are no schemas to read a `dryRun` out of, and
+guessing the other way would place real orders.
+
+#### Result assertions
+
+`expect_result` on a fixture says how much of the executed call to check:
+
+| Tier | Claim |
+|---|---|
+| `accepted` (default) | the arguments passed validation and the server took the call. Empty or not-found is fine — the honest tier for a fixture that has to invent an id |
+| `data` | the call also returned something. Takes `has_keys`, `min_items`, `contains` |
+| `none` | selection only. Automatic for unsafe tools |
+
+The line that carries the weight is between a call the server **rejected**
+(`invalid_arguments` — the model's fault, a real failure) and one it **ran and
+returned nothing for** (the data's fault). Failing the second would turn this
+into a test of the demo-data seed.
+
+#### Triage: where a failure actually lives
+
+`--triage` re-runs **only the discovery arm's failures** under `isolated` and
+`full`. Three different problems produce the same symptom, and the combination
+separates them:
+
+| isolated | full | Diagnosis |
+|:---:|:---:|---|
+| ✗ | ✗ | the tool's own description |
+| ✓ | ✗ | a cross-group collision — fix the pair, not the tool |
+| ✓ | ✓ | the discovery layer: the `#[McpToolGroup]` description, or tool-search ranking |
+
+Triage, not a full pass: running every fixture through all three arms costs
+about three times as much, and the extra two thirds confirms that fixtures which
+already passed still pass. At a ~10% failure rate this is ~18 extra fixture runs
+instead of ~180. Nightly and primary-model only, always advisory.
 
 <details>
 <summary>There used to be a second <code>baseline</code> mode. Why it went.</summary>
@@ -269,6 +405,20 @@ shared 90% it flapped instead: it scored 89% on one commit and 90% on the next
 with no change to descriptions or fixtures in between, and later failed a run at
 88% core while the primary was clean. 85% still catches a collapse, which is what
 the gate is for. Re-measure before swapping either model.
+
+**Both numbers survived the change to what `passed` means**, and both arms gate.
+The pair was calibrated against first-tool-correct, so when grading started
+executing the call they were suspected of no longer describing the same
+quantity, and the second validator was held advisory while that was re-derived.
+Measured under the new definition: primary **99%** (95/96, core 100%), second
+validator **88%** (84/96, core 88%). Both clear their own gate, so the window
+was removed without touching a threshold.
+
+The 79% that prompted the suspicion was the fixtures, not the models — every one
+of the primary's failures and six of the validator's twenty were the right tool
+called with an id the YAML had invented. Fixing that moved the validator from
+79% to 88%. Worth remembering before reaching for a suppression: a warning on a
+gate nobody enforces is a red build that has learned to look green.
 
 **Core is additionally gated on its own denominator.** The admin suite spans
 four repositories, so one aggregate rate lets a core regression hide behind
@@ -377,16 +527,74 @@ Per fixture (in the JSON report and the console summary):
 
 | Metric | Meaning |
 |---|---|
-| `steps` | assistant turns until a non-meta tool was selected |
+| `steps` | assistant turns taken |
 | `discovery_path` | `direct` (no meta calls), `search`, `toolsets`, `mixed`, or `none` |
-| `search_hit` | when tool-search was used: did its results contain `expected_tool`? |
-| `enabled_correct_toolset` | when toolset-enable was used and the fixture declares `expected_toolset`: was the right toolset enabled? |
-| `tokens` | summed input/output tokens across all turns |
-| `fail_reason` | `wrong_tool`, `no_tool_call`, or `step_cap` |
+| `search_hit` / `search_rank` | did tool-search return `expected_tool`, and at what 1-indexed position. Rank matters: a boolean cannot tell first place from ninth, and that difference decides whether a model reading a 20-result list ever reaches it |
+| `enabled_correct_toolset` | when toolset-enable was used: was the right group enabled? |
+| `first_tool_correct` | did the **first** answer name the right tool |
+| `first_try` | first answer was right **and** the call worked. This is the number that used to *be* the pass rate |
+| `recovered` | got there after a wrong first pick |
+| `attempted_tools`, `wrong_calls`, `steps_to_correct` | the shape of the recovery |
+| `execution` | `executed`, `skipped_unsafe`, or `skipped_unclassified` |
+| `dry_run_forced` | the safety net overrode the model |
+| `tokens` | `{input, cached_input, output}` summed across turns |
+| `payload_bytes` | tool-result bytes the model was made to read — a tool that answers correctly but returns 40k of JSON is expensive for every client |
+| `surface_tokens` / `_peak` | the advertised tool list at turn one, and at its largest. The gap is the discovery layer's context bill |
+| `fail_reason` | `wrong_tool`, `no_tool_call`, `step_cap`, `invalid_arguments`, `tool_error`, or an assertion code |
 
-The summary block also reports the run's total input/output tokens, which is the
-"cost of discovery" number to watch between commits: extra turns spent finding a
-tool show up here before they show up in the pass rate.
+Aggregated per run: `first_try_rate`, `recovery_rate` (over the fixtures that
+*missed* first, so a mostly-first-try suite does not dilute it), `avg_wrong_calls`.
+
+### Cost
+
+Every run reports what it cost. The measured shape of the current suite is
+~15,400 input tokens per fixture over ~2.7 turns, ~3M input tokens for a full
+pipeline run, on the order of **$1-2**.
+
+Rates live in `pricing.yaml`, hand-maintained with a `verified` date that is
+rendered next to every figure — no provider exposes a price API, so the table
+goes stale silently otherwise. An unpriced model renders as `unpriced` rather
+than `$0.00`; at runtime that degrades gracefully, and `tests/test_cost.py`
+fails hard on any model `PROVIDER_DEFAULTS` can resolve that is missing.
+
+The two derived numbers are the useful ones: **cost per fixture** is what a data
+point costs, and **cost per *passing* fixture** is what a unit of signal costs —
+a run that costs more but converts failures into passes gets cheaper by the
+second and dearer by the first.
+
+`eval/cost_drift.py` compares a run against the previous nightly **per fixture**
+(a suite that grew is not a regression) and warns past ~25%. It never gates:
+provider-side changes to caching or tokenization move these numbers through no
+fault of the server.
+
+> Cached tokens are counted because OpenAI caches prompts automatically above
+> ~1k tokens with no opt-in, and the discount lands on the bill either way. The
+> two providers report it in **opposite directions** — OpenAI's `prompt_tokens`
+> *includes* the cached prefix, Anthropic's `input_tokens` excludes it — so both
+> adapters normalise to the same three buckets at capture time.
+
+### Per-tool scorecard
+
+The pass rate answers "did tool X win the fixtures written for it" — recall.
+It says nothing about how often X is picked when X is **wrong**, which is the
+failure an over-broad description actually produces: a tool described as
+"search anything in the shop" wins its own three fixtures *and* quietly steals
+its siblings', and scores 100%.
+
+That half costs nothing to compute — every wrong selection already recorded is
+a false positive for whichever tool was picked — so `eval/tool_scorecard.py`
+reports per tool: recall, **precision**, F1, `confused_with`, `steals_from`,
+median search rank. Run over the results already committed to `results/`, it
+immediately names real problems: `shopware-entity-schema` has recall 1.00 and
+precision 0.78, winning all 18 of its own fixtures while taking four from
+`entity-delete` and `entity-aggregate`.
+
+The whole scorecard is a claim about the **first** pick, recall included — a
+tool that only wins on the second attempt has not earned recall credit.
+
+Confusion is also reported as unordered pairs, with **mutual** pairs flagged:
+two descriptions that each attract the other's prompts need differentiating
+from each other, not fixing one at a time.
 
 ### Fixture categories
 
@@ -397,9 +605,23 @@ tool show up here before they show up in the pass rate.
 | `chain` | Multi-step intents where the first (non-meta) tool call must be the right entry point |
 | `meta` | The discovery meta-tool itself is the correct answer |
 | `discovery` | Deep-deferred tools with no default-surface sibling; probes search/toolset ranking end to end |
+| `negative` | **No tool applies.** A plausible, adjacent request the catalogue genuinely cannot serve, where calling anything is the failure |
 
-**90 admin fixtures** (`eval/fixtures.yaml`) and **42 store fixtures**
+**96 admin fixtures** (`eval/fixtures.yaml`) and **45 store fixtures**
 (`eval/fixtures_store.yaml`) — at least **3 prompts per tool**.
+
+Negative fixtures are the other half of the precision story: without them, an
+over-broad description can only be caught when it steals a *sibling's* fixture.
+Two rules make them work. The ask must have **no legitimate first step** —
+"export all orders to CSV and email it" is not a valid negative, because
+fetching the orders is a reasonable opening move and the fixture would punish
+correct behaviour. And meta calls are free: searching, finding nothing, then
+declining is exactly the behaviour under test. Running out of steps is *not* a
+pass — that is a model still rummaging, not one that concluded.
+
+They expire. If the server grows the capability, the fixture becomes a false
+accusation, so `notes` must say what would answer it and the drift PR is where
+that gets re-checked.
 
 The three prompts must differ *in kind*, not just in wording: a canonical
 phrasing, a real-user paraphrase that avoids the tool's own vocabulary, and a
@@ -409,7 +631,8 @@ that work for a single lucky wording and no other.
 
 Add more by appending with the required fields: `id`, `category`, `prompt`,
 `expected_tool`; optional: `expected_toolset` (for deferred tools),
-`acceptable_tools`, `max_steps`, `notes`.
+`acceptable_tools`, `max_steps`, `expect_result`, `notes`. Negative fixtures set
+`expect_no_tool: true` and carry no `expected_tool`.
 
 `tests/test_fixtures.py` enforces the invariants without needing a server —
 unique ids and prompts, known categories, `expected_toolset` present on
@@ -417,6 +640,70 @@ non-meta fixtures and matching the committed snapshot, and every tool in
 `tool-history/latest.json` carrying at least 3 prompts. That last one is the
 drift guard: a tool added server-side fails the unit tests until someone writes
 prompts for it.
+
+## Test locally first
+
+CI takes ~8 minutes and spends real money, and a local run and a CI run can
+disagree for reasons that have nothing to do with the code. One command runs
+everything that costs nothing:
+
+```bash
+scripts/trunk-lane.sh              # preflight + static checks + UCP journey
+scripts/trunk-lane.sh --eval       # ... plus the LLM eval, via LM Studio
+```
+
+`--provider lmstudio` points the runner at a local OpenAI-compatible server
+(default `http://127.0.0.1:1234/v1`). It asks the server which model is loaded
+and records that — `qwen/qwen3.6-35b-a3b`, not a placeholder — and prices the run
+at $0.00, which is the truth rather than a gap. The numbers are not comparable to
+CI's; what it proves is that the harness works end to end, which is most of what
+breaks.
+
+Three things about a local lane, each of which cost a debugging session:
+
+- **The MCP rate limiter is ON locally and OFF in CI.** A suite pacing a few
+  hundred calls trips it, and the client's own backoff makes that look like a
+  hang. Drop the same override CI writes into
+  `config/packages/z-eval-no-mcp-rate-limit.yaml`.
+- **The UCP profile URI is fetched by the *server*.** It must name a host:port
+  the server can reach, which a host-mapped port is not: a shop published on
+  `:8088` through a proxy listens on `:8000` inside its own container. Set
+  `UCP_PROFILE_URI` accordingly.
+- **The journey commits.** Never point `--allow-mutations` at a shop you care
+  about.
+
+## Context prompts
+
+The server ships MCP **prompts** — `ShopwareContextPrompt` and its siblings — and
+the runner concatenates them with the server's own instructions. Every area ships
+its own, so sending all of them to every fixture puts instructions naming another
+area's tools in front of the model. Measured on a trunk lane:
+
+| endpoint | instructions | prompts | total |
+|---|---|---|---|
+| admin | 498 | `shopware-context`, `merchant-context`, `swag-dev-tools-context`, `swag-dev-tools-suggest-tooling` | **20,606 chars** |
+| store | 460 | *none* | **460 chars** |
+
+Two consequences worth stating plainly. **Admin and Store pass rates are not
+comparable** and never were — a Store model works the bare endpoint with no tool
+guide at all. And agentic-commerce is the only area shipping no prompt, which is
+a gap for that plugin rather than a property of its tools.
+
+`--context-prompts` selects a set named after the installation it mirrors, so a
+number measured here transfers to a real shop:
+
+```bash
+python -m eval.runner --context-prompts all             # a fully installed shop
+python -m eval.runner --context-prompts core            # vanilla Shopware
+python -m eval.runner --context-prompts core+merchant
+python -m eval.runner --context-prompts none            # the control arm
+```
+
+Core is in every non-empty set: `shopware-context` carries the discovery
+procedure, without which no area is reachable and every arm would fail for a
+reason unrelated to the prompt under test. The job summary reports what the
+prompts bought in points, and a per-area table across sets — which is where
+"does an irrelevant prompt hurt" shows up.
 
 ## Scope
 
@@ -483,8 +770,36 @@ When a fixture fails the LLM eval:
 
 ## CI: pinned Shopware ref + drift detection
 
-The eval workflow runs the suite against a Shopware checkout. To keep `main`
-green when descriptions change upstream, it uses two gates:
+The eval workflow builds a Shopware lane and runs the suite against it, in four
+jobs:
+
+```
+static ──┬── admin-eval ──┐
+         └── store-eval  ──┴── report
+```
+
+`static` proves the tools work and publishes `tool-health-<endpoint>.json`; the
+two eval jobs consume it and skip fixtures for tools it proved broken; `report`
+merges every job's output into one summary. `.github/actions/setup-lane` builds
+the lane and is used by all three lane-having jobs.
+
+Why four rather than one. A single failing admin fixture used to short-circuit
+every later step, so the Store steps reported `skipped` — which reads exactly
+like "the plugin is missing" and cost a round of chasing a composer problem that
+did not exist. And one job meant one summary, which GitHub silently discards
+above 1 MiB, precisely when a run goes badly enough to produce a big one.
+
+The lane cannot be cached or shared between jobs: it is a live MySQL plus a
+daemonised server, and the plugin repos track their default branches, so a cache
+key over this repo's SHA would go stale without saying so. Each job pays ~140s to
+build its own. They run in parallel, so wall clock is roughly unchanged; what it
+buys is isolation, independent re-runs, and a readable summary.
+
+A Store environment problem cannot withhold the admin numbers: the Store steps
+inside `static` are non-fatal to that job and feed a `store_ready` output that
+only `store-eval` requires.
+
+To keep `main` green when descriptions change upstream, it uses two gates:
 
 **A. Pinned SHA for PRs and `main` pushes.** The file `shopware.sha` at repo
 root holds the Shopware commit that PR/main runs check out (now a `trunk`
@@ -494,8 +809,20 @@ cannot flip the build red between commits. The plugin checkouts
 tracks its own repository default branch, so runs always exercise the latest
 plugin code. The trade-off is that plugin-side churn can turn a run red without
 a change here — pin a single run via the `dev_tools_ref` / `merchant_tools_ref`
-dispatch inputs. `shopware/agentic-commerce` tracks its default branch too, and
-is checked out unless `run_store=false`.
+dispatch inputs.
+
+`shopware/agentic-commerce` is **temporarily pinned** to
+`fix/mcp-tool-error-visibility-and-catalog-lookup-ids`
+([#154](https://github.com/shopware/agentic-commerce/pull/154)) and checked out
+unless `run_store=false`. Its default branch has neither in-band tool errors nor
+`dryRun`, so CI saw `-32603 Error while executing tool` with an empty body where
+a lane with #154 sees `{"success":false,"error":{…,"violations":[…]}}`. That
+single difference made a local run and a CI run disagree for an afternoon.
+**Remove the pin when #154 merges.**
+
+Related and also open: [shopware/shopware#18848](https://github.com/shopware/shopware/pull/18848)
+adds `debug:mcp --scope=store-api`. Until it lands, `eval/registry_check.py` sees
+the 30 admin tools and none of the Store ones.
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the

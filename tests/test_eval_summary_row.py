@@ -4,25 +4,38 @@ The row is what eval/summary.py renders the job summary from, so its shape is a
 contract between two files that never run in the same process.
 """
 
+import argparse
 import json
-from types import SimpleNamespace
+from pathlib import Path
+from typing import cast
+
+import pytest
 
 from eval import runner as E
+from eval.result_schema import FixtureResult
 
 
-def args(summary_row=None, suite_label=None, advisory=False, endpoint="admin"):
-    return SimpleNamespace(summary_row=summary_row, suite_label=suite_label, advisory=advisory, endpoint=endpoint)
+def args(
+    summary_row: str | None = None,
+    suite_label: str | None = None,
+    advisory: bool = False,
+    endpoint: str = "admin",
+) -> argparse.Namespace:
+    """The four argparse attributes write_summary_row reads."""
+    return argparse.Namespace(summary_row=summary_row, suite_label=suite_label, advisory=advisory, endpoint=endpoint)
 
 
-def results(n_passed, n_errored=0, tool="shopware-entity-read"):
-    out = [{"id": f"p{i}", "passed": True, "expected_tool": tool} for i in range(n_passed)]
-    out += [
-        {"id": f"e{i}", "passed": False, "error": "500 Server Error", "expected_tool": tool} for i in range(n_errored)
-    ]
+def _record(fid: str, **fields: object) -> FixtureResult:
+    return cast(FixtureResult, cast(object, {"id": fid, **fields}))
+
+
+def results(n_passed: int, n_errored: int = 0, tool: str = "shopware-entity-read") -> list[FixtureResult]:
+    out = [_record(f"p{i}", passed=True, expected_tool=tool) for i in range(n_passed)]
+    out += [_record(f"e{i}", passed=False, error="500 Server Error", expected_tool=tool) for i in range(n_errored)]
     return out
 
 
-def test_row_carries_everything_the_summary_table_needs(tmp_path, capsys):
+def test_row_carries_everything_the_summary_table_needs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path / "rows" / "1-admin-primary.json"
 
     row = E.write_summary_row(
@@ -35,7 +48,18 @@ def test_row_carries_everything_the_summary_table_needs(tmp_path, capsys):
     )
     capsys.readouterr()
 
-    assert row == {
+    # The parent dir does not exist in CI until the first run writes into it.
+    assert json.loads(path.read_text()) == row
+
+    # Cost travels with the row so the summary can add its column without
+    # re-reading every full report. Asserted separately: its contents are
+    # eval/cost.py's contract, pinned in tests/test_cost.py, and inlining them
+    # here would make an unrelated pricing edit fail this shape test.
+    cost = row["cost"]
+    assert cost["model"] == "gpt-4o" and cost.get("graded") == 85
+
+    without_cost = {key: value for key, value in row.items() if key != "cost"}
+    assert without_cost == {
         "suite": "admin · primary",
         "provider": "openai",
         "model": "gpt-4o",
@@ -59,53 +83,52 @@ def test_row_carries_everything_the_summary_table_needs(tmp_path, capsys):
             }
         },
     }
-    # The parent dir does not exist in CI until the first run writes into it.
-    assert json.loads(path.read_text()) == row
 
 
-def test_row_splits_by_owning_repository(capsys):
+def test_row_splits_by_owning_repository(capsys: pytest.CaptureFixture[str]) -> None:
     mixed = [
-        {"id": "c1", "passed": True, "expected_tool": "shopware-entity-read"},
-        {"id": "d1", "passed": False, "expected_tool": "swag-dev-tools-load-skill"},
-        {"id": "m1", "passed": True, "expected_tool": "merchant-order-summary"},
+        _record("c1", passed=True, expected_tool="shopware-entity-read"),
+        _record("d1", passed=False, expected_tool="swag-dev-tools-load-skill"),
+        _record("m1", passed=True, expected_tool="merchant-order-summary"),
     ]
 
     row = E.write_summary_row("openai", "gpt-4o", mixed, 0.67, False, args())
     capsys.readouterr()
 
-    assert row["by_tier"]["dev-tools"] == {
+    by_tier = row["by_tier"]
+    assert by_tier["dev-tools"] == {
         "passed": 0,
         "total": 1,
         "ids": ["d1"],
         "failed_ids": ["d1"],
         "rate": 0.0,
     }
-    assert row["by_tier"]["core"]["rate"] == 1.0
-    assert list(row["by_tier"]) == ["core", "dev-tools", "merchant-tools"]
+    assert by_tier["core"]["rate"] == 1.0
+    assert list(by_tier) == ["core", "dev-tools", "merchant-tools"]
 
 
-def test_failing_gate_is_recorded_as_fail(tmp_path, capsys):
+def test_failing_gate_is_recorded_as_fail(capsys: pytest.CaptureFixture[str]) -> None:
     row = E.write_summary_row("openai", "gpt-4o", results(1), 0.5, False, args())
     capsys.readouterr()
 
     assert row["gate"] == "FAIL"
 
 
-def test_advisory_flag_reaches_the_row(capsys):
+def test_advisory_flag_reaches_the_row(capsys: pytest.CaptureFixture[str]) -> None:
     row = E.write_summary_row("openai", "gpt-4o", results(1), 1.0, True, args(advisory=True))
     capsys.readouterr()
 
     assert row["advisory"] is True
 
 
-def test_suite_defaults_to_the_endpoint_when_unlabelled(capsys):
+def test_suite_defaults_to_the_endpoint_when_unlabelled(capsys: pytest.CaptureFixture[str]) -> None:
     row = E.write_summary_row("openai", "gpt-4o", results(1), 1.0, True, args(endpoint="store"))
     capsys.readouterr()
 
     assert row["suite"] == "store"
 
 
-def test_no_file_is_written_without_summary_row(tmp_path, capsys):
+def test_no_file_is_written_without_summary_row(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     E.write_summary_row("openai", "gpt-4o", results(1), 1.0, True, args())
 
     assert list(tmp_path.iterdir()) == []
@@ -114,7 +137,7 @@ def test_no_file_is_written_without_summary_row(tmp_path, capsys):
     assert "Summary row:" in capsys.readouterr().out
 
 
-def test_a_run_with_no_results_still_produces_a_row(capsys):
+def test_a_run_with_no_results_still_produces_a_row(capsys: pytest.CaptureFixture[str]) -> None:
     """A row is how the job summary learns a suite ran at all, so it must survive
     an empty result set rather than raising on len(None)."""
     row = E.write_summary_row("openai", "gpt-4o", None, 0.0, False, args())
@@ -123,8 +146,8 @@ def test_a_run_with_no_results_still_produces_a_row(capsys):
     assert row["graded"] == 0 and row["gate"] == "FAIL"
 
 
-def test_throttled_fixtures_are_counted(capsys):
-    throttled = [{"id": "t1", "passed": False, "error": "Error code: 429 rate limit"}]
+def test_throttled_fixtures_are_counted(capsys: pytest.CaptureFixture[str]) -> None:
+    throttled = [_record("t1", passed=False, error="Error code: 429 rate limit")]
     row = E.write_summary_row("openai", "gpt-4o", throttled, 0.0, False, args())
 
     assert row["throttled"] == 1

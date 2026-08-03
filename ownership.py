@@ -26,6 +26,11 @@ merchant tool) is therefore counted against core, and `compare_runs.py` shows
 what it lost to.
 """
 
+# Reaching into eval/ from a root module, which functional/runner.py already does
+# for eval.assertions. eval/__init__.py is a docstring and result_schema imports
+# only typing, so this costs nothing and cannot cycle.
+from eval.result_schema import FixtureResult, TierBucket
+
 # Ordered: first match wins, so more specific prefixes come first.
 OWNER_PREFIXES = (
     ("shopware-ucp-", "agentic-commerce"),
@@ -60,23 +65,63 @@ TIER_ORDER = (DISCOVERY, "core", "dev-tools", "merchant-tools", "agentic-commerc
 # workflow and the summary agree on what "optional" means.
 OPTIONAL = frozenset({"merchant-tools", "agentic-commerce"})
 
+# Context-prompt sets, named after the installations they mirror.
+#
+# Every area ships its own MCP prompt — core `shopware-context`, merchant-tools
+# `merchant-context`, dev-tools two more — and the runner used to send all of
+# them to every fixture. So a merchant-tools fixture carried 5,615 characters of
+# dev-tools instructions naming tools it must not pick, which is a plausible
+# cause of wrong-tool picks that reads as a description problem.
+#
+# These sets are deliberately real deployments rather than one-prompt-per-area
+# isolation: a shop has whichever plugins it has, so a number measured here
+# transfers to somebody's actual install. Comparing an area's rate across two
+# sets that both contain it — `core+merchant` against `all` — answers "does an
+# irrelevant prompt hurt" as a side effect, without inventing a configuration
+# nobody runs.
+#
+# CORE is in every non-empty set on purpose. `shopware-context` carries the
+# discovery procedure ("call shopware-toolsets-list, then enable"), without which
+# no area is reachable at all — withholding it would make every arm fail for a
+# reason unrelated to the prompt under test.
+PROMPT_SETS: dict[str, frozenset[str] | None] = {
+    "none": frozenset(),
+    "core": frozenset({CORE}),
+    "core+merchant": frozenset({CORE, "merchant-tools"}),
+    "core+dev-tools": frozenset({CORE, "dev-tools"}),
+    # None means "whatever the server serves", which is what a fully-installed
+    # shop gives a client.
+    "all": None,
+}
 
-def owner_of(tool: str) -> str:
-    """Owning repository for a tool name, or UNKNOWN if no prefix matches."""
+
+def owner_of(tool: str | None) -> str:
+    """Owning repository for a tool name, or UNKNOWN if no prefix matches.
+
+    Accepts None because negative fixtures have no expected tool — the whole
+    point of them is that no tool should be called. They carry `expected_tool`
+    as an explicit None, so `result.get("expected_tool", "")` hands back None
+    rather than the default: the key is present, its value is null.
+
+    That shape has now broken this repo three times in three different modules,
+    each time as an AttributeError inside a gate or summary, after a full LLM
+    pass had already been paid for. Guarding here rather than at each call site
+    is what stops there being a fourth.
+    """
     for prefix, owner in OWNER_PREFIXES:
-        if tool.startswith(prefix):
+        if (tool or "").startswith(prefix):
             return owner
     return UNKNOWN
 
 
-def tier_of(tool: str) -> str:
+def tier_of(tool: str | None) -> str:
     """Reporting bucket: like owner_of, but splits core's discovery meta-tools out."""
     if tool in DISCOVERY_TOOLS:
         return DISCOVERY
     return owner_of(tool)
 
 
-def breakdown(results: list[dict]) -> dict[str, dict]:
+def breakdown(results: list[FixtureResult]) -> dict[str, TierBucket]:
     """Per-tier pass counts over the results given.
 
     Callers pass an already-filtered list (scored, non-errored) — this only
@@ -90,28 +135,37 @@ def breakdown(results: list[dict]) -> dict[str, dict]:
     admin runs over one fixture set and reports dev-tools out of 42 when there
     are 21 dev-tools fixtures. The id lists let it union instead of add.
     """
-    out: dict[str, dict] = {}
+    out: dict[str, TierBucket] = {}
     for r in results or []:
-        tier = tier_of(r.get("expected_tool", ""))
-        bucket = out.setdefault(tier, {"passed": 0, "total": 0, "ids": [], "failed_ids": []})
+        # A negative fixture expects no tool, so no repository owns it — it is a
+        # statement about the catalogue as a whole. Attributing it would file
+        # every one of them under "unattributed" and invent a tier that reads
+        # like a drift alarm.
+        if not r.get("expected_tool"):
+            continue
+        tier = tier_of(r["expected_tool"])
+        bucket = out.setdefault(tier, TierBucket(passed=0, total=0, rate=0.0, ids=[], failed_ids=[]))
         bucket["total"] += 1
-        bucket["ids"].append(r.get("id"))
+        bucket.setdefault("ids", []).append(r["id"])
         if r.get("passed"):
             bucket["passed"] += 1
         else:
-            bucket["failed_ids"].append(r.get("id"))
+            bucket.setdefault("failed_ids", []).append(r["id"])
     for bucket in out.values():
         bucket["rate"] = bucket["passed"] / bucket["total"] if bucket["total"] else 0.0
     return {t: out[t] for t in TIER_ORDER if t in out} | {t: v for t, v in out.items() if t not in TIER_ORDER}
 
 
-def core_rate(results: list[dict]) -> tuple[int, int, float]:
+def core_rate(results: list[FixtureResult]) -> tuple[int, int, float]:
     """Passed, total and rate over core fixtures — discovery meta-tools included.
 
     This is the number that gates separately. Rolling discovery in keeps the
     denominator at a size where one nondeterministic miss doesn't flip the
     build, while `breakdown` still reports the two lines apart.
     """
-    core = [r for r in results or [] if owner_of(r.get("expected_tool", "")) == CORE]
+    # Negative fixtures are excluded for the same reason as in breakdown: they
+    # name no tool, so they cannot be charged to core's denominator. They still
+    # count in the overall rate, which is the axis they belong on.
+    core = [r for r in results or [] if r.get("expected_tool") and owner_of(r["expected_tool"]) == CORE]
     passed = sum(1 for r in core if r.get("passed"))
     return passed, len(core), (passed / len(core) if core else 1.0)

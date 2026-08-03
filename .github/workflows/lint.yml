@@ -44,6 +44,13 @@ jobs:
       - name: Ruff (format check)
         run: ruff format --check .
 
+      # Static type checking. Gating, like the ruff steps: a renamed key on a
+      # TypedDict (FixtureResult is read by five modules) or a bad call now fails
+      # here instead of as a KeyError mid-run in the heavy eval workflow. Config,
+      # including why it is `standard` and not stricter, lives in pyrightconfig.json.
+      - name: Basedpyright (type check)
+        run: basedpyright
+
       - name: Pytest (unit tests)
         # --cov both reports where the gaps are AND gates. No --cov-fail-under is
         # passed here, but `fail_under` in pyproject.toml applies anyway and
@@ -52,10 +59,27 @@ jobs:
         # what CI fails on.
         run: pytest tests -q --cov
 
+      # Static description checks over the committed catalogue snapshot. No
+      # server, no model, no tokens — so unlike the eval workflow this runs on
+      # every push. Advisory by construction: toollint exits 0 whatever it
+      # finds, because the findings are judgements about prose and a build that
+      # goes red over word choice is one people learn to bypass.
+      #
+      # To the log, NOT to this job's summary. eval/summary.py runs the same lint
+      # and renders it inside the one consolidated summary, so having it here too
+      # meant the same table twice on a labelled PR — and on the run page it sat
+      # under "Lint & unit tests", nowhere near the eval numbers it explains.
+      # toollint is pure, so running it in both places costs nothing.
+      - name: Tool catalogue lint (advisory)
+        run: python -m toollint --snapshot tool-history/latest.json
+
       - name: ShellCheck (shell lint)
         run: |
           shopt -s nullglob globstar
-          scripts=(functional/**/*.sh)
+          # Both trees. scripts/ was added later and was silently outside the
+          # glob, so the one shell script anybody runs by hand was the one not
+          # being linted.
+          scripts=(functional/**/*.sh scripts/**/*.sh)
           if [ ${#scripts[@]} -eq 0 ]; then
             echo "No shell scripts to lint."
           else
