@@ -443,11 +443,51 @@ def test_scorecard_section_names_the_thief_in_the_victims_row():
         ],
         {},
     )
-    assert tool_rows(text) == ["alpha", "beta"]
+    # Twice each: once in the visible "worth acting on" table, once in the full
+    # table collapsed underneath. Both tools qualify here — alpha won nothing
+    # (recall 0) and beta is right only half the time it is picked.
+    assert tool_rows(text) == ["alpha", "beta", "alpha", "beta"]
+    assert "2 of 2 tools below 90%" in text
     assert "| `beta` | 1 | 100% | 2 | 50% |" in text
     assert "`alpha` ×1" in text
     assert "Confusion pairs" in text
     assert "`alpha` / `beta` — 1 miss(es)" in text
+
+
+def test_a_clean_tool_is_only_in_the_collapsed_table():
+    """The point of the split: a tool nobody needs to look at must not take a row
+    in front of the reader. It is still in the full table, because comparing two
+    runs by hand needs every row."""
+    text = S.render_tool_scorecard([fixture_result("a1", "alpha", "alpha", True)], {})
+
+    visible, _, collapsed = text.partition("<details>")
+    assert "All 1 tools are at or above 90% on both." in visible
+    assert "`alpha`" not in visible
+    assert "`alpha`" in collapsed
+
+
+def test_a_tool_no_fixture_covers_is_flagged_even_though_it_has_no_rates():
+    """An uncovered tool is the one failure the rates cannot show — it has no
+    recall to be bad."""
+    text = S.render_tool_scorecard([fixture_result("a1", "alpha", "alpha", True)], {"ghost": {"name": "ghost"}})
+    visible = text.partition("<details>")[0]
+
+    assert "`ghost`" in visible
+
+
+def test_the_confusion_tail_is_collapsed_so_it_cannot_bury_the_verdict():
+    """Thirteen bullets of one-off misses pushed the cross-model table off the
+    first screen. They are sorted worst-first, so the tail is the cheap part."""
+    results = []
+    for i in range(S.TOP_COLLISIONS + 3):
+        results.append(fixture_result(f"v{i}", f"victim{i}", "thief", False))
+    results.append(fixture_result("t1", "thief", "thief", True))
+
+    text = S.render_tool_scorecard(results, {})
+    visible, _, rest = text.partition("<summary>The remaining")
+
+    assert visible.count("miss(es)") == S.TOP_COLLISIONS
+    assert rest, "the tail should be behind a disclosure, not dropped"
 
 
 def test_scorecard_section_flags_a_mutual_pair():
@@ -632,7 +672,11 @@ def test_render_includes_the_arm_matrix_when_reports_carry_one():
         None,
         [arm_report(isolated=[outcome("a", True)], full=[outcome("a", True)])],
     )
-    assert "### Where the failures are" in text
+    # Nested under a disclosure now, so its own `###` heading is dropped — a
+    # <summary> label with the same words directly beneath it reads as a bug.
+    assert "<summary>Triage — which arm located each failure</summary>" in text
+    assert "### Where the failures are" not in text
+    assert "| Fixture | Expected |" in text, "the table itself still ships"
 
 
 def test_an_arm_that_never_advertised_the_tool_is_not_diagnosed():
@@ -704,3 +748,114 @@ def test_module_runs_as_a_script_without_nameerror(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert "NameError" not in proc.stderr
     assert "## MCP evals" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Reading the page: what stays in front of the reader, and how prose wraps.
+#
+# GitHub renders a single newline in a step summary as a line break, so prose
+# hard-wrapped in the source arrived wrapped at ~70 columns inside a browser
+# column three times that wide. Measured before this: 151 of 160 lines visible,
+# with the verdict at 738 of 9,470 bytes.
+# ---------------------------------------------------------------------------
+def test_para_joins_sentences_into_one_line_so_the_browser_wraps_it():
+    assert S.para("first half", "second half") == "first half second half"
+    assert "\n" not in S.para("a", "b", "c")
+
+
+def test_para_drops_blanks_rather_than_leaving_double_spaces():
+    assert S.para("a", "", "  ", "b") == "a b"
+
+
+def test_details_needs_the_blank_line_after_summary_to_render_markdown():
+    """Without it GitHub prints the markdown inside as literal text."""
+    out = S.details("Label", "| a | b |\n|---|---|")
+
+    assert out.startswith("<details>\n<summary>Label</summary>\n\n")
+    assert out.endswith("</details>\n")
+
+
+def test_details_of_nothing_renders_nothing():
+    """An empty disclosure is worse than an absent one — it invites a click that
+    reveals a blank."""
+    assert S.details("Label", "") == ""
+    assert S.details("Label", "   \n  ") == ""
+
+
+def test_nest_drops_the_inner_heading_but_keeps_the_body():
+    out = S.nest("Outer label", "### Inner heading\n\nbody text")
+
+    assert "Inner heading" not in out
+    assert "body text" in out
+
+
+def test_no_prose_line_in_the_rendered_page_is_source_wrapped():
+    """The regression guard for the wrapping. A prose line that stops well short
+    of any sane column is a source line ending that leaked into the output."""
+    text = S.render(
+        [row("admin · primary", "m", 0.9, 1)],
+        None,
+        [fixture_result("a1", "alpha", "beta", False)],
+        None,
+        None,
+    )
+    stumps = [
+        line
+        for line in text.split("\n")
+        # Prose only: tables, bullets, headings and HTML wrap on their own terms.
+        if 30 < len(line) < 75 and not line.startswith(("|", "-", "#", "<", "*", " ", "$"))
+    ]
+
+    assert not stumps, f"hard-wrapped prose leaked into the summary: {stumps}"
+
+
+# ---------------------------------------------------------------------------
+# Catalogue listings — both endpoints or neither.
+#
+# The Store listing used to be echoed straight into the static job's summary
+# with no admin equivalent, so the run page documented the optional plugin's
+# tools and said nothing about the 30 that ship in core.
+# ---------------------------------------------------------------------------
+SNAPSHOT = {
+    "tools": [{"name": "alpha"}, {"name": "beta"}],
+    "toolsets": [{"name": "group", "tools": ["alpha", "beta"]}],
+}
+
+
+def test_a_catalogue_renders_its_toolsets_collapsed():
+    out = S.render_catalogue(SNAPSHOT, "Admin")
+
+    assert "<summary>Admin catalogue — 2 tools</summary>" in out
+    assert "2 tools in 1 toolsets" in out
+    assert "- **group** — `alpha`, `beta`" in out
+
+
+def test_an_absent_snapshot_omits_its_section_rather_than_showing_an_empty_one():
+    """store.json is missing on any run whose preflight did not get that far."""
+    assert S.render_catalogue(None, "Store") == ""
+    assert S.render_catalogue({}, "Store") == ""
+
+
+def test_both_catalogues_appear_when_both_snapshots_exist():
+    text = S.render(
+        [row("admin · primary", "m", 0.9, 1)],
+        None,
+        None,
+        None,
+        None,
+        admin_snapshot=SNAPSHOT,
+        store_snapshot=SNAPSHOT,
+    )
+
+    assert "Admin catalogue" in text
+    assert "Store catalogue" in text
+
+
+def test_the_catalogue_lint_is_rendered_here_not_in_a_second_workflow():
+    """toollint is pure, so running it again in this job is free and is what
+    lets one page carry the whole picture."""
+    text = S.render([row("admin · primary", "m", 0.9, 1)], None, None, None, None, admin_snapshot=SNAPSHOT)
+
+    assert "<summary>Tool catalogue lint — static description findings</summary>" in text
+    # Its own H2 must not compete with this page's.
+    assert "## Tool catalogue lint" not in text

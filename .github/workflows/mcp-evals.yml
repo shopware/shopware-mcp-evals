@@ -170,7 +170,16 @@ jobs:
       # Whether the Store suite has anything to measure. Separate from the job's
       # own success on purpose: a UCP environment problem must not block the
       # admin gate, which is the isolation this split exists for.
-      store_ready: ${{ steps.preflight.outcome == 'success' }}
+      #
+      # The step's own `ready` output, not `steps.preflight.outcome`. Reading the
+      # outcome required the step to EXIT non-zero to say "not ready", which the
+      # runner then annotated as an error on a job that had passed. An output
+      # carries the same one bit without claiming anything failed.
+      #
+      # `== 'true'`, so a preflight that never ran (RUN_STORE off, or the plugin
+      # missing) leaves this false and the store eval does not start. Only an
+      # actual green preflight may spend money.
+      store_ready: ${{ steps.preflight.outputs.ready == 'true' }}
       shopware_sha: ${{ steps.lane.outputs.shopware_sha }}
       drift: ${{ steps.drift.outputs.drift }}
       snapshot_changed: ${{ steps.snapshot.outputs.changed }}
@@ -330,30 +339,34 @@ jobs:
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
+        # The listing used to be printed to THIS job's summary, which is why the
+        # run page documented the optional plugin's 17 tools and said nothing
+        # about core's 30. eval/summary.py renders both from the snapshots now,
+        # so this step's job is only to produce the file.
         run: |
           python -m eval.snapshot_tools --endpoint store \
             --output tool-history/store.json
-          echo "### Store catalogue" >> "$GITHUB_STEP_SUMMARY"
-          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
-          import json
-          snap = json.load(open("tool-history/store.json"))
-          print(f"{len(snap['tools'])} tools in {len(snap['toolsets'])} toolsets\n")
-          for ts in snap["toolsets"]:
-              print(f"- `{ts['name']}` — {', '.join(ts['tools'])}")
-          EOF
 
       - name: Preflight the Store endpoint
         id: preflight
         # Non-fatal to the JOB, decisive for the STORE suite. It failing means
         # the UCP tools cannot run, which is a complete answer for store-eval and
         # no reason at all to withhold the admin numbers.
-        continue-on-error: true
+        #
+        # It reports through an OUTPUT and exits 0, rather than exiting 1 under
+        # continue-on-error. Same control flow, but the runner no longer posts
+        # "Process completed with exit code 1" against a job that passed: three
+        # red annotations on a green Static checks was the store suite being
+        # skipped as designed, and it read as a broken build.
         if: ${{ !cancelled() && env.RUN_STORE == 'true' && steps.lane.outputs.store_plugin_ok == 'true' }}
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
         run: |
-          python -m eval.preflight --endpoint store || {
+          if python -m eval.preflight --endpoint store; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
             # The MCP layer answers an escaped exception with a generic "Error
             # while executing tool" that carries none of the underlying message,
             # so the diagnosis table has nothing to match on. The exception
@@ -382,12 +395,14 @@ jobs:
             else
               echo "  no log directory under shopware/var — the plugin logs nothing for this path"
             fi
-            echo "::error::Store preflight failed - UCP tools cannot execute, so the suite would measure nothing. See the diagnosis above."
-            exit 1
-          }
+            # ::warning::, not ::error::. The store suite being skipped is the
+            # designed outcome of a plugin that cannot execute, and it does not
+            # gate anything. An error annotation here is indistinguishable from
+            # one that failed the build.
+            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped. See the diagnosis above."
+          fi
 
       - name: Run Store API functional tests
-        continue-on-error: true
         if: ${{ !cancelled() && env.RUN_STORE == 'true' && steps.lane.outputs.store_plugin_ok == 'true' }}
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
@@ -397,7 +412,13 @@ jobs:
           # every dry run back and a rolled-back cart cannot be the next step's
           # precondition. Safe here and nowhere else — this instance is destroyed
           # with the job.
-          python -m functional.runner --endpoint store --allow-mutations
+          #
+          # Warns instead of failing, for the reason on the preflight above: this
+          # was continue-on-error already, so its exit code changed nothing except
+          # to post a red annotation on a green job. The report JSON in
+          # static-results carries every assertion either way.
+          python -m functional.runner --endpoint store --allow-mutations \
+            || echo "::warning::Store API functional tests reported failures; see the log above and functional-store-*.json in static-results."
 
       - name: Detect snapshot changes worth committing
         id: snapshot
@@ -882,9 +903,16 @@ jobs:
           # every historical report, so a glob would pool runs from months ago —
           # against older descriptions and older fixtures — into a table
           # presented as this job's. A report that did not run is simply absent.
+          #
+          # Both snapshots, so the one summary carries both catalogues and the
+          # static description lint. tool-history/ arrives from static-results;
+          # store.json is absent on any run whose preflight did not get that far,
+          # which omits that section rather than failing.
           python -m eval.summary \
             --rows "results/rows" \
             --comparison "results/eval-comparison.json" \
+            --tools "tool-history/latest.json" \
+            --store-tools "tool-history/store.json" \
             --reports "results/eval-primary.json" \
                       "results/eval-second-validator.json" \
                       "results/eval-no-prompt.json" \

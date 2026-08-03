@@ -29,6 +29,7 @@ import os
 import sys
 from pathlib import Path
 
+import toollint
 from eval.compare_runs import render_actionable, render_detail, render_split, render_unmatched
 from eval.cost import combine
 from eval.tool_scorecard import collisions, rank_worst, scorecard
@@ -38,6 +39,48 @@ from ownership import TIER_ORDER
 # `ids` field. Chosen because a real fixture id is a YAML identifier and can
 # never start with it, so `startswith` is a safe test for "not a real fixture".
 ANON = "?"
+
+
+def details(label: str, body: str) -> str:
+    """A collapsed block, for reference tables rather than verdicts.
+
+    The summary is read to answer "did it pass, and what do I fix". Measured on
+    one run, the verdict was 738 of 9,470 bytes and the per-tool scorecard alone
+    was 3,750 — so the page opened on reference data and the answer was four
+    scrolls down. Everything still ships; it just does not compete for the top.
+
+    The blank line after </summary> is load-bearing: without it GitHub renders
+    the markdown inside as literal text.
+    """
+    if not body.strip():
+        return ""
+    return f"<details>\n<summary>{label}</summary>\n\n{body.strip()}\n\n</details>\n"
+
+
+def nest(label: str, body: str) -> str:
+    """Collapse a section that already renders its own `###` heading.
+
+    The heading is dropped rather than kept: a `<summary>` label with the same
+    words immediately under it reads as a rendering bug.
+    """
+    if not body.strip():
+        return ""
+    lines = body.strip().split("\n")
+    if lines and lines[0].startswith("#"):
+        lines = lines[1:]
+    return details(label, "\n".join(lines))
+
+
+def para(*sentences: str) -> str:
+    """One paragraph as ONE line.
+
+    GitHub renders a single newline in a step summary as a line break, so prose
+    hard-wrapped in the source arrived ragged — wrapped at the source's ~70
+    columns inside a browser column three times that wide. Passing the sentences
+    separately keeps this file readable without leaking its line endings into the
+    output.
+    """
+    return " ".join(s.strip() for s in sentences if s.strip())
 
 
 def load_rows(rows_dir: Path) -> list[dict]:
@@ -197,9 +240,11 @@ def render_arm_matrix(reports: list[dict]) -> str:
     lines = [
         "### Where the failures are",
         "",
-        "Each fixture below failed the gating discovery arm, then was re-run with only",
-        "its own toolset enabled, and again with the whole catalogue enabled. The",
-        "combination says which of three different problems produced the same symptom.",
+        para(
+            "Each fixture below failed the gating discovery arm, then was re-run with only its own",
+            "toolset enabled, and again with the whole catalogue enabled. The combination says which",
+            "of three different problems produced the same symptom.",
+        ),
         "",
         "| Fixture | Expected | isolated | full | Diagnosis |",
         "|---|---|:---:|:---:|---|",
@@ -294,20 +339,25 @@ def render_tiers(rows: list[dict]) -> str:
     lines = [
         "### By owner",
         "",
-        "Failures are not worth the same: core ships to every merchant, the plugins",
-        "are optional. Core is held to its own denominator so a regression there",
-        "cannot be averaged away by clean plugin numbers.",
+        para(
+            "Failures are not worth the same: core ships to every merchant, the plugins are optional.",
+            "Core is held to its own denominator so a regression there cannot be averaged away by",
+            "clean plugin numbers.",
+        ),
         "",
-        "Counted per fixture across every suite, so a fixture graded by both admin",
-        "runs counts once rather than twice. **Clean** is fixtures that passed on every",
-        "model that graded them, which is why this rate is stricter than the per-suite",
-        "rates above — one model missing once is enough to leave a fixture out of it.",
+        para(
+            "Counted per fixture across every suite, so a fixture graded by both admin runs counts",
+            "once rather than twice. **Clean** is fixtures that passed on every model that graded",
+            "them, which is why this rate is stricter than the per-suite rates above — one model",
+            "missing once is enough to leave a fixture out of it.",
+        ),
         "",
-        "**Bold** in the last column marks a fixture that at least two models graded",
-        "and *all* of them failed — the actionable set, matching the both-fail row of",
-        "the cross-model table below. Plain means either some model passed it (usually",
-        "the weaker one's capability gap) or only one model graded it at all, and a",
-        "single run is not evidence about a description.",
+        para(
+            "**Bold** in the last column marks a fixture that at least two models graded and *all* of them",
+            "failed — the actionable set, matching the both-fail row of the cross-model table below. Plain",
+            "means either some model passed it (usually the weaker one's capability gap) or only one model",
+            "graded it at all, and a single run is not evidence about a description.",
+        ),
         "",
         "| Owner | Clean | Rate | Failed on every model | Enforcement | Failing fixtures |",
         "|---|---:|---:|---:|---|---|",
@@ -405,9 +455,10 @@ def render_comparison(cmp_: dict | None) -> str:
         [
             "### Cross-model comparison (discovery mode)",
             "",
-            "A fixture both models miss points at the tool description. One only the",
-            "weaker model misses is its capability gap; one only the stronger misses is",
-            "usually flaky discovery.",
+            para(
+                "A fixture both models miss points at the tool description. One only the weaker model",
+                "misses is its capability gap; one only the stronger misses is usually flaky discovery.",
+            ),
             "",
             render_split(cmp_),
             render_actionable(cmp_, primary, second),
@@ -446,18 +497,31 @@ def load_reports(paths: list[str] | None) -> list[dict]:
     return reports
 
 
+def load_snapshot(path: str | None) -> dict | None:
+    """A whole catalogue snapshot, or None.
+
+    None rather than {} so a caller can tell "no snapshot for this endpoint" from
+    "a snapshot with nothing in it" — the Store one is absent on any run whose
+    static job did not reach it, and that omits a section rather than rendering
+    an empty one.
+    """
+    if not path:
+        return None
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"::warning::Could not read tool catalogue {path}: {exc}", file=sys.stderr)
+        return None
+
+
 def load_catalog(path: str | None) -> dict[str, dict]:
     """Tool name -> full definition, from a snapshot written by snapshot_tools.py.
 
     compare_runs.load_catalogue reads the same file but keeps only descriptions;
     the scorecard wants the whole definition so it can report on the schema too.
     """
-    if not path:
-        return {}
-    try:
-        snapshot = json.loads(Path(path).read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"::warning::Could not read tool catalogue {path}: {exc}", file=sys.stderr)
+    snapshot = load_snapshot(path)
+    if not snapshot:
         return {}
     return {t["name"]: t for t in snapshot.get("tools", []) if t.get("name")}
 
@@ -513,37 +577,136 @@ def render_tool_scorecard(results: list[dict], catalog: dict[str, dict]) -> str:
     if not card:
         return ""
 
+    ranked = rank_worst(card)
+    flagged = [(n, e) for n, e in ranked if _needs_work(e)]
+
     lines = [
         "### Per-tool scorecard",
         "",
-        "Recall = won the fixtures written for it. Precision = was right when picked.",
-        "A tool with high recall and low precision has an over-broad description: it",
-        "is winning its siblings' prompts, which the pass rate alone cannot show.",
+        para(
+            "Recall = won the fixtures written for it. Precision = was right when picked. A tool with",
+            "high recall and low precision has an over-broad description: it is winning its siblings'",
+            "prompts, which the pass rate alone cannot show.",
+        ),
         "",
+    ]
+    if flagged:
+        lines += [
+            para(
+                f"**{len(flagged)} of {len(ranked)} tools below {ACTIONABLE_F1:.0%} on recall or precision.**",
+                "The rest are clean and are in the full table below.",
+            ),
+            "",
+            _scorecard_table(flagged),
+        ]
+    else:
+        lines += [para(f"All {len(ranked)} tools are at or above {ACTIONABLE_F1:.0%} on both."), ""]
+
+    # The full table stays, collapsed: it is the reference anyone comparing two
+    # runs by hand needs, and it was 40% of the summary when it led the section.
+    lines.append(details(f"Full scorecard — all {len(ranked)} tools", _scorecard_table(ranked)))
+
+    found = collisions(card)
+    if found:
+        pairs = [
+            f"- `{p['pair'][0]}` / `{p['pair'][1]}` — {p['total']} miss(es)" + (" **(mutual)**" if p["mutual"] else "")
+            for p in found
+        ]
+        lines += [
+            para(
+                "**Confusion pairs.** A mutual pair is the strongest signal here — both descriptions",
+                "attract each other's prompts, so they need differentiating from each other rather than",
+                "fixing one at a time.",
+            ),
+            "",
+            # `collisions` returns them worst-first, so the tail is the long thin
+            # end of one-off misses. Thirteen bullets of it pushed the cross-model
+            # verdict off the first screen.
+            *pairs[:TOP_COLLISIONS],
+            "",
+        ]
+        if len(pairs) > TOP_COLLISIONS:
+            lines.append(
+                details(f"The remaining {len(pairs) - TOP_COLLISIONS} pairs", "\n".join(pairs[TOP_COLLISIONS:]))
+            )
+    return "\n".join(lines)
+
+
+# How many confusion pairs stay in front of the reader.
+TOP_COLLISIONS = 5
+
+
+# Below this on recall or precision and the tool is worth someone's attention.
+# Not a gate — nothing here fails a build — just the line between "read this row"
+# and "it is in the appendix".
+ACTIONABLE_F1 = 0.9
+
+
+def _needs_work(entry: dict) -> bool:
+    """Whether a tool's row belongs in front of the reader.
+
+    Either half can be the problem and they mean opposite things: low recall is a
+    description nobody finds, low precision is one that wins prompts it has no
+    business winning. A tool with no fixtures at all is flagged too — an
+    uncovered tool is the one failure mode the rates cannot show.
+    """
+    if not entry.get("expected_n"):
+        return True
+    return any(entry.get(k) is not None and entry[k] < ACTIONABLE_F1 for k in ("recall", "precision"))
+
+
+def _scorecard_table(entries: list[tuple[str, dict]]) -> str:
+    lines = [
         "| Tool | Fixtures | Recall | Picked | Precision | F1 | Steals from | Search rank |",
         "|---|---:|---:|---:|---:|---:|---|---:|",
     ]
-    for name, e in rank_worst(card):
+    for name, e in entries:
         rank = "–" if e["search_rank_p50"] is None else f"{e['search_rank_p50']:g}"
         lines.append(
             f"| `{name}` | {e['expected_n']} | {_pct(e['recall'])} | {e['selected_n']} | "
             f"{_pct(e['precision'])} | {_pct(e['f1'])} | {_partners(e['steals_from'])} | {rank} |"
         )
     lines.append("")
-
-    found = collisions(card)
-    if found:
-        lines += [
-            "**Confusion pairs.** A mutual pair is the strongest signal here — both",
-            "descriptions attract each other's prompts, so they need differentiating",
-            "from each other rather than fixing one at a time.",
-            "",
-        ]
-        for pair in found:
-            mark = " **(mutual)**" if pair["mutual"] else ""
-            lines.append(f"- `{pair['pair'][0]}` / `{pair['pair'][1]}` — {pair['total']} miss(es){mark}")
-        lines.append("")
     return "\n".join(lines)
+
+
+def render_catalogue(snapshot: dict | None, label: str) -> str:
+    """One endpoint's toolsets and their tools.
+
+    Both endpoints or neither. The Store listing used to be written straight to
+    the summary from the static job with no admin equivalent, so the page
+    documented the 17 tools of the optional plugin and said nothing about the 30
+    that ship in core.
+    """
+    if not snapshot:
+        return ""
+    toolsets = snapshot.get("toolsets") or []
+    tools = snapshot.get("tools") or []
+    if not toolsets and not tools:
+        return ""
+    lines = [f"{len(tools)} tools in {len(toolsets)} toolsets", ""]
+    for ts in toolsets:
+        names = ", ".join(f"`{t}`" for t in ts.get("tools", []))
+        lines.append(f"- **{ts.get('name', '?')}** — {names}")
+    return details(f"{label} catalogue — {len(tools)} tools", "\n".join(lines))
+
+
+def render_catalogue_lint(snapshot: dict | None) -> str:
+    """The static description findings, rendered here rather than in a second
+    workflow's summary.
+
+    toollint is pure — it reads a committed snapshot, needs no server and no
+    model — so running it again in this job costs nothing and is what lets one
+    page carry the whole picture. It stays a gate-free advisory: the findings are
+    judgements about prose, and a build that goes red over word choice is one
+    people learn to bypass.
+    """
+    if not snapshot:
+        return ""
+    body = toollint.render(toollint.lint(snapshot))
+    # Its own H2 would compete with this page's; the section is nested here.
+    body = body.replace("## Tool catalogue lint\n", "").strip()
+    return details("Tool catalogue lint — static description findings", body)
 
 
 def render(
@@ -552,7 +715,22 @@ def render(
     results: list[dict] | None = None,
     catalog: dict | None = None,
     reports: list[dict] | None = None,
+    admin_snapshot: dict | None = None,
+    store_snapshot: dict | None = None,
 ) -> str:
+    """The whole job on one page, verdict first.
+
+    Ordered by what a reader came for. Above the fold: did it pass, what did it
+    cost, and which fixtures or tools to act on. Below, collapsed: the reference
+    tables and the static catalogue material, which are what you open when the
+    answer above raises a question.
+
+    This is one page on purpose. The same run used to write five separate
+    summaries from four jobs across two workflows — the catalogue lint in the
+    lint workflow, a Store-only catalogue listing in the static job, a
+    comparison note in the eval job — so whether you saw a finding depended on
+    which job you happened to click.
+    """
     return "\n".join(
         [
             "## MCP evals",
@@ -562,11 +740,15 @@ def render(
             # Directly under the rates, deliberately: the denominator they are
             # computed over belongs next to them, not in an appendix.
             render_skipped(reports or []),
-            render_prompt_delta(reports or []),
             render_tiers(rows),
             render_tool_scorecard(results or [], catalog or {}),
-            render_arm_matrix(reports or []),
             render_comparison(cmp_),
+            # Reference from here down.
+            nest("Context prompt — what the tool guide is worth", render_prompt_delta(reports or [])),
+            nest("Triage — which arm located each failure", render_arm_matrix(reports or [])),
+            render_catalogue_lint(admin_snapshot),
+            render_catalogue(admin_snapshot, "Admin"),
+            render_catalogue(store_snapshot, "Store"),
         ]
     )
 
@@ -596,6 +778,14 @@ def main() -> int:
         default="tool-history/latest.json",
         help="Tool catalogue snapshot, so the scorecard can flag tools no fixture covers",
     )
+    parser.add_argument(
+        "--store-tools",
+        default="tool-history/store.json",
+        help=(
+            "Store catalogue snapshot, for the Store listing. Absent on any run whose "
+            "static job did not snapshot it, which simply omits that section."
+        ),
+    )
     args = parser.parse_args()
 
     cmp_ = None
@@ -615,6 +805,8 @@ def main() -> int:
         pooled_results(reports),
         load_catalog(args.tools),
         reports,
+        admin_snapshot=load_snapshot(args.tools),
+        store_snapshot=load_snapshot(args.store_tools),
     )
     print(markdown)
 

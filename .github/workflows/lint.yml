@@ -63,10 +63,15 @@ jobs:
       # server, no model, no tokens — so unlike the eval workflow this runs on
       # every push. Advisory by construction: toollint exits 0 whatever it
       # finds, because the findings are judgements about prose and a build that
-      # goes red over word choice is one people learn to bypass. It lands in the
-      # job summary so the findings are read rather than buried in a log.
+      # goes red over word choice is one people learn to bypass.
+      #
+      # To the log, NOT to this job's summary. eval/summary.py runs the same lint
+      # and renders it inside the one consolidated summary, so having it here too
+      # meant the same table twice on a labelled PR — and on the run page it sat
+      # under "Lint & unit tests", nowhere near the eval numbers it explains.
+      # toollint is pure, so running it in both places costs nothing.
       - name: Tool catalogue lint (advisory)
-        run: python -m toollint --snapshot tool-history/latest.json | tee -a "$GITHUB_STEP_SUMMARY"
+        run: python -m toollint --snapshot tool-history/latest.json
 
       - name: ShellCheck (shell lint)
         run: |
