@@ -4,6 +4,7 @@ admin/store flows driven through a stateful fake MCP server."""
 import json
 from types import SimpleNamespace
 
+import lane
 from functional import runner as R
 from functional.reporting import Reporter
 
@@ -213,6 +214,7 @@ class FakeServer:
         self.names = {t["name"] for t in toolsets}
         self.n = 0
         self.enabled = {}
+        self.cart_items: list[dict] = []
 
     def init(self, endpoint=None):
         self.n += 1
@@ -257,7 +259,19 @@ class FakeServer:
             return call_resp({"success": True, "data": data, "_meta": {"query": query, "totalCandidates": 20}})
         if tool == "shopware-store-api-context":
             return call_resp({"success": True, "data": {"salesChannelId": "sc1", "token": "tok"}})
+        if tool == "merchant-storefront-search":
+            return call_resp({"success": True, "data": {"products": [{"id": "p-1"}, {"id": "p-2"}]}})
         if tool == "merchant-cart-manage":
+            # Stateful, because the suite's whole claim about carts is that
+            # `add` answering `success: true` does not mean anything went in. A
+            # fake that returns the same object for create/add/get cannot tell
+            # a seeded cart from an empty one, which is the bug it is here to
+            # catch.
+            action = args.get("action")
+            if action == "add":
+                self.cart_items.append({"id": "li-1", "referencedId": args.get("productId")})
+            if action == "get":
+                return call_resp({"success": True, "data": {"lineItems": list(self.cart_items)}})
             return call_resp({"success": True, "data": {"token": "cart-tok"}})
         return call_resp({"success": True, "data": {}})
 
@@ -269,6 +283,10 @@ def _wire(monkeypatch, fake):
     monkeypatch.setattr(R, "enable_all_toolsets", lambda s, endpoint=None: None)
     monkeypatch.setattr(R, "mcp_tools_list_all", fake.tools_list)
     monkeypatch.setattr(R, "mcp_call", fake.call)
+    # lane.py holds its own reference: the cart seeding the runner delegates to
+    # lives there so the eval suite shares one definition of "a cart that can
+    # be checked out". Unpatched, these two tests reached the network.
+    monkeypatch.setattr(lane, "mcp_call", fake.call)
 
 
 def test_run_store_flow_all_pass(monkeypatch):
@@ -345,6 +363,11 @@ def test_run_admin_flow_all_pass(monkeypatch):
     R.run_admin(rep, ADMIN, args, session)
     assert rep.failed == 0
     assert rep.passed >= 25
+    # Named explicitly, because "nothing failed" also holds when the check is
+    # SKIPped for want of a cart — which is how it read in CI while the suite
+    # looked green here. It must have reached checkout.
+    checkout = next(r for r in rep.records if r["tool"] == "merchant-cart-checkout")
+    assert checkout["status"] != "skipped", checkout
 
 
 def test_schema_check_catches_empty_properties_in_the_tool_search_payload(monkeypatch):

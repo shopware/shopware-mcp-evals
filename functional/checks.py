@@ -200,10 +200,16 @@ MERCHANT_CHECKS: tuple[ToolCheck, ...] = (
         },
         # Order matters: no sales channel is a different finding from a cart that
         # could not be created inside one that exists.
+        #
+        # `cart_token` is empty only when no storefront-visible product could be
+        # added to a cart at all (see create_cart_token), which is missing data
+        # about the lane, not evidence about checkout. Saying so is the whole
+        # value of the distinction — the alternative is a FAIL reading "Cart is
+        # empty" that sends someone to read the checkout tool.
         (
             ("sales_channel_id", "no storefront sales channel"),
-            ("cart_token", "could not get cart token or customer ID"),
-            ("customer_id", "could not get cart token or customer ID"),
+            ("cart_token", "no sellable product in this channel, so no cart to check out"),
+            ("customer_id", "no customer found"),
         ),
     ),
     ToolCheck(

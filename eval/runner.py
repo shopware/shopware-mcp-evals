@@ -44,7 +44,8 @@ from pathlib import Path
 import requests
 import yaml
 
-from eval.assertions import check
+import lane
+from eval.assertions import check, inband_error
 from eval.cost import load_pricing, run_cost
 from eval.report import (
     BOLD,
@@ -668,7 +669,14 @@ def _handle_answering_call(
     # The server's own words, truncated. Without this the report could say a call
     # failed but never what the server said, so diagnosing it meant re-running
     # with a debugger attached.
-    attempt |= {"executed": True, "ok": ok, "reason": reason, "error": (err or "")[:200]}
+    #
+    # `err or inband_error(...)` for the same reason check() folds the two
+    # together: the admin merchant/entity tools answer a rejected call with
+    # `isError: false` and `{"success": false, ...}` in the body, so `err` is
+    # empty and only the in-band message exists. Recording just `err` is why
+    # every failed attempt in the last run read `tool_error` with error="" —
+    # the five gating failures had to be diagnosed from the fixture text.
+    attempt |= {"executed": True, "ok": ok, "reason": reason, "error": (err or inband_error(result_text) or "")[:200]}
     st.attempted_tools.append(attempt)
 
     if correct and ok:
@@ -1048,6 +1056,14 @@ def run_discovery_pass(
             result = skipped_result(fixture, "discovery")
             result["_line"] = _render(result)
             return result
+        # The lane could not supply an id this prompt names, so the call the
+        # model would make cannot resolve. Grading that charges the lane's gap
+        # to the model — the three cart fixtures failed on exactly this while
+        # the model named merchant-cart-checkout correctly every time.
+        if unresolved := fixture.get("unresolved_placeholder"):
+            result = skipped_result(fixture, "discovery", f"lane could not resolve {{{unresolved}}}")
+            result["_line"] = _render(result)
+            return result
         # Registered but proven broken by the static layer. Grading a model on
         # finding a tool that cannot run charges a plugin bug to the model, and
         # pays full model price to learn something one direct call already
@@ -1199,6 +1215,17 @@ def build_parser() -> argparse.ArgumentParser:
             "tool it proved broken are skipped with that reason instead of graded, so a plugin bug "
             "does not read as a description problem and does not cost a model pass to rediscover. "
             "An absent file grades everything."
+        ),
+    )
+    parser.add_argument(
+        "--seed-lane",
+        action="store_true",
+        default=os.environ.get("EVAL_SEED_LANE") == "true",
+        help=(
+            "Allow the placeholder resolvers to WRITE to the shop — today, to open a cart with a "
+            "line item in it so {cart_token} and {line_item_id} resolve. Only for a throwaway "
+            "instance: CI sets it because the lane is destroyed with the job. Off, the fixtures "
+            "that name those ids are skipped rather than graded against a token nothing can resolve."
         ),
     )
     parser.add_argument(
@@ -1405,43 +1432,131 @@ def _first_sales_channel_id(endpoint) -> str | None:
     return None
 
 
+def _first_id_of(entity: str):
+    """A resolver that returns the id of any one row of `entity`.
+
+    Any row, not a specific one: what these fixtures need is an id the server
+    can resolve, so the call it grades is a real call. Which product it is
+    carries no information — the demo data is generated, so there is nothing
+    stable to prefer.
+    """
+
+    def resolve(endpoint) -> str | None:
+        session_id, _ = mcp_init(endpoint=endpoint)
+        return lane.first_entity_id(session_id, endpoint, entity) or None
+
+    resolve.__name__ = f"_first_{entity}_id"
+    return resolve
+
+
+def _seed_cart(endpoint) -> dict[str, str]:
+    """MUTATES: a real cart with a real line item, as {cart_token, line_item_id}.
+
+    One resolver for both ids because they come from one cart. Two independent
+    ones would open two, and `{line_item_id}` would name a line in a cart that
+    `{cart_token}` does not point at.
+
+    This is the only resolver that writes, which is why it is reached through
+    SEEDING_RESOLVERS and only when --seed-lane says the instance is disposable.
+    A cart cannot be looked up: nothing in a fresh shop has one, and the three
+    cart fixtures were failing against a token invented in the YAML — the model
+    picked merchant-cart-checkout correctly all three times and was marked wrong
+    for it.
+    """
+    session_id, _ = mcp_init(endpoint=endpoint)
+    channel = _first_sales_channel_id(endpoint) or ""
+    products = lane.sellable_products(session_id, endpoint, channel)
+    token, line_item_id = lane.create_cart(session_id, endpoint, channel, products)
+    return {"cart_token": token, "line_item_id": line_item_id}
+
+
 # Placeholder -> resolver. A fixture prompt may contain `{name}`; the runner
 # replaces it with a value read off the live lane at startup. Add one here when a
 # tool needs a real, resolvable id to execute that the model cannot invent.
+#
+# Everything here READS. `{product_id}` and friends go through core
+# entity-search rather than the merchant tools so they still resolve on an
+# instance with no plugins installed.
 PLACEHOLDER_RESOLVERS = {
     "sales_channel_id": _first_sales_channel_id,
+    "product_id": _first_id_of("product"),
+    "customer_id": _first_id_of("customer"),
+    "order_id": _first_id_of("order"),
 }
 
+# Resolvers that WRITE to the shop, keyed by the placeholders each one provides.
+# Held apart from the read-only set and reached only under --seed-lane: creating
+# a cart on somebody's real instance to grade a fixture is not a trade this
+# suite gets to make on its own.
+SEEDING_RESOLVERS = {
+    ("cart_token", "line_item_id"): _seed_cart,
+}
 
-def resolve_lane_substitutions(fixtures: list[dict], endpoint) -> dict[str, str]:
+# Every placeholder this runner knows how to fill. Used to tell an unresolved
+# `{cart_token}` (a lane that could not provide one) apart from a stray brace in
+# a prompt, which is nobody's business but the fixture author's.
+KNOWN_PLACEHOLDERS = set(PLACEHOLDER_RESOLVERS) | {k for keys in SEEDING_RESOLVERS for k in keys}
+
+
+def _referenced(fixtures: list[dict], key: str) -> bool:
+    return any("{" + key + "}" in f.get("prompt", "") for f in fixtures)
+
+
+def resolve_lane_substitutions(fixtures: list[dict], endpoint, seed_lane: bool = False) -> dict[str, str]:
     """Values for every `{placeholder}` the loaded fixtures actually reference.
 
     Only resolves what is used, so a run filtered to fixtures with no placeholder
     makes no extra calls. A placeholder that cannot be resolved is warned about
-    and left in place — the fixture then fails visibly rather than silently
-    grading against a literal `{sales_channel_id}`.
+    and left in place — the fixture is then skipped by name rather than silently
+    graded against a literal `{sales_channel_id}`.
     """
     subs: dict[str, str] = {}
     for key, resolver in PLACEHOLDER_RESOLVERS.items():
-        token = "{" + key + "}"
-        if not any(token in f.get("prompt", "") for f in fixtures):
+        if not _referenced(fixtures, key):
             continue
         value = resolver(endpoint)
         if value:
             subs[key] = value
             print(f"Lane id: {key} = {value}")
         else:
-            print(f"::warning::could not resolve {token} from the lane; fixtures using it will fail")
+            print(f"::warning::could not resolve {{{key}}} from the lane; fixtures using it will be skipped")
+
+    for keys, resolver in SEEDING_RESOLVERS.items():
+        wanted = [k for k in keys if _referenced(fixtures, k)]
+        if not wanted:
+            continue
+        if not seed_lane:
+            print(
+                f"Lane seeding off (--seed-lane): {', '.join(wanted)} cannot be resolved without writing "
+                "to the shop, so their fixtures are skipped."
+            )
+            continue
+        for key, value in resolver(endpoint).items():
+            if value:
+                subs[key] = value
+                print(f"Lane id (seeded): {key} = {value}")
+    for key in (k for keys in SEEDING_RESOLVERS for k in keys):
+        if seed_lane and _referenced(fixtures, key) and key not in subs:
+            print(f"::warning::could not seed {{{key}}} on this lane; fixtures using it will be skipped")
     return subs
 
 
 def apply_substitutions(fixtures: list[dict], subs: dict[str, str]) -> None:
-    """Replace `{placeholder}` tokens in each fixture prompt, in place."""
+    """Replace `{placeholder}` tokens in each fixture prompt, in place.
+
+    A fixture left holding a placeholder this runner knows about is marked
+    `unresolved_placeholder` rather than sent to the model. Grading it would
+    charge the model for an id the lane could not supply — which is exactly the
+    failure mode the placeholders exist to remove.
+    """
     for fixture in fixtures:
         prompt = fixture.get("prompt", "")
         for key, value in subs.items():
             prompt = prompt.replace("{" + key + "}", value)
         fixture["prompt"] = prompt
+        missing = [k for k in KNOWN_PLACEHOLDERS if "{" + k + "}" in prompt]
+        if missing:
+            fixture["unresolved_placeholder"] = ", ".join(sorted(missing))
 
 
 def fetch_system_prompt(endpoint, enabled: bool = True, prompt_set: str = "all") -> tuple[str | None, dict]:
@@ -1608,9 +1723,11 @@ def run_suite(args) -> int:
         print(f"Tool health: skipping fixtures for {len(blocked)} broken tool(s): {', '.join(blocked)}")
 
     # Substitute {placeholder} tokens with real ids off the live lane. A tool
-    # whose call is executed (merchant-*, theme-config) needs a resolvable
-    # sales-channel id, which the model cannot invent — see resolve_lane_substitutions.
-    apply_substitutions(fixtures, resolve_lane_substitutions(fixtures, endpoint))
+    # whose call is executed (merchant-*, theme-config, entity-upsert) needs
+    # resolvable ids, which the model cannot invent — see
+    # resolve_lane_substitutions. Anything left unresolved skips its fixtures
+    # rather than grading them against a literal brace string.
+    apply_substitutions(fixtures, resolve_lane_substitutions(fixtures, endpoint, seed_lane=args.seed_lane))
 
     results_discovery = None
     if "discovery" in modes:

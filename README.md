@@ -83,6 +83,7 @@ tool's own description, a cross-group collision, or the discovery layer.
 ├── pyproject.toml         # package metadata; `pip install -e .` makes the imports work
 ├── shopware.sha           # pinned Shopware commit for reproducible CI runs
 ├── mcp_client.py          # shared MCP HTTP helpers (admin + store endpoints)
+├── lane.py                # real ids read off the instance, so no fixture has to invent one
 ├── ownership.py           # tool name → owning repository, and what a failure there costs
 ├── toolclass.py           # Layer 0/2: may a tool be executed, and how to make it safe
 ├── ucp.py                 # optional agentic-commerce plugin, isolated so it can be deleted whole
@@ -398,6 +399,15 @@ shared 90% it flapped instead: it scored 89% on one commit and 90% on the next
 with no change to descriptions or fixtures in between, and later failed a run at
 88% core while the primary was clean. 85% still catches a collapse, which is what
 the gate is for. Re-measure before swapping either model.
+
+**The second validator's gate is currently advisory** (`REBASELINE: 'true'` in
+`.github/workflows/mcp-evals.yml`, which also drops the comparison step to
+`--gate primary`). The 0.90/0.85 pair was calibrated against first-tool-correct,
+and the first runs under execute-and-assert did not measure what they appeared
+to: the models were being failed for ids the fixtures had invented, not for
+picking the wrong tool. Those are fixed; the number is not yet known. Set both
+from a run of nightlies — `first_try_rate` and `recovery_rate` are in the report
+— and delete the flag. The primary is deliberately still gating.
 
 **Core is additionally gated on its own denominator.** The admin suite spans
 four repositories, so one aggregate rate lets a core regression hide behind

@@ -12,7 +12,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from eval.scoring import discovery_summary, score, scored
+from eval.scoring import discovery_summary, executed, score, scored
 from ownership import OPTIONAL, breakdown
 
 RESET = "\033[0m"
@@ -96,7 +96,18 @@ def print_discovery_block(discovery: list[dict]):
         names = ", ".join(r["id"] for r in skipped)
         print(f"  {DIM}Skipped (expected tool not registered on this instance): {names}{RESET}")
 
-    failed = [r for r in scored(discovery) if not r["passed"]]
+    # `executed`, not `scored`. A fixture that errored before reaching the model
+    # is missing data, and the gate already excludes it on exactly that basis —
+    # listing it here as a failure meant the section and the verdict counted
+    # different things. It showed up as `negative_carrier_label (None)`: no
+    # reason, no trail, nothing anyone could act on, while the gate line right
+    # underneath said "1/96 fixtures never reached the model".
+    errored = [r for r in scored(discovery) if r.get("error")]
+    if errored:
+        names = ", ".join(f"{r['id']} ({str(r['error'])[:60]})" for r in errored)
+        print(f"  {DIM}Errored before reaching the model (excluded from the gate): {names}{RESET}")
+
+    failed = [r for r in executed(discovery) if not r["passed"]]
     if failed:
         print(f"\n{BOLD}{RED}Failing in discovery mode:{RESET}")
         for r in failed:

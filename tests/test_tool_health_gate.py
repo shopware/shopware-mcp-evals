@@ -11,6 +11,8 @@ stays graded, and about the skip being visible, as about what gets withheld.
 
 import json
 
+import pytest
+
 from eval import runner, summary
 
 
@@ -81,6 +83,27 @@ def test_the_default_reason_still_describes_the_original_case():
     fixture = {"id": "f1", "prompt": "p", "expected_tool": "gone", "category": "unambiguous"}
 
     assert "not registered" in runner.skipped_result(fixture, "discovery")["skip_reason"]
+
+
+def test_a_fixture_the_lane_could_not_supply_an_id_for_is_skipped_not_graded(monkeypatch):
+    """Same rule as a broken tool, different missing piece. The prompt names an
+    id the lane could not resolve, so the call the model would make cannot
+    succeed — grading it charges the lane's gap to the model. That is precisely
+    what the three cart fixtures did: merchant-cart-checkout named correctly
+    every time, marked wrong for a token invented in the YAML."""
+    fixture = {
+        "id": "cart_checkout_place",
+        "prompt": "check out cart {cart_token}",
+        "expected_tool": "merchant-cart-checkout",
+        "category": "unambiguous",
+        "unresolved_placeholder": "cart_token",
+    }
+    monkeypatch.setattr(runner, "run_fixture_discovery", lambda *a, **k: pytest.fail("the model was asked"))
+
+    results = runner.run_discovery_pass("openai", None, [fixture], "m", None, 6, {"merchant-cart-checkout"}, workers=1)
+
+    assert results[0]["skipped"] is True
+    assert results[0]["skip_reason"] == "lane could not resolve {cart_token}"
 
 
 def test_skipped_fixtures_are_rendered_grouped_by_reason():

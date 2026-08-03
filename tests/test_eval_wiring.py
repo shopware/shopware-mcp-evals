@@ -118,6 +118,116 @@ def test_first_sales_channel_is_none_when_the_response_is_not_json(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Seeding placeholders: the ones that cannot be looked up because nothing in a
+# fresh shop has one. Held apart from the read-only resolvers and reached only
+# under --seed-lane, because creating a cart on somebody's real instance to
+# grade a fixture is not a trade this suite gets to make on its own.
+# ---------------------------------------------------------------------------
+def _cart_fixtures():
+    return [{"id": "checkout", "prompt": "check out cart {cart_token} for {customer_id}"}]
+
+
+def test_the_entity_resolvers_ask_core_entity_search(monkeypatch):
+    """Core, not merchant-*: the fixtures needing a product, customer or order
+    id are core fixtures and have to resolve on an instance with no plugins."""
+    monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: ("sid", ""))
+    monkeypatch.setattr(E.lane, "mcp_call", lambda _s, tool, args, endpoint=None: {"_tool": tool, "_args": args})
+    monkeypatch.setattr(
+        E.lane, "mcp_result_text", lambda r: json.dumps({"data": [{"id": f"{r['_args']['entity']}-1"}]})
+    )
+
+    assert E.PLACEHOLDER_RESOLVERS["product_id"]("EP") == "product-1"
+    assert E.PLACEHOLDER_RESOLVERS["customer_id"]("EP") == "customer-1"
+    assert E.PLACEHOLDER_RESOLVERS["order_id"]("EP") == "order-1"
+
+
+def test_an_entity_resolver_returns_none_on_an_empty_shop(monkeypatch):
+    """None rather than "", so resolve_lane_substitutions warns and the
+    fixtures are skipped instead of grading against a literal brace string."""
+    monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: ("sid", ""))
+    monkeypatch.setattr(E.lane, "mcp_call", lambda *a, **k: {})
+    monkeypatch.setattr(E.lane, "mcp_result_text", lambda _r: json.dumps({"data": []}))
+
+    assert E.PLACEHOLDER_RESOLVERS["product_id"]("EP") is None
+
+
+def test_seeding_opens_one_cart_and_reports_both_of_its_ids(monkeypatch):
+    monkeypatch.setattr(E, "mcp_init", lambda endpoint=None: ("sid", ""))
+    monkeypatch.setattr(E, "_first_sales_channel_id", lambda _ep: "sc-1")
+    monkeypatch.setattr(E.lane, "sellable_products", lambda *a: ["p1"])
+    seen = []
+    monkeypatch.setattr(E.lane, "create_cart", lambda *a: seen.append(a) or ("tok", "li"))
+
+    assert E._seed_cart("EP") == {"cart_token": "tok", "line_item_id": "li"}
+    assert len(seen) == 1, "one cart, so the line item is in the cart the token names"
+
+
+def test_seeding_is_skipped_and_announced_when_the_lane_is_not_disposable(monkeypatch, capsys):
+    monkeypatch.setitem(E.PLACEHOLDER_RESOLVERS, "customer_id", lambda ep: "cus-1")
+    monkeypatch.setitem(
+        E.SEEDING_RESOLVERS, ("cart_token", "line_item_id"), lambda ep: pytest.fail("wrote to the shop")
+    )
+
+    subs = E.resolve_lane_substitutions(_cart_fixtures(), endpoint="EP", seed_lane=False)
+
+    assert subs == {"customer_id": "cus-1"}, "the read-only resolvers still run"
+    assert "Lane seeding off (--seed-lane)" in capsys.readouterr().out
+
+
+def test_seeding_resolves_every_id_it_provides_from_one_cart(monkeypatch):
+    """One resolver for both ids because they come from one cart. Two would open
+    two, and {line_item_id} would name a line in a cart {cart_token} misses."""
+    monkeypatch.setitem(
+        E.SEEDING_RESOLVERS,
+        ("cart_token", "line_item_id"),
+        lambda ep: {"cart_token": "tok", "line_item_id": "li"},
+    )
+    fixtures = [{"id": "x", "prompt": "cart {cart_token} line {line_item_id}"}]
+
+    subs = E.resolve_lane_substitutions(fixtures, endpoint="EP", seed_lane=True)
+
+    assert subs == {"cart_token": "tok", "line_item_id": "li"}
+
+
+def test_a_lane_that_cannot_seed_a_cart_warns_rather_than_substituting_nothing(monkeypatch, capsys):
+    monkeypatch.setitem(
+        E.SEEDING_RESOLVERS, ("cart_token", "line_item_id"), lambda ep: {"cart_token": "", "line_item_id": ""}
+    )
+    fixtures = [{"id": "x", "prompt": "cart {cart_token}"}]
+
+    subs = E.resolve_lane_substitutions(fixtures, endpoint="EP", seed_lane=True)
+
+    assert subs == {}
+    assert "could not seed {cart_token}" in capsys.readouterr().out
+
+
+def test_an_unresolved_placeholder_marks_the_fixture_instead_of_grading_it():
+    """The bug this closes: the model named merchant-cart-checkout correctly on
+    all three cart fixtures and was marked wrong, because the token in the
+    prompt was invented in the YAML and the server said "Cart is empty"."""
+    fixtures = [
+        {"id": "seeded", "prompt": "cart {cart_token}"},
+        {"id": "fine", "prompt": "product {product_id}"},
+    ]
+
+    E.apply_substitutions(fixtures, {"product_id": "p-1"})
+
+    assert fixtures[0]["unresolved_placeholder"] == "cart_token"
+    assert fixtures[1]["prompt"] == "product p-1"
+    assert "unresolved_placeholder" not in fixtures[1]
+
+
+def test_a_brace_that_is_not_a_known_placeholder_is_left_alone():
+    """Only ids this runner knows how to fill count. A fixture author's stray
+    brace is their business, and skipping the fixture for it would hide it."""
+    fixtures = [{"id": "x", "prompt": "set it to {whatever_they_meant}"}]
+
+    E.apply_substitutions(fixtures, {})
+
+    assert "unresolved_placeholder" not in fixtures[0]
+
+
+# ---------------------------------------------------------------------------
 # resolve_model
 # ---------------------------------------------------------------------------
 def test_explicit_model_wins_over_everything(monkeypatch):

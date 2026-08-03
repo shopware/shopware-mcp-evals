@@ -1,0 +1,48 @@
+// Static type checking for the Python layers. Gating in lint.yml.
+//
+// mode: `standard`, not basedpyright's stricter default `recommended`.
+//   Measured: standard is 0 errors on the source, recommended is 126 — 104 of
+//   them reportTypedDictNotRequiredAccess, i.e. every result["id"] flagged
+//   because FixtureResult is total=False. Ratcheting to recommended is a
+//   deliberate follow-up, not the price of turning any checking on.
+//
+// scope: source only. tests/ is intentionally out: it fakes provider clients
+//   and MCP responses with duck-typed stand-ins and feeds deliberate edge
+//   values (None, empty payloads), which a checker reads as ~120 errors in
+//   `standard` mode that are not bugs — a test that calls a renamed function
+//   fails under pytest on the next line anyway. The value here is catching a
+//   renamed key or bad call in the code that ships — e.g. FixtureResult across
+//   its five readers.
+//
+// exclude vs ignore, and why BOTH name tests/: `exclude` keeps the CI
+//   whole-project run from analysing a path, but an editor's language server
+//   still type-checks any file you OPEN even when it is excluded — which is why
+//   opening a test file used to show errors CI never runs. `ignore` suppresses
+//   diagnostics for a path even when open, so the two agree: tests are not
+//   type-checked, in CI or in the editor.
+//
+// pythonVersion: matches .python-version so stdlib and syntax are checked
+//   against the interpreter CI actually runs.
+{
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.14",
+  "include": [
+    "eval",
+    "functional",
+    "lane.py",
+    "mcp_client.py",
+    "ownership.py",
+    "toolclass.py",
+    "ucp.py",
+    "toollint.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    ".venv",
+    "tests"
+  ],
+  "ignore": [
+    "tests"
+  ]
+}

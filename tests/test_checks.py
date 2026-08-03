@@ -27,8 +27,10 @@ FULL_CTX = {
     "cart_token": "tok",
     # Distinct from product_id: entity-search returns products that are inactive,
     # out of stock or not in the channel, and adding one of those to a cart is a
-    # silent no-op. This one comes from merchant-storefront-search.
-    "cart_product_id": "p-sellable",
+    # silent no-op. These come from merchant-storefront-search, and there are
+    # several because that search does not filter for sellability either — the
+    # runner adds them until the cart reads back non-empty.
+    "cart_product_ids": ["p-sellable", "p-other"],
     # `file` has no usable default — the tool answers "Log file not found" for the
     # empty string, and names the valid values in that error. `dev.log` rather
     # than a dated name on purpose: nothing here parses it, so a date would only
@@ -75,16 +77,17 @@ def test_an_empty_string_counts_as_missing():
 
 
 def test_the_first_missing_prerequisite_decides_the_reason():
-    """merchant-cart-checkout needs a sales channel AND a cart in it. 'no
-    storefront sales channel' and 'could not get cart token' are different
-    findings, and reporting the wrong one sends you looking in the wrong place."""
+    """merchant-cart-checkout needs a sales channel, a cart in it, and a
+    customer. Those are three different findings, and reporting the wrong one
+    sends you looking in the wrong place — an empty `cart_token` in particular
+    means no product could be added, not that checkout misbehaved."""
     checkout = by_name("merchant-cart-checkout")
 
     assert checkout.blocked_by({}) == "no storefront sales channel"
-    assert checkout.blocked_by({"sales_channel_id": "sc1"}) == "could not get cart token or customer ID"
-    assert (
-        checkout.blocked_by({"sales_channel_id": "sc1", "cart_token": "t"}) == "could not get cart token or customer ID"
+    assert checkout.blocked_by({"sales_channel_id": "sc1"}) == (
+        "no sellable product in this channel, so no cart to check out"
     )
+    assert checkout.blocked_by({"sales_channel_id": "sc1", "cart_token": "t"}) == "no customer found"
     assert checkout.blocked_by(FULL_CTX) is None
 
 
@@ -277,3 +280,79 @@ def test_log_search_falls_back_where_no_lane_seeded_one():
     fallback = check.args(FULL_CTX | {"log_probe": False})
     assert fallback["query"] == "error"
     assert "seeded line" not in check.label(FULL_CTX | {"log_probe": False})
+
+
+# ---------------------------------------------------------------------------
+# Seeding a cart the checkout check can actually check out.
+#
+# `merchant-cart-manage action=add` answers `success: true` for a product the
+# channel cannot sell and puts nothing in the cart, so every call in the chain
+# was green and checkout still failed with "Cart is empty. Add items with
+# merchant-cart-manage first". Reading the cart back is the only assertion that
+# distinguishes the two.
+# ---------------------------------------------------------------------------
+class _CartServer:
+    """A shop where exactly one product is sellable."""
+
+    def __init__(self, sellable=("p2",), token="tok-1"):
+        self.sellable, self.token, self.items, self.added = set(sellable), token, [], []
+
+    def call(self, _sid, name, args, endpoint=None):
+        if name == "merchant-storefront-search":
+            return {"products": [{"id": "p1"}, {"id": "p2"}, {"id": "p3"}]}
+        action = args.get("action")
+        if action == "create":
+            return {"token": self.token}
+        if action == "add":
+            self.added.append(args["productId"])
+            if args["productId"] in self.sellable:
+                self.items.append({"id": "li-1", "referencedId": args["productId"]})
+            return {}
+        if action == "get":
+            return {"lineItems": list(self.items)}
+        return {}
+
+
+@pytest.fixture
+def cart_server(monkeypatch):
+    """Patches `lane`, not `functional.runner`: the seeding lives there so the
+    eval suite shares one definition of a cart that can be checked out."""
+    import lane
+    from functional import runner as R
+
+    server = _CartServer()
+    monkeypatch.setattr(lane, "mcp_call", lambda s, n, a, endpoint=None: {"_p": server.call(s, n, a)})
+    monkeypatch.setattr(lane, "mcp_result_text", lambda r: json.dumps({"success": True, "data": r["_p"]}))
+    return server, R
+
+
+def test_the_seeded_cart_holds_a_product_the_channel_can_actually_sell(cart_server):
+    server, R = cart_server
+
+    token = R.create_cart_token("sid", None, "sc1", R.sellable_products("sid", None, "sc1"))
+
+    assert token == "tok-1"
+    assert server.added == ["p1", "p2"], "it stopped as soon as the cart read back non-empty"
+
+
+def test_a_channel_with_nothing_sellable_yields_no_token_so_checkout_skips(cart_server):
+    """SKIP, not FAIL. A lane with no purchasable product is missing data about
+    the shop, not evidence that merchant-cart-checkout is broken — and the
+    check declares `cart_token` a prerequisite so an empty one reads that way."""
+    server, R = cart_server
+    server.sellable = set()
+
+    token = R.create_cart_token("sid", None, "sc1", R.sellable_products("sid", None, "sc1"))
+
+    assert token == ""
+    assert server.added == ["p1", "p2", "p3"], "every candidate was tried before giving up"
+    assert by_name("merchant-cart-checkout").blocked_by(FULL_CTX | {"cart_token": ""}) == (
+        "no sellable product in this channel, so no cart to check out"
+    )
+
+
+def test_a_channel_without_a_storefront_yields_no_candidates(cart_server):
+    _, R = cart_server
+
+    assert R.sellable_products("sid", None, "") == []
+    assert R.create_cart_token("sid", None, "", ["p1"]) == ""

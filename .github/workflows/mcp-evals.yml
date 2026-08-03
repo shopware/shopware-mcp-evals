@@ -92,16 +92,35 @@ env:
   EVAL_PROVIDER: ${{ github.event.inputs.eval_provider || 'openai' }}
   EVAL_MODEL: ${{ github.event.inputs.eval_model || '' }}
   APP_URL: http://localhost:8000
-  # The 0.90/0.85 thresholds predate execution and recovery, so they were
-  # held advisory for one run to see whether they still described a
-  # meaningful bar under the stronger definition of `passed`. Measured:
-  # primary 97% (93/96), second validator 95% (91/96) — both clear their
-  # existing gate with room, so the numbers stay and the window is closed.
+  # REBASELINE: the second validator's gate is advisory while 0.90/0.85 are
+  # re-derived. Reopened, having been closed once on a reading that did not
+  # hold.
   #
-  # Deliberately NOT raised to match. That is one sample, and this repo has
-  # already been bitten by a threshold set from one: the second validator
-  # scored 89% on one commit and 90% on the next with nothing changed in
-  # between. Raise them from a run of nightlies, not from this.
+  # What happened: the window was closed on one run reporting primary 97% and
+  # second validator 95%. The next run of the same commit read primary 95% and
+  # second validator 79% — and five of the primary's five failures, plus six of
+  # the validator's twenty, were fixtures whose prompt named an id the lane
+  # could not supply. The models had picked the right tool. So the 95% never
+  # described the models; it described a lane that happened to answer.
+  #
+  # The lane defects are fixed (see the {placeholder} section in
+  # eval/fixtures.yaml), which is what makes the remaining number worth
+  # baselining at all. What is not yet known is where gpt-4o-mini actually sits
+  # under execute-and-assert, and one run cannot say: this repo has already been
+  # bitten by a threshold set from one sample, when the second validator scored
+  # 89% on one commit and 90% on the next with nothing changed in between.
+  #
+  # To close it: take first_try_rate and recovery_rate from a run of nightlies,
+  # set the two numbers below from those, and delete this flag along with the
+  # REBASELINE branches in the eval and compare steps. The primary gate is NOT
+  # in the window — it has cleared 90% on every run measured, and the point of
+  # rebaselining one arm is not to stop measuring the other.
+  REBASELINE: 'true'
+  # Lets the placeholder resolvers open a cart on the instance, so {cart_token}
+  # and {line_item_id} resolve to something checkout can actually take. Only
+  # ever true here: the lane is destroyed with the job. Off, those fixtures are
+  # skipped by name rather than graded against a token nothing can resolve.
+  EVAL_SEED_LANE: 'true'
   #
   # The eval is the bulk of the wall clock: ~425s of summed fixture latency per
   # model, which at the old 4-way concurrency was ~106s of a 155s step. It sat
@@ -488,7 +507,8 @@ jobs:
       #            committed baseline (what used to be continue-on-error on this
       #            step) — the descriptions under test are then not the ones the
       #            baseline recorded, so its verdict is not attributable.
-      #   second   85%, always gating.
+      #   second   85%, ADVISORY while REBASELINE is set (see the env block for
+      #            what reopened that window and what closes it).
       #
       # Output is captured per model and replayed in order afterwards. Two runners
       # writing to the same stdout interleave line by line, and these logs are how
@@ -504,6 +524,8 @@ jobs:
           EVAL_PROVIDER: ${{ env.EVAL_PROVIDER }}
           EVAL_MODEL: ${{ env.EVAL_MODEL }}
           DRIFTED: ${{ needs.static.outputs.drift }}
+          REBASELINE: ${{ env.REBASELINE }}
+          EVAL_SEED_LANE: ${{ env.EVAL_SEED_LANE }}
         # No `set -e`: the exit codes are the result here, so the script must
         # outlive a failing runner rather than abort on the first one.
         run: |
@@ -627,14 +649,20 @@ jobs:
             fi
           fi
           if [ "${rc_second}" -ne 0 ]; then
-            echo "::error::admin · second validator failed (exit ${rc_second})."
-            failed=1
+            if [ "${REBASELINE}" = "true" ]; then
+              echo "::warning::admin · second validator failed (exit ${rc_second}), treated as advisory while its threshold is being re-derived (REBASELINE)."
+            else
+              echo "::error::admin · second validator failed (exit ${rc_second})."
+              failed=1
+            fi
           fi
           exit "${failed}"
 
       - name: Compare models
         id: eval_compare
         if: ${{ !cancelled() && steps.eval.conclusion != 'skipped' }}
+        env:
+          REBASELINE: ${{ env.REBASELINE }}
         run: |
           primary="results/eval-primary.json"
           second="results/eval-second-validator.json"
@@ -646,10 +674,21 @@ jobs:
               | tee -a "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
+          # `--gate primary` under REBASELINE, not `both`. The comparison still
+          # renders and still enforces the primary's 90%; what it stops doing is
+          # re-failing the job on the second validator's threshold, which the
+          # step above has already downgraded to a warning. Leaving it at `both`
+          # would make the window above do nothing.
+          gate=both
+          if [ "${REBASELINE}" = "true" ]; then
+            gate=primary
+            echo "REBASELINE: comparing on the primary's gate only; the second validator's rate is reported, not enforced." \
+              | tee -a "${GITHUB_STEP_SUMMARY}"
+          fi
           python -m eval.compare_runs "${primary}" "${second}" \
             --min-pass-rate 0.9 \
             --min-pass-rate-second 0.85 \
-            --gate both \
+            --gate "${gate}" \
             --output "results/eval-comparison.json"
 
       - name: Upload admin results
@@ -803,8 +842,24 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p results/rows tool-history
+          # Two layouts, because upload-artifact strips the common prefix. The
+          # static job lists two paths (results/ and tool-history/), so the
+          # common root is the workspace and the archive keeps `results/...`.
+          # The admin and store jobs list one, `results/`, so THAT becomes the
+          # root and their files land at the top level of the archive.
+          #
+          # Only the prefixed form was handled, so every admin and store report
+          # was silently dropped here: the job summary rendered 187 bytes and
+          # cost drift reported "could not read results/eval-primary.json" on
+          # every run since the jobs were split. Handling both is what keeps a
+          # fifth job from repeating it.
           for dir in artifacts/*/; do
-            [ -d "${dir}results" ] && cp -r "${dir}results/." results/ || true
+            if [ -d "${dir}results" ]; then
+              cp -r "${dir}results/." results/
+            else
+              cp -r "${dir}"*.json results/ 2>/dev/null || true
+              [ -d "${dir}rows" ] && cp -r "${dir}rows/." results/rows/ || true
+            fi
             [ -d "${dir}tool-history" ] && cp -r "${dir}tool-history/." tool-history/ || true
           done
           echo "Collected:"; ls -1 results/ results/rows 2>/dev/null || true

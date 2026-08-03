@@ -205,10 +205,14 @@ python -m functional.runner --endpoint store --allow-mutations
 ```
 
 > **Measured under the new definition of `passed`** (tool executed, result
-> asserted, recovery allowed): primary **97%** (93/96), second validator **95%**
-> (91/96), store **64%** (29/45). The admin thresholds were left at 0.90/0.85 —
-> both clear them with room, and raising them off a single run is what produced
-> the 89%/90% flapping this repo already documents.
+> asserted, recovery allowed). Two runs of the same commit read primary
+> **97%**/**95%** and second validator **95%**/**79%** — and the spread was not
+> the models. Five of the primary's five failures and six of the validator's
+> twenty were fixtures naming an id the lane could not supply: the model picked
+> the right tool and the server refused the call. Those are fixed (see the
+> `{placeholder}` rules in `eval/fixtures.yaml`); until a run of nightlies says
+> where gpt-4o-mini actually sits, `REBASELINE` in the workflow holds the second
+> validator's gate advisory.
 >
 > The store suite's 64% is a real finding, not a threshold problem: every UCP
 > tool is unsafe to execute, so that suite is graded on selection alone, and its
@@ -221,6 +225,21 @@ itself, and `compare_runs.py --gate both --min-pass-rate 0.9
 slack on purpose: its worth is the intersection with the primary, and at a shared
 90% it flapped (89% on one commit, 90% on the next, nothing changed in between).
 Failed fixtures are retried once, so a reported failure is two lost attempts.
+
+**A fixture may not invent an id.** Grading executes the call, so a value in a
+prompt is sent to the server. Where the tool answers a missing id with a plain
+"not found" a phantom one is fine — the `accepted` tier exists for exactly that.
+Where it does anything else, it is not: `entity-upsert` tries to CREATE the
+product and fails on the required fields it was never given, and
+`merchant-cart-checkout` answers "Cart is empty". Those prompts carry
+`{product_id}`, `{order_id}`, `{customer_id}`, `{cart_token}`,
+`{line_item_id}` or `{sales_channel_id}`, resolved off the live lane at startup
+by `PLACEHOLDER_RESOLVERS` in `eval/runner.py` (lookups in `lane.py`, shared with
+the functional suite). A placeholder the lane cannot fill **skips** its fixtures
+by name rather than grading them. `{cart_token}` and `{line_item_id}` need a cart
+created, so they resolve only under `--seed-lane` / `EVAL_SEED_LANE=true` — CI
+sets it because the instance is destroyed with the job; do not set it against a
+shop you care about.
 
 The rate is over fixtures that **ran**. Skipped ones (expected tool not
 registered) never gate. Errored ones (server 500, throttling 429) are excluded

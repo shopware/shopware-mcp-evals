@@ -29,6 +29,7 @@ from datetime import datetime
 
 import requests
 
+import lane
 from eval.assertions import inband_error
 from functional.checks import CORE_CHECKS, DEV_CHECKS, LOG_PROBE_TEXT, MERCHANT_CHECKS, ToolCheck
 from functional.journeys import run_ucp_journey
@@ -547,28 +548,15 @@ def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -
     }
 
 
-def sellable_product(session: str, endpoint: Endpoint, sales_channel_id: str) -> str:
-    """A product the storefront can actually sell in this sales channel.
+def sellable_products(session: str, endpoint: Endpoint, sales_channel_id: str) -> list[str]:
+    """Storefront-sellable product candidates. See lane.sellable_products.
 
-    Not the same as "a product row exists". entity-search happily returns a
-    product that is inactive, out of stock, or not assigned to this channel, and
-    adding one of those to a cart answers `success: true` with an empty
-    lineItems array — a silent no-op that made the checkout check fail with
-    "Cart is empty" while looking like a checkout bug.
+    Wrapped rather than imported bare so the eval and functional suites cannot
+    drift apart on what "sellable" means again — eval/ was still adding the
+    first search hit and trusting `success: true` long after this suite learned
+    that answers 200 with an empty cart.
     """
-    if not sales_channel_id:
-        return ""
-    payload = _payload(
-        mcp_call(
-            session,
-            "merchant-storefront-search",
-            {"salesChannelId": sales_channel_id, "term": "a", "limit": 5},
-            endpoint=endpoint,
-        )
-    )
-    items = payload.get("data")
-    items = items.get("products") if isinstance(items, dict) else items
-    return (items or [{}])[0].get("id", "") if isinstance(items, list) else ""
+    return lane.sellable_products(session, endpoint, sales_channel_id)
 
 
 def newest_log_file(session: str, endpoint: Endpoint) -> str:
@@ -633,42 +621,19 @@ def first_skill_name(session: str, endpoint: Endpoint) -> str:
     return ""
 
 
-def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str, product_id: str = "") -> str:
+def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str, product_ids: list[str]) -> str:
     """A cart with something in it, for merchant-cart-checkout to check out.
 
     This creates one *in addition to* the cart the merchant-cart-manage check
     creates: that check has to make its own call to be a real assertion, and
     reusing this token would make the two indistinguishable on failure.
 
-    The line item is the point. An empty cart is rejected with "Cart is empty.
-    Add items with merchant-cart-manage first", so the checkout check never
-    reached checkout at all — it was asserting that an empty cart cannot be
-    ordered, which nobody doubted.
+    Returns "" when nothing could be added. The checkout check declares
+    `cart_token` a precondition, so that reads as a SKIP naming the missing
+    data — the honest verdict for a lane with no sellable product, and not the
+    same claim as "checkout is broken".
     """
-    if not sales_channel_id:
-        return ""
-    payload = _payload(
-        mcp_call(
-            session,
-            "merchant-cart-manage",
-            {"salesChannelId": sales_channel_id, "action": "create"},
-            endpoint=endpoint,
-        )
-    )
-    token = payload.get("data", {}).get("token", "")
-    if token and product_id:
-        mcp_call(
-            session,
-            "merchant-cart-manage",
-            {
-                "salesChannelId": sales_channel_id,
-                "action": "add",
-                "token": token,
-                "productId": product_id,
-                "quantity": 1,
-            },
-            endpoint=endpoint,
-        )
+    token, _line_item_id = lane.create_cart(session, endpoint, sales_channel_id, product_ids)
     return token
 
 
@@ -681,12 +646,15 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     run_checks(rep, session, endpoint, CORE_CHECKS, ctx)
 
     rep.section("Merchant tools")
-    # A storefront-visible product, not just any product row. entity-search
+    # Storefront-visible products, not just any product row. entity-search
     # returns products that are inactive, out of stock, or not in this channel,
     # and adding one answers `success: true` with an empty cart — so the checkout
     # check failed with "Cart is empty" while looking like a checkout bug.
-    ctx["cart_product_id"] = sellable_product(session, endpoint, ctx["sales_channel_id"])
-    ctx["cart_token"] = create_cart_token(session, endpoint, ctx["sales_channel_id"], ctx["cart_product_id"])
+    # Several candidates, because the storefront search does not filter for
+    # sellability either: create_cart_token adds them until the cart reads back
+    # non-empty, and returns "" if none does.
+    ctx["cart_product_ids"] = sellable_products(session, endpoint, ctx["sales_channel_id"])
+    ctx["cart_token"] = create_cart_token(session, endpoint, ctx["sales_channel_id"], ctx["cart_product_ids"])
     run_checks(rep, session, endpoint, MERCHANT_CHECKS, ctx)
 
     rep.section("Dev tools")

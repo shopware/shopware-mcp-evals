@@ -232,6 +232,20 @@ def test_discovery_block_details_each_failure(capsys):
     assert "entity-search vs merchant-order-summary" in out
 
 
+def test_discovery_block_lists_an_errored_fixture_apart_from_the_failures(capsys):
+    """A fixture that never reached the model is missing data, and the gate
+    already excludes it. Listing it as a failure made the section and the
+    verdict count different things — and with no reason, no trail and no
+    attempts, the entry said nothing anyone could act on."""
+    errored = disc("e1", passed=False, fail_reason=None, error="Expecting value: line 1 column 1 (char 0)")
+
+    R.print_discovery_block([disc("a"), errored])
+    out = plain(capsys)
+
+    assert "Errored before reaching the model (excluded from the gate): e1 (Expecting value" in out
+    assert "Failing in discovery mode" not in out
+
+
 def test_discovery_block_omits_the_trail_when_there_were_no_meta_calls(capsys):
     R.print_discovery_block([disc("f1", passed=False, meta_calls=[])])
 
