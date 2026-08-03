@@ -107,7 +107,20 @@ def is_ucp_tool(name: str) -> bool:
 
 
 def agent_header(base_url: str, profile_uri: str | None = None) -> str:
-    """The UCP-Agent header value for a shop at `base_url`."""
+    """The UCP-Agent header value for a shop at `base_url`.
+
+    The default derives the profile URI from `base_url`, which is THIS machine's
+    address for the shop — and the SERVER is what fetches it, mid-request, over its
+    own network. Those are the same host in CI, where the runner and the shop share
+    `localhost:8000`, and different on any containerised or proxied lane: a shop
+    published at `trunk.localhost:8088` reaches itself at `localhost:8000` and
+    cannot resolve the published name at all.
+
+    So the default is right where it is usually used and structurally wrong
+    elsewhere, silently. `UCP_PROFILE_URI` is the override, and the failure now
+    names itself — see the "could not be fetched" entry in eval/preflight.py's
+    DIAGNOSES, which cost an afternoon to write.
+    """
     uri = profile_uri or os.environ.get("UCP_PROFILE_URI") or f"{base_url.rstrip('/')}{PROFILE_PATH}"
     return f'{AGENT_NAME} profile="{uri}"'
 

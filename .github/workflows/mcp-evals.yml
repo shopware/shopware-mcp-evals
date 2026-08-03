@@ -366,7 +366,17 @@ jobs:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
         run: |
-          if python -m eval.preflight --endpoint store; then
+          # Captured rather than piped: `if cmd | tee` takes tee's exit status, and
+          # `set -o pipefail` here would make the unguarded pipelines further down
+          # (find | head) fatal. Redirect, record the status, then print.
+          if python -m eval.preflight --endpoint store >/tmp/preflight.log 2>&1; then
+            preflight_ok=true
+          else
+            preflight_ok=false
+          fi
+          cat /tmp/preflight.log
+
+          if [ "${preflight_ok}" = "true" ]; then
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -403,12 +413,13 @@ jobs:
             echo "--- the same operation over REST, which does not swallow the exception ---"
             rest="${APP_URL}/ucp/v1/catalog/search"
             echo "POST ${rest}"
-            curl -sS -X POST "${rest}" \
+            rest_out=$(curl -sS -X POST "${rest}" \
               -H 'Content-Type: application/json' \
               -H "sw-access-key: ${SW_SC_ACCESS_KEY}" \
               -H "UCP-Agent: shopware-mcp-evals profile=\"${APP_URL}/.well-known/ucp\"" \
               -d '{"query":"test","limit":5}' \
-              -w '\n  HTTP %{http_code}\n' --max-time 20 2>&1 | head -c 800 || true
+              -w '\nHTTP %{http_code}' --max-time 20 2>&1 || true)
+            echo "${rest_out}" | head -c 800
             echo
 
             echo "--- shopware logs ---"
@@ -430,7 +441,20 @@ jobs:
             # designed outcome of a plugin that cannot execute, and it does not
             # gate anything. An error annotation here is indistinguishable from
             # one that failed the build.
-            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped. See the diagnosis above."
+            # The substance goes in the ANNOTATION, not only in the log. A run's
+            # log is not readable through the REST API on a job that passed — and
+            # this job does pass, by design, because the store suite being skipped
+            # is not a build failure. So a diagnosis that lives only in stdout can
+            # be read by a human in the web UI and by nothing else, which is how a
+            # self-diagnosing run stops diagnosing anything. Annotations come back
+            # from the API, so put the two facts that matter there.
+            #
+            # %0A is a newline in a workflow command; the literal text would be
+            # taken as the end of the message.
+            err=$(sed -n 's/^  error: //p' /tmp/preflight.log | head -1)
+            rest_status=$(printf '%s' "${rest_out}" | tail -1)
+            rest_code=$(printf '%s' "${rest_out}" | sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p' | head -1)
+            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AFull diagnosis in the Static checks log."
           fi
 
       - name: Run Store API functional tests
