@@ -263,46 +263,35 @@ runs:
       uses: actions/checkout@v7
       with:
         repository: shopware/agentic-commerce
-        # TEMPORARY PIN — remove when shopware/agentic-commerce#154 merges.
+        # No pin: #154 (in-band tool errors + dryRun) and #155 (checkout-complete
+        # payment, schema-valid discount responses) are both merged to main, so
+        # the default branch is what we want. An empty ref means "the repo default
+        # branch", which also survives a rename.
         #
-        # The default branch has neither in-band tool errors nor dryRun, so CI
-        # sees `-32603 Error while executing tool` with an empty body and
-        # nothing logged, where a lane with #154 gets
-        # `{"success":false,"error":{...,"violations":[...]}}`. That difference
-        # is the entire reason a local run and a CI run disagreed for a whole
-        # afternoon, and without the pin the UCP journey here reports failures
-        # nobody can act on.
-        ref: ${{ github.event.inputs.agentic_commerce_ref || 'fix/mcp-tool-error-visibility-and-catalog-lookup-ids' }}
+        # #155 is what should clear the two remaining functional-store failures —
+        # `checkout.complete.request ($.payment is required)` and
+        # `discount.apply.response ($ must match exactly one allowed schema)` —
+        # and with them the cascading `order-get` skip, since that only skipped
+        # for want of an order_id.
+        ref: ${{ github.event.inputs.agentic_commerce_ref }}
         token: ${{ inputs.plugins_pat }}
         path: shopware/custom/plugins/SwagAgenticCommerce
         fetch-depth: 1
 
-    # TEMPORARY PIN — remove once ucp-php-sdk#107 and #108 are released and the
-    # plugin's `^0.0.2` is bumped to a version that carries them.
+    # The ucp-php-sdk fork checkout that used to sit here is GONE. #107 and #108
+    # are merged and released in 0.0.3 (2026-08-04), so the lane can take the
+    # SDK from Packagist like any other dependency, and CI no longer depends on
+    # a personal fork branch that could move or vanish.
     #
-    # Without this, CI runs the plugin's in-band error handling against the
-    # RELEASED SDK, which types no profile-fetch failure — so MCP answers
-    # `internal: The tool call failed unexpectedly.` and REST answers
-    # `500 Internal server error.` with the real message discarded. Measured:
-    # that is exactly what run 30827918658 reported. Both channels throw the
-    # cause away, so the Store suite's actual blocker cannot be identified from
-    # CI at all, which is what this pin is for.
+    # Kept for the record, because the trick is not obvious: that fork carried a
+    # `version` field of **0.0.2.1** rather than 0.0.2, specifically so a path
+    # repository could satisfy the plugin's `^0.0.2`. That constraint is the
+    # reason the released 0.0.3 cannot simply be picked up — see the composer
+    # patch in the next step.
     #
-    # The branch is #107 + #108 merged, carrying a `version` field so a path
-    # repository can resolve it — see its own commit for why 0.0.2.1 and not
-    # 0.0.2.
-    - name: Checkout ucp-php-sdk (107 + 108, to diagnose the store preflight)
-      if: inputs.run_store == 'true'
-      id: sdk_checkout
-      # Non-fatal for the same reason as the plugin checkout below it: falling
-      # back to the released SDK is the old behaviour, which still runs.
-      continue-on-error: true
-      uses: actions/checkout@v7
-      with:
-        repository: BrocksiNet/ucp-php-sdk
-        ref: ${{ github.event.inputs.ucp_sdk_ref || 'debug/ucp-107-108' }}
-        path: shopware/custom/ucp-php-sdk
-        fetch-depth: 1
+    # `ucp_sdk_ref` stays as a workflow input. It no longer selects a checkout,
+    # it selects the version constraint, which is the useful knob for pinning a
+    # future SDK release or bisecting one.
 
     - name: Wire up MCP bundle + plugin
       id: plugins
@@ -310,6 +299,10 @@ runs:
       working-directory: shopware
       env:
         STORE_CHECKOUT_OK: ${{ steps.agentic_checkout.outcome == 'success' }}
+        # `ucp_sdk_ref` used to name a branch to check out; it now names a
+        # Composer constraint, since the SDK comes from Packagist. Default is the
+        # first release carrying #107 and #108.
+        UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '^0.0.3' }}
       run: |
         set -euo pipefail
 
@@ -338,28 +331,53 @@ runs:
         elif [ "${STORE_CHECKOUT_OK}" != "true" ]; then
           STORE_SKIP_REASON="the \`shopware/agentic-commerce\` checkout failed — \`PLUGINS_PAT\` is most likely not scoped to that repository (the API answers \`Not Found\`). Grant the token access to it."
         else
-          # Declared BEFORE the plugin require, so its ucp-php-sdk dependency
-          # resolves to the pinned checkout instead of Packagist. Guarded on the
-          # directory: if the checkout above did not happen, the released SDK
-          # applies and the suite still runs, just without the typed errors.
-          if [ -d custom/ucp-php-sdk/packages/core ]; then
-            composer config repositories.ucp-sdk-core \
-              path custom/ucp-php-sdk/packages/core
-            composer config repositories.ucp-sdk-symfony-bundle \
-              path custom/ucp-php-sdk/packages/symfony-bundle
+          # Relax the plugin's ucp-php-sdk constraint so the released SDK can be
+          # installed at all.
+          #
+          # shopware/agentic-commerce requires `ucp-php-sdk/symfony-bundle:
+          # ^0.0.2`, and Composer's caret on a 0.0.x package means
+          # `>=0.0.2 <0.0.3` — so it excludes 0.0.3 and every later release. The
+          # SDK hit this exact bug in its own bundle→core requirement and fixed
+          # it in 0.0.3 ("Composer's caret pins the patch on 0.0.x, so the old
+          # constraint excluded every future release of core, including this
+          # one"); the plugin has not had the same fix yet.
+          #
+          # Without this the lane silently installs 0.0.2 — no typed
+          # AgentProfileException, no #107 schema fixes — and looks fine while
+          # measuring the wrong SDK. Patched in the checkout, never committed
+          # upstream from here.
+          #
+          # Fails loudly if the pattern is absent, which is what makes this
+          # self-retiring: once the plugin widens its own constraint, this step
+          # says so and can be deleted rather than rotting into a no-op.
+          if grep -q '"ucp-php-sdk/symfony-bundle": "\^0\.0\.2"' custom/plugins/SwagAgenticCommerce/composer.json; then
+            sed -i 's|"ucp-php-sdk/symfony-bundle": "\^0\.0\.2"|"ucp-php-sdk/symfony-bundle": ">=0.0.2 <0.1.0"|' \
+              custom/plugins/SwagAgenticCommerce/composer.json
+            echo "Widened the plugin's ucp-php-sdk/symfony-bundle constraint to >=0.0.2 <0.1.0 so ${UCP_SDK_CONSTRAINT} can resolve."
+          else
+            echo "::notice::The plugin's ucp-php-sdk constraint is no longer \`^0.0.2\`. If it now allows 0.0.3+, delete this patch from setup-lane."
           fi
+
           composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
-          if composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts; then
+          # The SDK constraint is required explicitly alongside the plugin, so the
+          # resolver has to satisfy it rather than settling for whatever the
+          # plugin's own floor allows. This is also what `ucp_sdk_ref` now
+          # controls.
+          if composer require shopware/agentic-commerce:@dev \
+            "ucp-php-sdk/symfony-bundle:${UCP_SDK_CONSTRAINT}" \
+            --no-interaction --no-scripts; then
             STORE_PLUGIN_OK=true
           else
             STORE_SKIP_REASON="\`composer require shopware/agentic-commerce\` failed against this Shopware ref — see the step log for the resolver output."
           fi
         fi
 
-        # A pin nobody checks is a pin that lapses without telling anyone, and the
-        # symptom would be CI quietly measuring the released SDK again — which is
-        # indistinguishable from the bug it was pinned to diagnose. Assert on the
-        # one file only the pinned branch has.
+        # A version nobody checks is a version that regresses without telling
+        # anyone, and the symptom would be CI quietly measuring SDK 0.0.2 again —
+        # which looks identical to measuring 0.0.3, right up until an error comes
+        # back untyped. The plugin's `^0.0.2` makes that the DEFAULT outcome if
+        # the patch above stops matching, so this check is load-bearing rather
+        # than decorative. Assert on a file only #108 added.
         # Reported through an ANNOTATION either way, not just on failure. The first
         # version echoed the success case to stdout, and a passing job's log is not
         # retrievable through the REST API — so "did the pin take?" was unanswerable
@@ -368,16 +386,15 @@ runs:
         if [ "${STORE_PLUGIN_OK}" = "true" ]; then
           SDK_VERSION=$(composer show ucp-php-sdk/core --no-interaction 2>/dev/null \
             | sed -n 's/^versions *: *\**//p' | head -1)
-          # The success message says what the pin RULES OUT, not what it proves.
-          # It used to read "a store failure reported as `internal` is therefore
-          # NOT the profile fetch", which overreached: APP_ENV=test produced
+          # The message says what the version RULES OUT, not what it proves. It
+          # used to read "a store failure reported as `internal` is therefore NOT
+          # the profile fetch", which overreached: APP_ENV=test produced
           # `internal` too, from StaticAgentProfileFetcher, and that inference
-          # invited exactly the wrong conclusion for several runs. The pin
-          # eliminates one cause out of several that share the symptom.
+          # invited the wrong conclusion for several runs.
           if [ -f vendor/ucp-php-sdk/core/src/Exception/AgentProfileException.php ]; then
-            echo "::warning::ucp-php-sdk PIN TOOK: AgentProfileException present, version ${SDK_VERSION:-unknown}. A profile-fetch failure will now be typed rather than flattened — but \`internal\` has other causes (APP_ENV=test wires a profile-fetcher test double), so this rules one out, it does not identify the fault."
+            echo "::notice::ucp-php-sdk ${SDK_VERSION:-unknown} installed, AgentProfileException present (#108). A profile-fetch failure will be typed and answered 424 rather than flattened to 500 — but \`internal\` has other causes (APP_ENV=test wires a profile-fetcher test double), so this rules one out, it does not identify the fault."
           else
-            echo "::warning::ucp-php-sdk PIN DID NOT TAKE: no AgentProfileException, version ${SDK_VERSION:-unknown}. The released SDK is installed, so a profile-fetch failure will report a bare \`internal\` with no type."
+            echo "::warning::ucp-php-sdk ${SDK_VERSION:-unknown} has no AgentProfileException, so #107/#108 are MISSING and a profile-fetch failure will report a bare \`internal\`. Most likely the plugin's \`^0.0.2\` constraint resolved to 0.0.2 — check the composer patch earlier in this step."
           fi
         fi
 

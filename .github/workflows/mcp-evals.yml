@@ -53,7 +53,7 @@ on:
         required: false
         default: ''
       ucp_sdk_ref:
-        description: 'ucp-php-sdk ref to pin (temporary, for diagnosing the store preflight). Default: the 107+108 debug branch.'
+        description: 'ucp-php-sdk Composer constraint, e.g. 0.0.3 or ^0.0.4. Default: ^0.0.3, the first release carrying #107 and #108. No longer a git ref — the SDK comes from Packagist.'
         required: false
         default: ''
       run_store:
