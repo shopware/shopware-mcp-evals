@@ -405,6 +405,38 @@ runs:
           echo 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' >> .env.local
         fi
 
+        # Set profile_fetching_development_mode in the ucp_sdk CONFIG, not only as
+        # an environment variable.
+        #
+        # The plugin's services.php declares it as
+        #   'profile_fetching_development_mode' =>
+        #     env('bool:default:defaults_bool_false:SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE')
+        # so the value depends on that variable reaching the process that serves
+        # the request — and the daemonized server, the CLI and the runner are three
+        # different environments here. Writing the config key instead removes the
+        # question: it is compiled into the container and applies to every process,
+        # whatever their environments hold.
+        #
+        # zzz- prefix so it loads last among config/packages and wins on merge.
+        # Kept alongside the environment variable rather than replacing it, because
+        # which of the two wins depends on whether the plugin's extension() call is
+        # merged before or after app config — and with both set, either order gives
+        # true.
+        mkdir -p config/packages
+        cat > config/packages/zzz-mcp-evals-ucp.yaml <<'YAML'
+        # Written by .github/actions/setup-lane. CI lane only.
+        #
+        # The lane serves its own UCP profile over plain http on localhost, which
+        # the SDK's UrlSafetyValidator refuses unless this is on:
+        #   "Plain http is only allowed when profile fetching development mode is
+        #    enabled."
+        # There is no way around it for a loopback lane — the check exists to stop
+        # a production shop trusting an unencrypted profile, which is correct.
+        ucp_sdk:
+            profile_fetching_development_mode: true
+        YAML
+        echo "Wrote config/packages/zzz-mcp-evals-ucp.yaml (ucp_sdk.profile_fetching_development_mode: true)"
+
         # A dumped .env.local.php SHADOWS .env.local entirely — Symfony reads the
         # snapshot and never looks at the file. If one was written at install
         # time, every variable appended above is invisible, which is the likeliest
