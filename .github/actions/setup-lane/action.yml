@@ -833,6 +833,58 @@ runs:
         #
         # Reported through an annotation, since this is the fact worth having
         # after a run and the log cannot be relied on to come back.
+        # What the SERVER computes for the request scheme and host, which is the
+        # one input to UCP's sales-channel resolution that nothing here could
+        # observe. It matters because
+        # SalesChannelDomainResolver::normalizedUrls() builds
+        # "scheme://host[:port]/path" and compares those strings: a request the
+        # server sees as https://localhost:8000/ does not match a registered
+        # domain of http://localhost:8000 by equality OR by str_starts_with
+        # ("https:" and "http:/" diverge at the fifth character). An unresolved
+        # domain means getConfig(null), which is global scope, which is why the
+        # profile comes back with services=[].
+        #
+        # The symfony-cli access log says "scheme":"https" for these requests,
+        # but that is the proxy's view of the site, not what PHP put in
+        # $_SERVER. Those can differ, and the difference is the whole question,
+        # so this asks PHP directly rather than inferring from the proxy.
+        #
+        # Removed immediately after. A file under public/ is reachable by
+        # anyone who can reach the lane, and this one exists for exactly one
+        # request.
+        cat > public/_scheme_probe.php <<'PHP'
+        <?php
+        header('Content-Type: application/json');
+        echo json_encode([
+            'REQUEST_SCHEME' => $_SERVER['REQUEST_SCHEME'] ?? null,
+            'HTTPS' => $_SERVER['HTTPS'] ?? null,
+            'X-Forwarded-Proto' => $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null,
+            'HTTP_HOST' => $_SERVER['HTTP_HOST'] ?? null,
+            'SERVER_PORT' => $_SERVER['SERVER_PORT'] ?? null,
+        ]);
+        PHP
+        echo "Server's view of the request:"
+        curl -sS --max-time 10 "${APP_URL}/_scheme_probe.php" || true
+        echo
+        rm -f public/_scheme_probe.php
+
+        echo "Registered sales-channel domains:"
+        curl -fsS "${APP_URL}/api/sales-channel-domain?limit=100" \
+          -H "Authorization: Bearer ${TOKEN}" -H 'Accept: application/json' \
+          -o domains.json 2>/dev/null || true
+        python3 <<'PY'
+        import json, pathlib
+
+        try:
+            data = json.loads(pathlib.Path("domains.json").read_text())
+        except Exception:  # noqa: BLE001 — a diagnostic must not raise
+            print("  (could not list domains)")
+            raise SystemExit(0)
+        for entry in data.get("data", []):
+            attributes = entry.get("attributes", entry)
+            print("  ", attributes.get("url"), "->", attributes.get("salesChannelId"))
+        PY
+
         curl -sS --max-time 15 "${APP_URL}/.well-known/ucp" -o served-profile.json || true
         python3 <<'PY'
         import json, pathlib
