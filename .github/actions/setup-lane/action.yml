@@ -634,6 +634,23 @@ runs:
           --agent-allowlist="${UCP_HOST}" \
           --platform-allowlist="${UCP_HOST}"
 
+        # A signing key, which no step has ever created here. This is the
+        # sharpest asymmetry between CI and the lane the suite passes on: that
+        # lane has an active ES256 key (`ucp:signing-keys:list` reports one
+        # created 2026-06-30), and a freshly installed CI lane has none.
+        #
+        # Speculative as a fix, and said plainly: `signaturePolicy=off` above
+        # means INBOUND requests are not verified, so a missing key should not
+        # matter for them — but nothing says outbound response signing or
+        # discovery key publication tolerates its absence, and the failure this
+        # is chasing is a 500 that logs nothing at all. Cheap, additive, and it
+        # cannot affect the Admin lane, which is why it is worth one run to
+        # eliminate.
+        #
+        # Idempotent by kid: re-running with the default kid does not stack keys.
+        bin/console ucp:signing-keys:generate --sales-channel="${SC_ID}" \
+          --no-interaction --no-ansi || echo "::warning::ucp:signing-keys:generate failed; UCP response signing has no key on this lane."
+
         # Exposure and transports, which `ucp:config:set` cannot write — its
         # --help lists sales-channel, signature-policy, idempotency, the three
         # allowlists, embedded origins/frame-ancestors, webhook-url-override and
