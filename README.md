@@ -907,3 +907,109 @@ Both layers write a JSON report to `results/`. Reports are gitignored.
 discovery_path, search_hit, enabled_correct_toolset, tokens, latency_s, ...}`)
 plus a `discovery_summary` aggregate (pass rate, average steps, path
 distribution, search-hit rate, token totals).
+
+## Reading the results
+
+On a pull request the whole report is posted as a **single comment, edited in
+place on every run** — no need to open the run. The same document is also the job
+summary (which is the only rendering for scheduled runs and pushes, where there
+is no PR).
+
+Read it in this order:
+
+1. **The pass-rate table.** One row per arm. `primary` is the gate; the others
+   exist to attribute a failure rather than to be judged:
+
+   | arm | what it isolates |
+   |---|---|
+   | `admin · primary` | the number that gates the build |
+   | `admin · second validator` | a different model, same fixtures. Both models failing a fixture points at the **tool description**; one failing is noise about that model. |
+   | `admin · no context prompt` | the fixture without its context prompt — the difference measures what the prompt is worth (~11 points, measured) |
+   | `admin · core prompt only` | a generic prompt instead of the tailored one |
+   | `store · UCP` | the Store endpoint, separate because it skips wholesale when UCP is not exposed |
+
+2. **The failing-fixture list.** Each entry names `expected_tool` vs
+   `selected_tool`. That pair is the finding: a plausible wrong tool is a
+   description problem, a meta-tool as the final call is a discovery problem.
+   *Errored* fixtures are listed separately — an error is not a wrong choice.
+
+3. **The tool-catalogue lint** (advisory). Judgements about prose, never gating,
+   so a build never goes red over word choice.
+
+4. **Cost drift** (advisory), against the nightly baseline rather than the
+   previous PR run. A regression here is invisible in the pass rate: two extra
+   discovery rounds per fixture, or a tool that starts returning ten times the
+   payload, moves the bill and nothing else.
+
+Three things that are easy to misread:
+
+- **`skip` is not `pass`.** The Store suite skips wholesale when UCP is not
+  exposed, and the annotation names the gate. A green job with everything skipped
+  measured nothing.
+- **A single failing fixture is rarely a regression.** Compare arms first.
+- **Discovery steps are recorded, not scored.** A model that takes six rounds and
+  lands on the right tool passes; that is deliberate, because the cost of those
+  rounds shows up in the cost table instead.
+
+## Adding a new MCP tool to the suite
+
+The suite does not enumerate tools by hand — it reads the catalogue off the live
+instance. Adding coverage for a new tool means telling the two layers what
+"correct" looks like.
+
+1. **Refresh the catalogue snapshot** so drift detection and the linter know the
+   tool exists:
+   ```bash
+   python -m eval.snapshot_tools --output tool-history/latest.json
+   python -m eval.snapshot_tools --endpoint store --output tool-history/store.json
+   ```
+   In CI the nightly reconciliation PR does this; a hand edit of
+   `tool-history/latest.json` is the wrong move, because the snapshot is evidence
+   of what the server actually served. `python -m eval.drift --old <a> --new <b>`
+   is what reports the difference.
+
+2. **Layer 1 — a functional assertion** in `functional/checks.py`: the payload to
+   send and what a healthy response looks like. Anything mutating must go through
+   `dryRun`; `toolclass.py` decides whether a tool may be executed at all, so a
+   new mutating tool without a `dryRun` mode belongs there first. Ids come from
+   `lane.py` (read off the instance) — never hardcode a UUID, and note that
+   Shopware ids are 32-char hex without dashes.
+
+3. **Layer 2 — a fixture** in `eval/fixtures.yaml` (or `fixtures_store.yaml`):
+   ```yaml
+   - id: product-stock-update
+     category: catalog
+     prompt: "Set the stock of SKU SW10001 to 42"
+     expected_tool: shopware-product-stock-update
+     expected_toolset: shopware-catalog   # validated against the snapshot
+   ```
+   Write the prompt the way a merchant would ask, not the way the tool is named —
+   a prompt that quotes the tool name tests string matching, not tool selection.
+
+4. **Ownership**, in `ownership.py`: which repository owns the tool, so a failure
+   is routed rather than just counted.
+
+### Testing it
+
+```bash
+# Layer 1 — fast, no model, no tokens. There is no per-tool filter: the suite
+# runs the whole assertion table, which takes seconds.
+python -m functional.runner --endpoint admin
+
+# Layer 0 — is the description any good, and is the fixture self-consistent?
+python -m toollint --snapshot tool-history/latest.json
+pytest tests/test_fixtures.py -q     # expected_toolset must exist in the snapshot
+
+# Layer 2, just this fixture (--id, repeatable)
+python -m eval.runner --id product-stock-update --provider openai
+
+# ...or the whole category it belongs to
+python -m eval.runner --category catalog --provider openai
+
+# The whole gate, as CI runs it
+ruff check . && basedpyright && pytest tests -q --cov
+```
+
+A fixture that passes on the first try is worth a second look: check the model
+actually discovered the tool rather than being handed it, in the
+`discovery_path` field of the report.

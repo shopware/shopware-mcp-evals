@@ -1068,6 +1068,11 @@ jobs:
           # static description lint. tool-history/ arrives from static-results;
           # store.json is absent on any run whose preflight did not get that far,
           # which omits that section rather than failing.
+          # Redirected, not piped: summary.py prints the markdown to stdout and
+          # writes GITHUB_STEP_SUMMARY itself, so capturing stdout gives the PR
+          # comment step the same document without rendering it twice. A redirect
+          # also keeps python's own exit status, which `| tee` would replace with
+          # tee's.
           python -m eval.summary \
             --rows "results/rows" \
             --comparison "results/eval-comparison.json" \
@@ -1077,7 +1082,74 @@ jobs:
                       "results/eval-second-validator.json" \
                       "results/eval-no-prompt.json" \
                       "results/eval-core-prompt.json" \
-                      "results/eval-store.json"
+                      "results/eval-store.json" > eval-summary.md
+          # Still to the log, so a run remains readable without the artifact.
+          cat eval-summary.md
+
+      # The same summary as a single PR comment, updated in place on every run.
+      #
+      # The job summary is kept rather than replaced: it costs nothing, and it is
+      # the only rendering that exists for scheduled runs and for pushes, where
+      # there is no PR to comment on. What this adds is that a reviewer sees the
+      # numbers in the PR instead of having to open the run, then the job, then
+      # the summary.
+      #
+      # One comment, edited, never a second one. A new comment per run buries the
+      # conversation on a branch that gets a few pushes, and the marker below is
+      # what makes "find mine and edit it" possible — GitHub has no native
+      # concept of a sticky comment.
+      #
+      # Not run for forks: a pull_request from a fork gets a read-only token, so
+      # posting would fail on something unrelated to the eval. Non-fatal either
+      # way, since a comment is a convenience and the artifact plus job summary
+      # carry the same content.
+      - name: Comment the summary on the PR
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork && needs.admin-eval.result != 'skipped' }}
+        continue-on-error: true
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- mcp-evals-summary -->';
+            // GitHub rejects a comment body over 65536 characters. The failure
+            // detail scales with the number of failures, so the worst run
+            // produces the longest body — exactly when losing it would hurt.
+            const LIMIT = 65000;
+
+            let body = fs.readFileSync('eval-summary.md', 'utf8');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const head = `${MARKER}\n### MCP eval results\n[Run #${context.runNumber}](${runUrl}) · \`${context.sha.slice(0, 7)}\`\n\n`;
+
+            if (head.length + body.length > LIMIT) {
+              const note = '\n\n---\n\n**Truncated** — see the job summary or the uploaded artifact for the full report.\n';
+              body = body.slice(0, LIMIT - head.length - note.length) + note;
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: head + body,
+              });
+              core.info(`Updated comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: head + body,
+              });
+              core.info('Created the summary comment');
+            }
 
       # Advisory, and non-gating by construction — cost_drift always exits 0.
       # A cost regression is invisible in the pass rate: discovery taking two

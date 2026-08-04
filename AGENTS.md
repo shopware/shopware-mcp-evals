@@ -8,6 +8,52 @@ tool selection accuracy).
 See `README.md` for the full picture and motivation; this file is the short
 brief for coding agents.
 
+## How a run flows
+
+The CI pipeline. `setup-lane` is the composite action every job shares, which is
+why a mistake in it takes down suites that have nothing to do with each other.
+
+```mermaid
+flowchart TD
+    A[setup-lane<br/>install Shopware · plugins · demo data<br/>UCP exposure · signing key · promotion] --> B[Static checks]
+    A --> C[Admin eval]
+    A --> D{Store preflight}
+
+    B --> B1[ruff · basedpyright · pytest]
+    B --> B2[functional: admin + store]
+    B --> B3[tool catalogue snapshot + drift]
+
+    D -->|UCP answers| E[Store eval]
+    D -->|UCP refuses| E2[Store suite skipped<br/>annotation names the gate]
+
+    C --> F[Report]
+    E --> F
+    B --> F
+    F --> F1[eval.compare_runs<br/>primary vs second validator]
+    F --> F2[eval.summary<br/>job summary + PR comment]
+    F --> F3[eval.cost_drift vs nightly baseline]
+```
+
+One fixture, from prompt to verdict. The scoring rule is the part worth
+remembering: **the tool the model called is compared against `expected_tool`, and
+the discovery trail is recorded but not scored.**
+
+```mermaid
+sequenceDiagram
+    participant R as eval.runner
+    participant M as Model
+    participant S as MCP server
+    R->>M: prompt + context + only the discovery tools
+    M->>S: shopware-tool-search / toolsets-list
+    S-->>M: candidate tools (v2: catalogue is not preloaded)
+    M->>S: shopware-toolset-enable
+    M->>S: the tool it settled on
+    S-->>M: result (dryRun for anything mutating)
+    M-->>R: tool calls + final text
+    R->>R: score: called tool == expected_tool?
+    R->>R: record tokens, cost, wall-clock, discovery rounds
+```
+
 ## Conventions
 
 - **Nothing consumes this repo, so there is almost no compatibility surface.**
