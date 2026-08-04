@@ -83,7 +83,10 @@ sequenceDiagram
   implementing anything. Both trees are shellcheck-linted.
 - **Add unit tests for new logic.** New functional / eval / client behavior gets
   a pytest test under `tests/` — offline, faking the MCP server (see the existing
-  tests). CI runs `ruff` + `pytest` + `shellcheck` on every push, so keep them green.
+  tests). CI gates on `ruff check` + `ruff format --check` + **`basedpyright`** +
+  `pytest --cov` (floor 90%) + `shellcheck` on every push, so keep them green.
+  `basedpyright` runs in `recommended` mode over source **and** tests, at zero
+  errors and zero warnings — a bare `dict` in a new signature will fail it.
 - **Three prompts per tool, differing in kind.** Every tool needs at least three
   fixtures: a canonical phrasing, a paraphrase avoiding the tool's own
   vocabulary, and a boundary case set against a sibling tool. Restating one
@@ -93,7 +96,10 @@ sequenceDiagram
   `tool-history/latest.json`, so a new server-side tool fails the unit tests
   until it has prompts.
 - **Two workflows, and the heavy one is four jobs.** `lint.yml` is the fast gate
-  (ruff + format + pytest + shellcheck) on every PR. `mcp-evals.yml` runs
+  (ruff, ruff format, basedpyright, pytest+cov, then ShellCheck **twice** — once
+  over `functional/**/*.sh` + `scripts/**/*.sh`, once over the shell inside
+  workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
+  runs there, advisory). `mcp-evals.yml` runs
   `static` → (`admin-eval`, `store-eval`) → `report`, each building its own lane
   via `.github/actions/setup-lane`. It installs Shopware at the pinned
   `shopware.sha` and checks the plugin repos out at their **default branch**, so

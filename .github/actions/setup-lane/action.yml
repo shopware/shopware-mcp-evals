@@ -395,19 +395,30 @@ runs:
           # Store suite measures nothing.
           #
           # Each one carries a `UCP-Agent: <name> profile="<uri>"` header whose
-          # URI the SDK fetches and validates (UrlSafetyValidator). Plain http
-          # is refused unless BOTH the host is exactly localhost/127.0.0.1/::1
-          # AND this flag is on — a deliberate SSRF guard, since the server is
-          # about to fetch a URL an untrusted caller chose.
+          # URI the SDK fetches and validates (UrlSafetyValidator). Plain http is
+          # refused unless BOTH isLocalHost() accepts the host AND dev mode is on
+          # — a deliberate SSRF guard, since the server is about to fetch a URL an
+          # untrusted caller chose.
           #
-          # APP_URL is http://localhost:8000, so the host half already holds.
-          # Written to .env.local rather than exported because the daemonized
-          # web server is what serves the calls, not this shell.
+          # isLocalHost() accepts `localhost`, `127.0.0.1`, `::1` AND any
+          # `.localhost` subdomain:
           #
-          # This is what makes CI able to run these tools at all and a local
-          # `<shop>.localhost` dev instance not: `.localhost` subdomains are
-          # loopback by RFC 6761 but the SDK's isLocalHost() matches the bare
-          # name only, and no config setting can reach past that check.
+          #   return in_array($host, ['localhost', '127.0.0.1', '::1'], true)
+          #       || str_ends_with($host, '.localhost');
+          #
+          # So a local `<shop>.localhost` lane clears this gate exactly as CI's
+          # `localhost:8000` does. A comment here previously claimed the opposite —
+          # that it matched the bare name only and no config could reach past it —
+          # which was wrong on both counts and is corrected rather than deleted,
+          # because it was cited more than once while debugging.
+          #
+          # This write is NOT sufficient on its own, and that is the other half of
+          # the correction. `.env.local` only reaches a process that reads it, and
+          # the CLI, this shell and the daemonized web server are three different
+          # environments — so the flag is also set as
+          # `ucp_sdk.profile_fetching_development_mode` in config/packages further
+          # down, which is compiled into the container and applies to all of them.
+          # That config key is what actually fixed it.
           echo 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' >> .env.local
         fi
 

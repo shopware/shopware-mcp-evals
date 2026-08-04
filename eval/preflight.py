@@ -109,10 +109,28 @@ DIAGNOSES = (
     ),
     (
         "internal",
-        "The plugin swallowed the real exception (UcpMcpToolContext::failure reports "
-        "`internal` and logs nothing). Common cause: the server cannot fetch the "
-        "profile URI from inside its own container — a published host:port is not "
-        "necessarily reachable there. Check with a request from inside the container.",
+        # `internal` carries no information at all: the MCP error body has no `code`
+        # and no `severity`, and the REST route answers the same operation with a bare
+        # 'Internal server error.' So this advice names the causes that have ACTUALLY
+        # produced it, in the order they were found, rather than guessing at one.
+        #
+        # The previous text asserted the exception 'logs nothing' and that REST 'is not
+        # swallowed'. Both were false and both cost real time: the SDK's
+        # ExceptionListener does log it (its logger argument is wired to
+        # monolog.logger), and REST flattens the message exactly as MCP does.
+        "`internal` means the exception did not survive the response — no code, no "
+        "severity, and REST answers the same call with a bare 'Internal server error.'\n"
+        "  Causes seen so far, most common first:\n"
+        "  1. The lane is running APP_ENV=test. The plugin then wires "
+        "StaticAgentProfileFetcher, a PHPUnit double that throws "
+        "'No profile configured' unless a test called setProfile(). No configuration "
+        "can fix this — use dev or prod.\n"
+        "  2. The server cannot fetch the profile URI from where it runs — a published "
+        "host:port is not necessarily reachable from inside a container.\n"
+        "  To see the real exception: check var/log (dev writes dev-<date>.log; under "
+        "`symfony server:start` also look in $HOME/.config/symfony-cli/log), or patch "
+        "the SDK's ExceptionListener fallback to append $throwable::class and "
+        "getMessage() to the 500 body.",
     ),
 )
 
@@ -170,7 +188,7 @@ def discover_store_query(default: str) -> tuple[str, str]:
     Searching a made-up term is a legitimate empty result, not a failure — but a
     probe that searches a word the shop may not have proves less than one
     grounded in a product it does, and a zero-match code path is a candidate for
-    the swallowed `internal` this suite keeps hitting. The store endpoint already
+    the uninformative `internal` this suite keeps hitting. The store endpoint already
     authenticates with a sales-channel key, so use it to ask the Store API for
     one product name and probe with that.
 
@@ -315,11 +333,13 @@ def probe_profile(uri: str) -> tuple[int | None, str]:
 def profile_report(error: str) -> str:
     """Resolve the one cause the error text can never name.
 
-    `internal` means an exception escaped the tool, and the plugin reports that
-    with no message and logs nothing — so from the outside it is indistinguishable
-    from any other internal failure. Measured against a live lane, it is the
-    profile fetch: a valid profile answers in ~0.16s, a 404 fails in ~0.19s with
-    exactly this error, and CI failed in 0.14s.
+    `internal` means an exception escaped the tool, and the response carries no
+    code and no severity — so from the outside it is indistinguishable from any
+    other internal failure. (It IS logged server-side, contrary to what this
+    docstring used to claim; the SDK's ExceptionListener writes it through
+    monolog. Reaching that log is the problem, not its absence.) Measured against
+    a live lane, one cause is the profile fetch: a valid profile answers in
+    ~0.16s, a 404 fails in ~0.19s with exactly this error, and CI failed in 0.14s.
 
     The server fetches this URI itself, mid-request, which is why the URI has to
     be one the SERVER can reach and why a published host:port is not automatically
@@ -349,16 +369,23 @@ def profile_report(error: str) -> str:
         #
         # The SDK throws a plain \RuntimeException/TransportException there rather
         # than a UcpException, so the plugin's failure() flattens it to `internal`
-        # with nothing logged (HttpAgentProfileFetcher::fetch, UcpMcpToolContext).
+        # (HttpAgentProfileFetcher::fetch, UcpMcpToolContext).
         lines.append(
             f"  Reachable FROM HERE — which is not the question. The server fetches {uri} "
             "over its own network, and a containerised or proxied instance does not share "
-            "this one. That fetch failing is still the most likely cause of `internal`."
+            "this one. That fetch failing is one known cause of `internal`."
         )
         lines.append(
-            "  To see it, run the same operation over REST — that path is not swallowed, so "
-            f"the exception reaches the log: POST {mc.SW_BASE_URL}/ucp/v1/catalog/search "
-            "with the same sw-access-key and UCP-Agent headers, then read var/log/<env>-<date>.log."
+            # This used to advise going over REST "because that path is not swallowed".
+            # It is: REST answers the same call with a bare 'Internal server error.',
+            # measured. REST is still worth running — it gives an HTTP status, so a 422
+            # or 424 separates a validation or profile fault from a true 500 — but it
+            # will not hand over the exception, and reading the log is what does.
+            "  Next: run the same operation over REST for an HTTP status, which MCP does not "
+            f"give you: POST {mc.SW_BASE_URL}/ucp/v1/catalog/search with the same "
+            "sw-access-key and UCP-Agent headers. Its body is flattened the same way, so for "
+            "the exception itself read var/log/<env>-<date>.log — and under "
+            "`symfony server:start` also $HOME/.config/symfony-cli/log."
         )
         lines.append(
             "  Then point UCP_PROFILE_URI at a URL the SERVER can reach (inside a container "

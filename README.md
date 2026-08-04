@@ -98,10 +98,14 @@ they say; see the first bullet of `AGENTS.md` for where that line falls.
 ├── functional/
 │   ├── runner.py          # Layer 1: v2 discovery mechanics + per-tool dryRun calls (--endpoint admin|store)
 │   ├── checks.py          # the per-tool assertion table (payloads, labels, prerequisites)
+│   ├── journeys.py        # the UCP buyer journey, as one flow rather than thirteen tools
 │   ├── reporting.py       # pass/fail/skip harness + JSON report writer
+│   ├── assets/            # fixtures committed so no test depends on a third-party URL
 │   └── ci/                # reusable shell helpers used by the workflow (shellcheck-linted)
 ├── eval/
 │   ├── runner.py          # Layer 2: discovery-mode LLM eval (--endpoint admin|store)
+│   ├── result_schema.py   # the TypedDicts every JSON shape here is read through
+│   ├── preflight.py       # can the UCP tools execute at all, and if not which gate refused
 │   ├── scoring.py         # results → counts, rates and the gate verdict (pure)
 │   ├── assertions.py      # did the executed call satisfy the fixture (pure)
 │   ├── tool_scorecard.py  # per-tool recall, precision, F1, confusion (pure)
@@ -109,15 +113,23 @@ they say; see the first bullet of `AGENTS.md` for where that line falls.
 │   ├── cost_drift.py      # this run vs the previous nightly, per fixture; warns, never gates
 │   ├── report.py          # terminal rendering of a run (pure of scoring)
 │   ├── compare_runs.py    # primary vs second validator; the both-fail set to act on
-│   ├── summary.py         # one GitHub job summary for every run in the job
+│   ├── summary.py         # one report per job: GitHub job summary and the PR comment
 │   ├── snapshot_tools.py  # full-catalogue snapshot for drift detection
+│   ├── drift.py           # snapshot vs snapshot: what the catalogue did between runs
 │   ├── fixtures.yaml      # admin natural-language prompts + expected tool
 │   ├── fixtures_store.yaml # Store API / UCP prompts + expected tool
 │   └── requirements.txt   # anthropic, openai, requests, pyyaml
+├── scripts/
+│   ├── lint_workflow_shell.py  # ShellCheck over the shell inside workflow `run:` blocks
+│   └── trunk-lane.sh      # bring up a local trunk lane to test against
 ├── tests/                 # pytest unit tests (reporting, runner logic, throttle retry)
+│   ├── __init__.py        # makes the repo root the sys.path anchor, so `pytest` and
+│   │                      # `python -m pytest` agree — without it CI failed on 14 modules
+│   └── stubs.py           # const/raiser/never: typed fakes, no mock objects
+├── pyrightconfig.json     # basedpyright: `recommended`, tests included, 4 rules off with reasons
 ├── ruff.toml              # Python lint config
-├── requirements-dev.txt   # eval deps + pytest + pytest-cov + ruff
-├── tool-history/          # committed snapshot baseline (latest.json)
+├── requirements-dev.txt   # eval deps + pytest + pytest-cov + ruff + basedpyright
+├── tool-history/          # committed snapshot baseline (latest.json, store.json)
 └── results/               # JSON reports, gitignored
 ```
 
@@ -157,7 +169,11 @@ the skip reasons, the error budget and the gate thresholds live.
 **Conventions:** both test layers are Python — don't add `.sh` runners (extend
 `functional/runner.py` or `mcp_client.py`; the only shell here is CI glue under
 `functional/ci/`). New functional/eval/client logic ships with a pytest test
-under `tests/`. `ruff`, `pytest`, and `shellcheck` run on every push.
+under `tests/`. On every push CI gates on `ruff check`, `ruff format --check`,
+`basedpyright` (`recommended` mode, source *and* tests, zero errors *and*
+warnings), `pytest --cov` with a 90% floor, and `shellcheck` — twice: over the
+`.sh` files, and over the shell embedded in workflow `run:` blocks
+(`scripts/lint_workflow_shell.py`). `toollint` also runs, advisory.
 
 ## Setup
 
@@ -249,7 +265,10 @@ python -m functional.runner --endpoint store
 # Only for a disposable lane — CI, or a local trunk lane.
 python -m functional.runner --endpoint store --allow-mutations
 
-# discount-apply needs a promotion code; without one that step skips.
+# discount-apply needs a redeemable promotion code; without one that step skips
+# with "precondition missing: promo_code". Any code that resolves on the lane works.
+# CI does not need this: setup-lane creates a 10%-off cart promotion on the sales
+# channel and passes its code through as UCP_JOURNEY_PROMO_CODE.
 UCP_JOURNEY_PROMO_CODE=WELCOME10 python -m functional.runner --endpoint store --allow-mutations
 ```
 

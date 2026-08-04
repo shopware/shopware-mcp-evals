@@ -562,18 +562,27 @@ jobs:
           # was continue-on-error already, so its exit code changed nothing except
           # to post a red annotation on a green job. The report JSON in
           # static-results carries every assertion either way.
-          # Output captured with tee so the FAIL lines can go in the annotation as
+          # Output captured to a file so the FAIL lines can go in the annotation as
           # well as the log. "see the log above" is not a usable pointer here: one
           # ANSI-coloured line anywhere in the job makes the whole log
           # unretrievable through the API, so on a passing job the failing check
           # names were readable in the web UI and nowhere else.
           #
-          # PIPESTATUS, not $?: with `cmd | tee` the exit status is tee's, which is
-          # always 0, so the `||` branch would never fire.
-          set -o pipefail
-          python -m functional.runner --endpoint store --allow-mutations 2>&1 | tee /tmp/functional-store.log
-          rc=${PIPESTATUS[0]}
-          set +o pipefail
+          # Redirect, NOT `| tee`, and `|| rc=$?` rather than PIPESTATUS. The first
+          # version of this used `set -o pipefail` plus `rc=${PIPESTATUS[0]}`, which
+          # is right about tee (a pipeline reports tee's status, always 0) and wrong
+          # about everything else: a workflow `run:` is `bash -e`, so with pipefail
+          # on, a failing python aborts the step AT THE PIPELINE and the line reading
+          # PIPESTATUS never executes. The annotation could not fire, and a suite
+          # failure took the whole job red — which is what it had been rewritten to
+          # avoid. Measured on run #257: exit code 1, no annotation.
+          #
+          # No pipe means no pipefail question, and `|| rc=$?` keeps `set -e` from
+          # aborting while still capturing the code.
+          rc=0
+          python -m functional.runner --endpoint store --allow-mutations \
+            > /tmp/functional-store.log 2>&1 || rc=$?
+          cat /tmp/functional-store.log
           if [ "${rc}" -ne 0 ]; then
             fails=$(grep -E '^\s*FAIL ' /tmp/functional-store.log | head -8 | tr '\n' '~' | sed 's/~/%0A/g' | cut -c1-1200)
             counts=$(grep -E 'Results: ' /tmp/functional-store.log | tail -1 | tr -s ' ')
