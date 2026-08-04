@@ -63,6 +63,12 @@ outputs:
   sales_channel_id:
     description: The sales channel that owns app_url, and whose UCP config was set.
     value: ${{ steps.sc.outputs.sales_channel_id }}
+  promo_code:
+    description: >
+      Redeemable promotion code for the UCP buyer journey's discount step. Empty
+      if the promotion could not be created, which makes that step skip rather
+      than fail.
+    value: ${{ steps.sc.outputs.promo_code }}
   store_plugin_ok:
     description: Whether agentic-commerce installed. Gates every Store step downstream.
     value: ${{ steps.plugins.outputs.store_plugin_ok }}
@@ -800,6 +806,39 @@ runs:
         # PUT is a partial merge (see saveConfig's docblock), so this sets the
         # Exposure subset the Administration owns and leaves signature policy,
         # allowlists and signing keys to the ucp:config:set call above.
+        # A redeemable promotion, so the buyer journey's discount step runs instead
+        # of skipping. `shopware-ucp-discount-apply` needs a `promo_code` and
+        # nothing ever produced one: UCP_JOURNEY_PROMO_CODE was read by
+        # functional/journeys.py and set by no step in this repo, so that step has
+        # reported "precondition missing: promo_code" on every run since it was
+        # written. A skip that can never become a pass is not coverage.
+        #
+        # One nested write: the promotion, its cart-scope percentage discount and
+        # its sales-channel assignment. All three are required — a promotion with
+        # no discount redeems to nothing, and one not assigned to the channel is
+        # not found at all.
+        PROMO_CODE="MCPEVALS$(printf '%s' "${SC_ID}" | cut -c1-6 | tr '[:lower:]' '[:upper:]')"
+        promo_status=$(curl -sS -o /tmp/promo.json -w '%{http_code}' -X POST "${APP_URL}/api/promotion" \
+          -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+          -d "{\"name\":\"MCP Evals journey discount\",\"active\":true,\"useCodes\":true,
+               \"useIndividualCodes\":false,\"code\":\"${PROMO_CODE}\",\"priority\":1,
+               \"exclusive\":false,\"useSetGroups\":false,
+               \"preventCombination\":false,\"customerRestriction\":false,
+               \"discounts\":[{\"scope\":\"cart\",\"type\":\"percentage\",\"value\":10,
+                               \"considerAdvancedRules\":false}],
+               \"salesChannels\":[{\"salesChannelId\":\"${SC_ID}\",\"priority\":1}]}" \
+          --max-time 20 || echo "000")
+        if [ "${promo_status}" = "204" ] || [ "${promo_status}" = "200" ]; then
+          echo "Promotion created; code ${PROMO_CODE} is redeemable on this lane."
+          echo "promo_code=${PROMO_CODE}" >> "$GITHUB_OUTPUT"
+        else
+          # Empty output, not a failure: the journey step skips with a named
+          # precondition, which is the honest outcome and does not take the suite
+          # down over a fixture prerequisite.
+          echo "::warning::Could not create the journey promotion (HTTP ${promo_status}), so shopware-ucp-discount-apply will skip on a missing promo_code.%0A$(head -c 400 /tmp/promo.json | tr '\n' ' ')"
+          echo "promo_code=" >> "$GITHUB_OUTPUT"
+        fi
+
         UCP_CONFIG_URL="${APP_URL}/api/_admin/ucp/sales-channels/${SC_ID}/config"
         ucp_put=$(curl -sS -X PUT "${UCP_CONFIG_URL}" \
           -H "Authorization: Bearer ${TOKEN}" \
@@ -840,119 +879,49 @@ runs:
         # Both, in this order: flush the pending invalidations, then clear the
         # pool the config is actually served from. Together they cost under a
         # second.
-        # A diagnostic patch to the SDK's exception listener, so the 500 body
-        # names the exception. Nothing else can reach it: the listener's
-        # fallback branch calls $this->logger?->error(...), but this lane's
-        # var/log holds exactly one file (the seeded test-*.log) and no
-        # prod-*.log, so the web server has never written an application log
-        # line — on CI's pinned SDK 0.0.2.1 the logger argument is evidently not
-        # what it is on a working tree. Both transports return
-        # "Internal server error." with no code and no severity (finding #14),
-        # so the message is the only channel left.
-        #
-        # This is a DIAGNOSTIC and it is deliberately loud in the output. It
-        # patches a vendored file on a throwaway CI lane only, and it must come
-        # out once the plugin reports the error properly.
-        LISTENER=""
-        for candidate in \
-          custom/ucp-php-sdk/symfony-bundle/src/EventListener/ExceptionListener.php \
-          vendor/ucp-php-sdk/symfony-bundle/src/EventListener/ExceptionListener.php; do
-          if [ -f "${candidate}" ]; then LISTENER="${candidate}"; break; fi
-        done
-        if [ -z "${LISTENER}" ]; then
-          echo "::warning::Could not find the SDK ExceptionListener to patch; the 500 will stay anonymous."
-        else
-          python3 - "${LISTENER}" <<'PY'
-        import pathlib, sys
-
-        path = pathlib.Path(sys.argv[1])
-        source = path.read_text()
-        target = "'Internal server error.', 500"
-        replacement = (
-            "'Internal server error. DIAG '.$throwable::class.': '"
-            ".$throwable->getMessage().' @ '.$throwable->getFile().':'"
-            ".$throwable->getLine(), 500"
-        )
-        if target not in source:
-            print(f"::warning::The 500 fallback in {path} does not match the expected "
-                  f"source, so it was left alone. The exception will stay anonymous.")
-            raise SystemExit(0)
-        path.write_text(source.replace(target, replacement, 1))
-        print(f"Patched {path} to name the exception in the 500 body (CI diagnostic).")
-        PY
-        fi
-
+        # The vendor patch that used to sit here is gone. It rewrote the SDK's
+        # ExceptionListener so the 500 body named the exception, and it earned its
+        # keep exactly once — it produced the LogicException that identified
+        # APP_ENV=test as the root cause. Keeping it would mean carrying a
+        # mutation of vendored code for a failure mode that no longer occurs, and
+        # dev now writes var/log/dev.log, so an unexplained 500 is readable
+        # without it. If a future failure is anonymous again, the patch is in this
+        # file's history.
         bin/console cache:clear:delayed --no-ansi
-        bin/console cache:pool:clear cache.object --no-ansi
-        # The HTTP cache, which lives in its own pool and which none of the
-        # clears above reach. It is a candidate because of what the served
-        # profile looks like: "services":{} rather than
-        # "services":{"dev.ucp.shopping":[]}. An ACTIVE channel with no matching
-        # endpoints produces the latter — CapabilityFilteringProfileContributor
-        # always writes the 'dev.ucp.shopping' key on the active path and only
-        # replaces the whole map with [] when !$config->active. So the response
-        # being served was built while the config still said inactive, on a lane
-        # where both channel and global scope now say active=true, and the
-        # plugin ships a ProfileCacheHeadersListener that makes the profile
-        # cacheable.
+        # The profile response is cacheable (the plugin ships a
+        # ProfileCacheHeadersListener) and the HTTP cache lives in its own pool,
+        # so a config change needs this too. Kept as ordinary hygiene after a
+        # write, not as a fix for a diagnosed fault — the empty profile turned out
+        # to be APP_ENV=test, not a stale response.
         bin/console cache:clear:http --no-ansi || true
 
-        # Restart the web server, which is the step everything above was missing.
-        #
-        # The server is started earlier in this action, right after a
-        # `cache:warmup` — so its PHP-FPM workers warmed the UCP config while it
-        # still held the defaults (active=false, transports=[rest]), and every
-        # write in this step lands in the database AFTER that. Clearing caches
-        # from the CLI does not reach workers that already hold the value.
-        #
-        # This is what reconciles readings that looked contradictory for six
-        # runs: `system:config:get` said active=true because it reads the
-        # database, while the served profile stayed
-        # {"services":{},"capabilities":{}} because the workers answered from
-        # what they cached at warmup. The signing key showed up in that same
-        # profile precisely because keys are read per request rather than warmed,
-        # which is the detail that gives the mechanism away.
+        # Restart so the workers pick up the config just written. The server is
+        # started earlier in this action, immediately after a cache:warmup, and
+        # every write in this step lands afterwards.
         symfony server:stop 2>/dev/null || true
-        # The UCP dev-mode flag is passed into the server's OWN environment, not
-        # left to .env.local. A real environment variable beats dotenv, and the
-        # daemonized server snapshots its environment when it starts — so the flag
-        # being in .env.local (where `debug:dotenv` and the assertion below both
-        # find it) does not put it in the process that serves UCP requests. That
-        # gap is why the lane kept answering "Plain http is only allowed when
-        # profile fetching development mode is enabled" in both prod and dev while
-        # every file-level check passed.
         SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1 \
         SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
           symfony server:start
         bash "$GITHUB_WORKSPACE/functional/ci/wait_for_http.sh" \
           http://localhost:8000/api/_info/version 60 2
 
-        # The stored value, read back key by key. This is here because the first
-        # version of this step reported active=False / [rest] on CI while the
-        # identical commands demonstrably worked on a local lane — and with only
-        # the profile-level view below to go on, there was no way to tell a write
-        # that silently no-opped from a read that was stale. `system:config:get`
-        # answers that directly, so the next failure is diagnosable from the log
-        # instead of by another round of guessing.
-        # --no-ansi on all three, and it is not cosmetic either. These commands
-        # colourise, and one coloured line makes the WHOLE job log unretrievable
-        # through the REST API ("the response contains terminal escape
-        # sequences") — so the first version of this diagnostic destroyed the
-        # only channel it had to report through. Flattened to one line each for
-        # the same reason: the values have to fit in an annotation.
-        STORED_ACTIVE=$(bin/console system:config:get SwagAgenticCommerce.config.active \
-          --salesChannelId="${SC_ID}" --no-ansi 2>&1 | tr '\n' ' ' | tr -s ' ')
-        STORED_TRANSPORTS=$(bin/console system:config:get SwagAgenticCommerce.config.enabledTransports \
-          --salesChannelId="${SC_ID}" --no-ansi 2>&1 | tr '\n' ' ' | tr -s ' ')
-        export STORED_ACTIVE STORED_TRANSPORTS
-        echo "Stored: active=[${STORED_ACTIVE}] transports=[${STORED_TRANSPORTS}]"
+        # `--no-ansi` on every console read in this step, and it is not cosmetic:
+        # one ANSI-coloured line anywhere in a job makes the WHOLE log
+        # unretrievable through the REST API ("the response contains terminal
+        # escape sequences"), which silently costs the ability to debug the run
+        # at all.
+        #
+        # The `system:config:get` pair that used to be here is gone. It read
+        # system_config, which is NOT where a channel-scoped UCP config lives, so
+        # it faithfully echoed back writes the application never consulted and was
+        # trusted over `ucp:config:show` for several runs.
         bin/console ucp:config:validate --sales-channel="${SC_ID}" --no-ansi || true
 
         # Verify from the config the application actually reads, not from the
         # exit status of the writes above, which is 0 either way.
         bin/console ucp:config:show --sales-channel="${SC_ID}" --no-ansi > ucp-config.json || true
         python3 - "$SC_ID" <<'PY'
-        import json, os, pathlib, sys
+        import json, pathlib, sys
 
         # `ucp:config:show` prints a "UCP config — <id>" heading and an underline
         # before the JSON, so this decodes from the first brace rather than
@@ -963,28 +932,15 @@ runs:
         active = config.get("active")
         print(f"UCP active={active} enabledTransports={transports} "
               f"enabledCapabilities={config.get('enabledCapabilities') or []}")
-        # A warning, NOT a failure, and the distinction is the whole point: this
-        # action sets up every lane, and the first version exited 1 here, which
-        # took down the Admin eval — a suite that does not touch UCP and was
-        # green. The Store preflight is the gate that owns this; it already
-        # reports the failure and skips the Store suite. All this has to do is
-        # name the cause, because the preflight cannot see it.
-        # The verdict comes from `ucp:config:show`, which reads through
-        # UcpConfigService and therefore through the repository the application
-        # actually answers from.
+        # A warning, NOT a failure: this action sets up every lane, and an exit 1
+        # here took down the Admin eval, a suite that does not touch UCP. The
+        # Store preflight is the gate that owns this outcome.
         #
-        # This was backwards for several runs, and the correction is worth
-        # recording. ucp:config:show reported active=False while
-        # `system:config:get` reported true, and that disagreement was read as
-        # ucp:config:show being broken — "it must be falling back to global
-        # scope". It was not: it was reporting the repository, which really did
-        # say false, while system:config:get reported a system_config row that
-        # nothing reads for this scope. The command that looked wrong was the
-        # only one telling the truth, and switching the verdict away from it
-        # turned a working detector into a rubber stamp.
-        #
-        # system:config:get is still printed above, as the global-scope reading
-        # and as the thing to compare against when these two disagree again.
+        # The verdict comes from `ucp:config:show` because it reads through
+        # UcpConfigService, and therefore through the repository the application
+        # answers from. Do not replace it with a system_config read: that store is
+        # only the legacy fallback for this scope, so it can report values the
+        # application never sees.
         exposed = bool(active) and "mcp" in transports
         print(f"UCP exposed over MCP (per ucp:config:show): {exposed}")
         if not exposed:
@@ -992,74 +948,23 @@ runs:
                 f"::warning::UCP is not exposed over MCP on sales channel {sys.argv[1]}. "
                 f"Effective (ucp:config:show, reads the plugin's own config table): "
                 f"active={active}, enabledTransports={transports}.%0A"
-                f"For comparison, system_config holds active=[{os.environ.get('STORED_ACTIVE', '')}] "
-                f"transports=[{os.environ.get('STORED_TRANSPORTS', '')}] — which is the GLOBAL "
-                f"scope store, not this channel's, so the two disagreeing means the admin-API "
-                f"write did not land.%0A"
+                f"The admin-API PUT above is what sets these; check its response.%0A"
                 f"The Store suite will fail its preflight; Admin is unaffected."
             )
         PY
 
-        # The SERVED profile, which is the only reading that actually matters and
-        # the one nothing here was checking. The config commands above describe
-        # what is stored; this is what an agent receives. They disagreed: with
-        # channel scope holding active=true and a signing key present, the served
-        # profile was still
-        # {"services":{},"capabilities":{},"payment_handlers":{}} — populated
-        # signing_keys next to empty everything else, which is what pointed at
-        # global scope in the first place.
+        # The SERVED profile — what an agent actually receives, as opposed to what
+        # the config commands above say is stored. Keep this check: for several
+        # runs every stored-config reading said the lane was fine while the served
+        # profile was {"services":{},"capabilities":{}}, and only this one
+        # disagreed. It is also the check that confirms a fix rather than
+        # inferring one.
         #
-        # Reported through an annotation, since this is the fact worth having
-        # after a run and the log cannot be relied on to come back.
-        # What the SERVER computes for the request scheme and host, which is the
-        # one input to UCP's sales-channel resolution that nothing here could
-        # observe. It matters because
-        # SalesChannelDomainResolver::normalizedUrls() builds
-        # "scheme://host[:port]/path" and compares those strings: a request the
-        # server sees as https://localhost:8000/ does not match a registered
-        # domain of http://localhost:8000 by equality OR by str_starts_with
-        # ("https:" and "http:/" diverge at the fifth character). An unresolved
-        # domain means getConfig(null), which is global scope, which is why the
-        # profile comes back with services=[].
-        #
-        # The symfony-cli access log says "scheme":"https" for these requests,
-        # but that is the proxy's view of the site, not what PHP put in
-        # $_SERVER. Those can differ, and the difference is the whole question,
-        # so this asks PHP directly rather than inferring from the proxy.
-        #
-        # Removed immediately after. A file under public/ is reachable by
-        # anyone who can reach the lane, and this one exists for exactly one
-        # request.
-        # Also reports the UCP dev-mode flag AS THE WEB PROCESS SEES IT, which is
-        # the reading that matters and the one nothing has checked. `bin/console
-        # debug:dotenv` shows the variable loaded, and the assertion further down
-        # greps .env.local and passes — yet UCP still answers "Plain http is only
-        # allowed when profile fetching development mode is enabled", which can
-        # only happen if the process serving the request does not have it. CLI and
-        # web are separate processes with separate environments here: the server is
-        # daemonized by symfony-cli, which snapshots the environment when it
-        # starts.
-        cat > public/_scheme_probe.php <<'PHP'
-        <?php
-        header('Content-Type: application/json');
-        $flag = 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE';
-        echo json_encode([
-            'REQUEST_SCHEME' => $_SERVER['REQUEST_SCHEME'] ?? null,
-            'HTTPS' => $_SERVER['HTTPS'] ?? null,
-            'X-Forwarded-Proto' => $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null,
-            'HTTP_HOST' => $_SERVER['HTTP_HOST'] ?? null,
-            'SERVER_PORT' => $_SERVER['SERVER_PORT'] ?? null,
-            'APP_ENV' => $_SERVER['APP_ENV'] ?? ($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: null),
-            'devmode_getenv' => getenv($flag) === false ? 'UNSET' : getenv($flag),
-            'devmode_SERVER' => $_SERVER[$flag] ?? 'UNSET',
-            'devmode_ENV' => $_ENV[$flag] ?? 'UNSET',
-        ]);
-        PHP
-        SCHEME_VIEW=$(curl -sS --max-time 10 "${APP_URL}/_scheme_probe.php" 2>&1 | tr '\n' ' ' | tr -s ' ' | cut -c1-300)
-        export SCHEME_VIEW
-        echo "Server's view of the request: ${SCHEME_VIEW}"
-        rm -f public/_scheme_probe.php
-
+        # A scheme/dev-mode probe file used to sit here, asking PHP what it
+        # computed for the request scheme, on the theory that a mismatch with the
+        # registered domain was defeating SalesChannelDomainResolver. PHP reported
+        # plain http, which matched, so the theory was wrong — noted so it does not
+        # get rebuilt.
         echo "Registered sales-channel domains:"
         curl -fsS "${APP_URL}/api/sales-channel-domain?limit=100" \
           -H "Authorization: Bearer ${TOKEN}" -H 'Accept: application/json' \
@@ -1083,7 +988,7 @@ runs:
         curl -sS --max-time 15 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
           "${APP_URL}/.well-known/ucp" -o served-profile.json || true
         python3 <<'PY'
-        import json, os, pathlib
+        import json, pathlib
 
         try:
             profile = json.loads(pathlib.Path("served-profile.json").read_text())
@@ -1122,12 +1027,11 @@ runs:
         print(f"Served profile: services={list(services)} capabilities={list(capabilities)} "
               f"signing_keys={len(keys)}")
         if not capabilities:
-            # The scheme and the domain list travel WITH the symptom, in one
-            # annotation. They are the two inputs to the domain resolution that
-            # decides whether this profile is built from the channel's config or
-            # from global scope, and putting them in the log instead would repeat
-            # the mistake that cost six runs: an ANSI-coloured line anywhere in
-            # the job makes the whole log unreadable through the API.
+            # The domain list travels WITH the symptom rather than sitting in the
+            # log, which cannot be relied on to come back through the API. It is
+            # here because the profile is built from whichever channel
+            # resolveByBaseUri matches on APP_URL, so "which domains exist" is the
+            # first thing worth knowing when it advertises nothing.
             domains = "?"
             try:
                 listed = json.loads(pathlib.Path("domains.json").read_text())
@@ -1140,11 +1044,11 @@ runs:
             print(
                 f"::warning::The served UCP profile advertises NO capabilities "
                 f"(services={list(services)}, signing_keys={len(keys)}).%0A"
-                f"Server's view of the request: {os.environ.get('SCHEME_VIEW', '?')}%0A"
                 f"Registered domains: {domains}%0A"
-                f"If the scheme the server reports differs from the scheme in the "
-                f"registered domain, resolveByBaseUri returns null and the profile is "
-                f"built from GLOBAL config, which is what empties services."
+                f"Known causes, in the order they have actually occurred: the lane "
+                f"running APP_ENV=test (which swaps in a profile-fetcher test "
+                f"double), and the exposure config never reaching the plugin's own "
+                f"config table."
             )
         PY
 

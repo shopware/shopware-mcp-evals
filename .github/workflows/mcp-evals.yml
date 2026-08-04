@@ -548,6 +548,10 @@ jobs:
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
+          # The promotion created by setup-lane. functional/journeys.py reads this
+          # and skips the discount step without it, which is what it did on every
+          # run before the lane created one.
+          UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
         run: |
           # --allow-mutations: the UCP journey commits, because the plugin rolls
           # every dry run back and a rolled-back cart cannot be the next step's

@@ -112,17 +112,70 @@ brief for coding agents.
   it is blind to the entire Store failure mode — which is exactly what happened
   to 27 admin checks for months.
 
-## UCP: four gates before a tool runs
+## UCP: six gates before a tool runs
 
 All defaults, none visible in any tool description, and each fails the whole
 Store suite. In order of when they fire:
 
 | gate | symptom | fix |
 |---|---|---|
+| **`APP_ENV`** | any UCP call → `internal: The tool call failed unexpectedly.` and REST 500 `Internal server error.` | **must not be `test`.** `TestAgentProfileFetcherCompilerPass` swaps the real HTTP profile fetcher for `StaticAgentProfileFetcher`, which throws `LogicException: No profile configured` unless a PHPUnit test called `setProfile()` on it. No configuration can fix this. |
+| **exposure** | profile serves `{"services":{},"capabilities":{}}` | `active: true` + `mcp` in `enabledTransports`. **Not settable from the console** — see below |
 | `signaturePolicy` | `Missing signature headers` | defaults to `strict`; `ucp:config:set --signature-policy=off` on a throwaway lane |
 | `agentAllowlist` | `Agent profile host is not allowed` | falls back to the sales-channel domains; `--agent-allowlist=<host>` |
 | `platformAllowlist` | `Platform profile host is not allowed` | falls back to the **host of the incoming request**; `--platform-allowlist=<host>` |
-| plain http | `Plain http is only allowed for local development hosts` | needs `SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1` **and** a host `isLocalHost()` accepts — which is `localhost`/`127.0.0.1`/`::1` only, *not* `.localhost` subdomains |
+| plain http | `Plain http is only allowed when profile fetching development mode is enabled` | set `ucp_sdk.profile_fetching_development_mode: true` in `config/packages/`. The `SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE` env var works only if it reaches the process serving the request — the daemonized server, the CLI and the runner are three different environments, so `.env.local` is not enough. `isLocalHost()` accepts `localhost`, `127.0.0.1`, `::1` and `.localhost` subdomains. |
+
+### Exposure lives in the plugin's own table, not `system_config`
+
+`UcpConfigService::getConfig($salesChannelId)` reads `$this->repository->find()`
+and returns immediately when it finds a row. `system_config` is only a *legacy
+fallback*, used when the table has no row and then migrated into it.
+
+So on a fresh install — which always has a row — `system:config:set
+SwagAgenticCommerce.config.active true` writes a row **nothing reads**, and
+`system:config:get` reads it straight back, so the write looks like it worked.
+This cost seven CI runs. A long-lived local instance behaves differently because
+it *predates* the table: its legacy rows hit the fallback and were migrated in.
+
+`ucp:config:set` writes through the service (correct store) but has **no option**
+for `active`, `enabledTransports` or `enabledCapabilities`. The only console-free
+path is the route the Administration uses:
+
+```bash
+curl -X PUT "$APP_URL/api/_admin/ucp/sales-channels/$SC_ID/config" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":true,
+       "enabledTransports":["rest","a2a","embedded","mcp"],
+       "enabledCapabilities":["catalog","cart","discount","checkout","order"]}'
+```
+
+`saveConfig` merges partial payloads, so this can set the Exposure subset and
+leave signature policy and allowlists to `ucp:config:set`.
+
+**Verify with `ucp:config:show`** (reads through the service) and by fetching
+`/.well-known/ucp`. Never with `system:config:get` — it can report values the
+application never sees. `debug:config ucp_sdk` is unusable with the plugin
+installed: it dies with *"Adding definition to a compiled container is not
+allowed"*.
+
+### Diagnosing a UCP failure in CI
+
+Hard-won and cheap to forget:
+
+- **A single ANSI-coloured line anywhere in a job makes the whole log
+  unretrievable through the REST API** (`the response contains terminal escape
+  sequences`), and a *passing* job's log is not retrievable at all. Put facts in
+  `::warning::`/`::notice::` annotations, and pass `--no-ansi` to every console
+  command. Six runs were spent on diagnostics that could not be read.
+- **The application log is not under `shopware/var/log` when the server runs under
+  `symfony server:start`** — check `$HOME/.config/symfony-cli/log` too, and note
+  that only `dev` reliably writes `var/log/dev.log`.
+- **Both transports flatten every error.** MCP answers `internal` and REST
+  answers `Internal server error.` with no `code` and no `severity`, so the
+  message is the only signal. When it is anonymous, the fastest route is to patch
+  `ExceptionListener`'s fallback branch to append `$throwable::class` and
+  `getMessage()`; that is what identified `APP_ENV=test`.
 
 Two more things that look like tool bugs and are not:
 
