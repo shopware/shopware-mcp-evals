@@ -863,9 +863,9 @@ runs:
             'SERVER_PORT' => $_SERVER['SERVER_PORT'] ?? null,
         ]);
         PHP
-        echo "Server's view of the request:"
-        curl -sS --max-time 10 "${APP_URL}/_scheme_probe.php" || true
-        echo
+        SCHEME_VIEW=$(curl -sS --max-time 10 "${APP_URL}/_scheme_probe.php" 2>&1 | tr '\n' ' ' | tr -s ' ' | cut -c1-300)
+        export SCHEME_VIEW
+        echo "Server's view of the request: ${SCHEME_VIEW}"
         rm -f public/_scheme_probe.php
 
         echo "Registered sales-channel domains:"
@@ -887,7 +887,7 @@ runs:
 
         curl -sS --max-time 15 "${APP_URL}/.well-known/ucp" -o served-profile.json || true
         python3 <<'PY'
-        import json, pathlib
+        import json, os, pathlib
 
         try:
             profile = json.loads(pathlib.Path("served-profile.json").read_text())
@@ -902,11 +902,29 @@ runs:
         print(f"Served profile: services={list(services)} capabilities={list(capabilities)} "
               f"signing_keys={len(keys)}")
         if not capabilities:
+            # The scheme and the domain list travel WITH the symptom, in one
+            # annotation. They are the two inputs to the domain resolution that
+            # decides whether this profile is built from the channel's config or
+            # from global scope, and putting them in the log instead would repeat
+            # the mistake that cost six runs: an ANSI-coloured line anywhere in
+            # the job makes the whole log unreadable through the API.
+            domains = "?"
+            try:
+                listed = json.loads(pathlib.Path("domains.json").read_text())
+                domains = ", ".join(
+                    str((e.get("attributes", e) or {}).get("url"))
+                    for e in listed.get("data", [])
+                )
+            except Exception:  # noqa: BLE001 — a diagnostic must not raise
+                pass
             print(
                 f"::warning::The served UCP profile advertises NO capabilities "
-                f"(services={list(services)}, signing_keys={len(keys)}). An agent "
-                f"negotiating against this lane sees an empty shop, which is what makes "
-                f"every Store fixture fail."
+                f"(services={list(services)}, signing_keys={len(keys)}).%0A"
+                f"Server's view of the request: {os.environ.get('SCHEME_VIEW', '?')}%0A"
+                f"Registered domains: {domains}%0A"
+                f"If the scheme the server reports differs from the scheme in the "
+                f"registered domain, resolveByBaseUri returns null and the profile is "
+                f"built from GLOBAL config, which is what empties services."
             )
         PY
 
