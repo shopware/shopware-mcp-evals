@@ -677,18 +677,25 @@ runs:
         # that silently no-opped from a read that was stale. `system:config:get`
         # answers that directly, so the next failure is diagnosable from the log
         # instead of by another round of guessing.
-        echo "Stored config after the writes:"
-        bin/console system:config:get SwagAgenticCommerce.config.active \
-          --salesChannelId="${SC_ID}" || true
-        bin/console system:config:get SwagAgenticCommerce.config.enabledTransports \
-          --salesChannelId="${SC_ID}" || true
-        bin/console ucp:config:validate --sales-channel="${SC_ID}" || true
+        # --no-ansi on all three, and it is not cosmetic either. These commands
+        # colourise, and one coloured line makes the WHOLE job log unretrievable
+        # through the REST API ("the response contains terminal escape
+        # sequences") — so the first version of this diagnostic destroyed the
+        # only channel it had to report through. Flattened to one line each for
+        # the same reason: the values have to fit in an annotation.
+        STORED_ACTIVE=$(bin/console system:config:get SwagAgenticCommerce.config.active \
+          --salesChannelId="${SC_ID}" --no-ansi 2>&1 | tr '\n' ' ' | tr -s ' ')
+        STORED_TRANSPORTS=$(bin/console system:config:get SwagAgenticCommerce.config.enabledTransports \
+          --salesChannelId="${SC_ID}" --no-ansi 2>&1 | tr '\n' ' ' | tr -s ' ')
+        export STORED_ACTIVE STORED_TRANSPORTS
+        echo "Stored: active=[${STORED_ACTIVE}] transports=[${STORED_TRANSPORTS}]"
+        bin/console ucp:config:validate --sales-channel="${SC_ID}" --no-ansi || true
 
         # Verify from the config the application actually reads, not from the
         # exit status of the writes above, which is 0 either way.
-        bin/console ucp:config:show --sales-channel="${SC_ID}" > ucp-config.json || true
+        bin/console ucp:config:show --sales-channel="${SC_ID}" --no-ansi > ucp-config.json || true
         python3 - "$SC_ID" <<'PY'
-        import json, pathlib, sys
+        import json, os, pathlib, sys
 
         # `ucp:config:show` prints a "UCP config — <id>" heading and an underline
         # before the JSON, so this decodes from the first brace rather than
@@ -706,9 +713,20 @@ runs:
         # reports the failure and skips the Store suite. All this has to do is
         # name the cause, because the preflight cannot see it.
         if not active or "mcp" not in transports:
-            print(f"::warning::UCP is not exposed over MCP on sales channel {sys.argv[1]} "
-                  f"(active={active}, enabledTransports={transports}). The Store suite "
-                  f"will fail its preflight; the Admin suite is unaffected.")
+            # Both readings, in one annotation, because the point is the
+            # comparison. Stored disagreeing with effective means the read is
+            # cached; stored agreeing means the write never landed. Reported
+            # through an annotation rather than the log, which is not
+            # retrievable through the API for a job that passes — and this step
+            # only warns, so it always passes.
+            print(
+                f"::warning::UCP is not exposed over MCP on sales channel {sys.argv[1]}. "
+                f"Effective (ucp:config:show): active={active}, enabledTransports={transports}.%0A"
+                f"Stored (system:config:get): active=[{os.environ.get('STORED_ACTIVE', '')}] "
+                f"transports=[{os.environ.get('STORED_TRANSPORTS', '')}].%0A"
+                f"If stored and effective disagree the read is cached; if they agree the write "
+                f"did not land. The Store suite will fail its preflight; Admin is unaffected."
+            )
         PY
 
         # The dev-mode flag is the one gate that is not sales-channel config,
