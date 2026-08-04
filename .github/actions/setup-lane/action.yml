@@ -676,10 +676,42 @@ runs:
         # as the string "true" / as two stray positional arguments, and
         # `system:config:set` prints its usage line and exits 0 — a silent
         # no-op. The verification below is what makes that visible.
+        CAPABILITIES='["catalog","cart","discount","checkout","order"]'
+        TRANSPORTS='["rest","a2a","embedded","mcp"]'
+
         bin/console system:config:set --json --salesChannelId="${SC_ID}" \
           SwagAgenticCommerce.config.active true
         bin/console system:config:set --json --salesChannelId="${SC_ID}" \
-          SwagAgenticCommerce.config.enabledTransports '["rest","a2a","embedded","mcp"]'
+          SwagAgenticCommerce.config.enabledTransports "${TRANSPORTS}"
+        bin/console system:config:set --json --salesChannelId="${SC_ID}" \
+          SwagAgenticCommerce.config.enabledCapabilities "${CAPABILITIES}"
+
+        # And the SAME three at GLOBAL scope, which is the fix the channel-scoped
+        # writes above were missing.
+        #
+        # The evidence: CI's served profile is
+        # {"services":{},"capabilities":{},"payment_handlers":{}} with signing
+        # keys present — so the profile route runs, finds a key, and advertises
+        # nothing. An inactive scope advertises nothing regardless of what
+        # enabledCapabilities holds. And `active: false` with
+        # enabledTransports: ["rest"] is byte-for-byte what `ucp:config:show`
+        # prints with NO --sales-channel at all, i.e. at global scope, while the
+        # channel scope has held active=true since the first commit in this
+        # series. /.well-known/ucp carries no sw-access-key, so it does not
+        # resolve a sales channel the way a Store-API call does — it reads the
+        # scope we never wrote.
+        #
+        # enabledCapabilities is set explicitly at both scopes rather than left
+        # to its default. The default IS all five, verified with
+        # `system:config:get` on a lane that serves a populated profile — but
+        # "verified to default correctly" is what was said about active and
+        # transports too, and an explicit write costs one line and removes the
+        # question.
+        bin/console system:config:set --json SwagAgenticCommerce.config.active true
+        bin/console system:config:set --json \
+          SwagAgenticCommerce.config.enabledTransports "${TRANSPORTS}"
+        bin/console system:config:set --json \
+          SwagAgenticCommerce.config.enabledCapabilities "${CAPABILITIES}"
 
         # Reads are cached, and `cache:clear` is NOT what fixes it — measured, on
         # CI, with the annotation below: the writes had landed
@@ -766,6 +798,42 @@ runs:
                 f"enabledTransports={transports} — which on this plugin version may be "
                 f"global scope rather than this channel.%0A"
                 f"The Store suite will fail its preflight; Admin is unaffected."
+            )
+        PY
+
+        # The SERVED profile, which is the only reading that actually matters and
+        # the one nothing here was checking. The config commands above describe
+        # what is stored; this is what an agent receives. They disagreed: with
+        # channel scope holding active=true and a signing key present, the served
+        # profile was still
+        # {"services":{},"capabilities":{},"payment_handlers":{}} — populated
+        # signing_keys next to empty everything else, which is what pointed at
+        # global scope in the first place.
+        #
+        # Reported through an annotation, since this is the fact worth having
+        # after a run and the log cannot be relied on to come back.
+        curl -sS --max-time 15 "${APP_URL}/.well-known/ucp" -o served-profile.json || true
+        python3 <<'PY'
+        import json, pathlib
+
+        try:
+            profile = json.loads(pathlib.Path("served-profile.json").read_text())
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must not raise
+            print(f"::warning::Could not read the served UCP profile: {exc}")
+            raise SystemExit(0)
+
+        ucp = profile.get("ucp") or {}
+        services = ucp.get("services") or {}
+        capabilities = ucp.get("capabilities") or {}
+        keys = profile.get("signing_keys") or []
+        print(f"Served profile: services={list(services)} capabilities={list(capabilities)} "
+              f"signing_keys={len(keys)}")
+        if not capabilities:
+            print(
+                f"::warning::The served UCP profile advertises NO capabilities "
+                f"(services={list(services)}, signing_keys={len(keys)}). An agent "
+                f"negotiating against this lane sees an empty shop, which is what makes "
+                f"every Store fixture fail."
             )
         PY
 
