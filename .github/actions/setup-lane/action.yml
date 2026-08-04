@@ -148,6 +148,29 @@ runs:
 
     # Installs PHP, MySQL, composer, clones shopware/shopware @ SHA into ./shopware,
     # and runs system:install. Org-standard primitive used across Shopware repos.
+    # env: prod, and this is the root cause of the store preflight failure, found
+    # by patching the SDK's exception listener to name the exception it was
+    # swallowing:
+    #
+    #   LogicException: No profile configured on
+    #   Swag\AgenticCommerce\Ucp\Test\StaticAgentProfileFetcher. Call setProfile()
+    #   from the test before issuing a UCP runtime request.
+    #   @ .../SwagAgenticCommerce/src/Ucp/Test/StaticAgentProfileFetcher.php:37
+    #
+    # Under APP_ENV=test the plugin wires a PHPUnit test double in place of the
+    # real HTTP agent-profile fetcher, and that double throws unless a test has
+    # called setProfile() on it. No amount of configuration could have fixed
+    # that: the lane was never going to fetch a profile over HTTP, because in
+    # test env nothing is wired to.
+    #
+    # The evidence was in front of us for a while and read as noise: var/log held
+    # only test-<date>.log, `framework:demodata` had to be invoked with an
+    # explicit APP_ENV=prod below because it REFUSES to run under test, and the
+    # log-seeding step defaulted to test. Each was treated as a quirk to work
+    # around rather than as the lane running in the wrong environment.
+    #
+    # prod is also what the suite is supposed to measure — a shop as a shopper's
+    # agent meets it, not a test harness.
     - name: Setup Shopware
       uses: shopware/setup-shopware@main
       with:
@@ -156,7 +179,7 @@ runs:
         shopware-github-token: ${{ inputs.github_token }}
         path: shopware
         install: true
-        env: test
+        env: prod
         php-version: '8.3'
 
     # SwagMcpDevTools and SwagMcpMerchantTools track their repo DEFAULT branch:
@@ -980,13 +1003,25 @@ runs:
         # printed to the log on the happy path, and the log is the one place that
         # cannot be read back — so a run where exposure was finally correct
         # looked identical to a run where it was not: no annotation either way.
-        # "I cannot see the capabilities value" was the right complaint.
+        #
+        # The effective config is re-read from ucp-config.json here rather than
+        # reused from the earlier block. The first version of this notice
+        # referenced that block's `active`/`transports`/`config` names, which do
+        # not exist in this heredoc — a NameError that failed the whole lane
+        # setup and took the Admin eval down with it.
+        effective = {}
+        try:
+            raw = pathlib.Path("ucp-config.json").read_text()
+            effective, _ = json.JSONDecoder().raw_decode(raw[raw.index("{"):])
+        except Exception:  # noqa: BLE001 — a diagnostic must not raise
+            pass
         print(
             f"::notice::UCP profile served by this lane: capabilities="
             f"{list(capabilities) or 'NONE'}%0Aservices={list(services) or 'NONE'}%0A"
-            f"signing_keys={len(keys)}%0AEffective config (ucp:config:show): active={active}, "
-            f"enabledTransports={transports}, "
-            f"enabledCapabilities={config.get('enabledCapabilities') or []}"
+            f"signing_keys={len(keys)}%0AEffective config (ucp:config:show): "
+            f"active={effective.get('active')}, "
+            f"enabledTransports={effective.get('enabledTransports') or []}, "
+            f"enabledCapabilities={effective.get('enabledCapabilities') or []}"
         )
         print(f"Served profile: services={list(services)} capabilities={list(capabilities)} "
               f"signing_keys={len(keys)}")
