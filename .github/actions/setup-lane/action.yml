@@ -331,33 +331,17 @@ runs:
         elif [ "${STORE_CHECKOUT_OK}" != "true" ]; then
           STORE_SKIP_REASON="the \`shopware/agentic-commerce\` checkout failed — \`PLUGINS_PAT\` is most likely not scoped to that repository (the API answers \`Not Found\`). Grant the token access to it."
         else
-          # Relax the plugin's ucp-php-sdk constraint so the released SDK can be
-          # installed at all.
+          # The composer patch that used to sit here is gone, retired by its own
+          # exit condition. It widened the plugin's `ucp-php-sdk/symfony-bundle:
+          # ^0.0.2` to a range, because Composer's caret on a 0.0.x package means
+          # `>=0.0.2 <0.0.3` and therefore excluded 0.0.3 and every later release
+          # — the lane would have installed 0.0.2 and looked healthy while
+          # measuring an SDK without #107 or #108.
           #
-          # shopware/agentic-commerce requires `ucp-php-sdk/symfony-bundle:
-          # ^0.0.2`, and Composer's caret on a 0.0.x package means
-          # `>=0.0.2 <0.0.3` — so it excludes 0.0.3 and every later release. The
-          # SDK hit this exact bug in its own bundle→core requirement and fixed
-          # it in 0.0.3 ("Composer's caret pins the patch on 0.0.x, so the old
-          # constraint excluded every future release of core, including this
-          # one"); the plugin has not had the same fix yet.
-          #
-          # Without this the lane silently installs 0.0.2 — no typed
-          # AgentProfileException, no #107 schema fixes — and looks fine while
-          # measuring the wrong SDK. Patched in the checkout, never committed
-          # upstream from here.
-          #
-          # Fails loudly if the pattern is absent, which is what makes this
-          # self-retiring: once the plugin widens its own constraint, this step
-          # says so and can be deleted rather than rotting into a no-op.
-          if grep -q '"ucp-php-sdk/symfony-bundle": "\^0\.0\.2"' custom/plugins/SwagAgenticCommerce/composer.json; then
-            sed -i 's|"ucp-php-sdk/symfony-bundle": "\^0\.0\.2"|"ucp-php-sdk/symfony-bundle": ">=0.0.2 <0.1.0"|' \
-              custom/plugins/SwagAgenticCommerce/composer.json
-            echo "Widened the plugin's ucp-php-sdk/symfony-bundle constraint to >=0.0.2 <0.1.0 so ${UCP_SDK_CONSTRAINT} can resolve."
-          else
-            echo "::notice::The plugin's ucp-php-sdk constraint is no longer \`^0.0.2\`. If it now allows 0.0.3+, delete this patch from setup-lane."
-          fi
-
+          # shopware/agentic-commerce#157 fixed that upstream, so the plugin now
+          # declares `>=0.0.2 <0.1.0` itself and nothing here needs to rewrite it.
+          # The explicit require below is what still decides WHICH allowed version
+          # gets installed.
           composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
           # The SDK constraint is required explicitly alongside the plugin, so the
           # resolver has to satisfy it rather than settling for whatever the
