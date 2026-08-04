@@ -744,6 +744,48 @@ runs:
         # Both, in this order: flush the pending invalidations, then clear the
         # pool the config is actually served from. Together they cost under a
         # second.
+        # A diagnostic patch to the SDK's exception listener, so the 500 body
+        # names the exception. Nothing else can reach it: the listener's
+        # fallback branch calls $this->logger?->error(...), but this lane's
+        # var/log holds exactly one file (the seeded test-*.log) and no
+        # prod-*.log, so the web server has never written an application log
+        # line — on CI's pinned SDK 0.0.2.1 the logger argument is evidently not
+        # what it is on a working tree. Both transports return
+        # "Internal server error." with no code and no severity (finding #14),
+        # so the message is the only channel left.
+        #
+        # This is a DIAGNOSTIC and it is deliberately loud in the output. It
+        # patches a vendored file on a throwaway CI lane only, and it must come
+        # out once the plugin reports the error properly.
+        LISTENER=""
+        for candidate in \
+          custom/ucp-php-sdk/symfony-bundle/src/EventListener/ExceptionListener.php \
+          vendor/ucp-php-sdk/symfony-bundle/src/EventListener/ExceptionListener.php; do
+          if [ -f "${candidate}" ]; then LISTENER="${candidate}"; break; fi
+        done
+        if [ -z "${LISTENER}" ]; then
+          echo "::warning::Could not find the SDK ExceptionListener to patch; the 500 will stay anonymous."
+        else
+          python3 - "${LISTENER}" <<'PY'
+        import pathlib, sys
+
+        path = pathlib.Path(sys.argv[1])
+        source = path.read_text()
+        target = "'Internal server error.', 500"
+        replacement = (
+            "'Internal server error. DIAG '.$throwable::class.': '"
+            ".$throwable->getMessage().' @ '.$throwable->getFile().':'"
+            ".$throwable->getLine(), 500"
+        )
+        if target not in source:
+            print(f"::warning::The 500 fallback in {path} does not match the expected "
+                  f"source, so it was left alone. The exception will stay anonymous.")
+            raise SystemExit(0)
+        path.write_text(source.replace(target, replacement, 1))
+        print(f"Patched {path} to name the exception in the 500 body (CI diagnostic).")
+        PY
+        fi
+
         bin/console cache:clear:delayed --no-ansi
         bin/console cache:pool:clear cache.object --no-ansi
         # The HTTP cache, which lives in its own pool and which none of the
@@ -934,6 +976,18 @@ runs:
         services = ucp.get("services") or {}
         capabilities = ucp.get("capabilities") or {}
         keys = profile.get("signing_keys") or []
+        # ALWAYS annotated, not only on failure. Until now the values were
+        # printed to the log on the happy path, and the log is the one place that
+        # cannot be read back — so a run where exposure was finally correct
+        # looked identical to a run where it was not: no annotation either way.
+        # "I cannot see the capabilities value" was the right complaint.
+        print(
+            f"::notice::UCP profile served by this lane: capabilities="
+            f"{list(capabilities) or 'NONE'}%0Aservices={list(services) or 'NONE'}%0A"
+            f"signing_keys={len(keys)}%0AEffective config (ucp:config:show): active={active}, "
+            f"enabledTransports={transports}, "
+            f"enabledCapabilities={config.get('enabledCapabilities') or []}"
+        )
         print(f"Served profile: services={list(services)} capabilities={list(capabilities)} "
               f"signing_keys={len(keys)}")
         if not capabilities:
