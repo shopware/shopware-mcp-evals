@@ -310,11 +310,18 @@ runs:
         # symptom would be CI quietly measuring the released SDK again — which is
         # indistinguishable from the bug it was pinned to diagnose. Assert on the
         # one file only the pinned branch has.
+        # Reported through an ANNOTATION either way, not just on failure. The first
+        # version echoed the success case to stdout, and a passing job's log is not
+        # retrievable through the REST API — so "did the pin take?" was unanswerable
+        # from outside, which is the one question it exists to answer. Silence read
+        # as either outcome.
         if [ "${STORE_PLUGIN_OK}" = "true" ]; then
+          SDK_VERSION=$(composer show ucp-php-sdk/core --no-interaction 2>/dev/null \
+            | sed -n 's/^versions *: *\**//p' | head -1)
           if [ -f vendor/ucp-php-sdk/core/src/Exception/AgentProfileException.php ]; then
-            echo "ucp-php-sdk: pinned copy installed (AgentProfileException present)"
+            echo "::warning::ucp-php-sdk PIN TOOK: AgentProfileException present, version ${SDK_VERSION:-unknown}. A store failure reported as \`internal\` is therefore NOT the profile fetch."
           else
-            echo "::warning::ucp-php-sdk resolved WITHOUT AgentProfileException, so the store diagnosis will still report a bare \`internal\`. The path-repository pin did not take."
+            echo "::warning::ucp-php-sdk PIN DID NOT TAKE: no AgentProfileException, version ${SDK_VERSION:-unknown}. The released SDK is installed, so the store diagnosis will still report a bare \`internal\`."
           fi
         fi
 
