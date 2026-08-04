@@ -732,6 +732,18 @@ runs:
         # second.
         bin/console cache:clear:delayed --no-ansi
         bin/console cache:pool:clear cache.object --no-ansi
+        # The HTTP cache, which lives in its own pool and which none of the
+        # clears above reach. It is a candidate because of what the served
+        # profile looks like: "services":{} rather than
+        # "services":{"dev.ucp.shopping":[]}. An ACTIVE channel with no matching
+        # endpoints produces the latter — CapabilityFilteringProfileContributor
+        # always writes the 'dev.ucp.shopping' key on the active path and only
+        # replaces the whole map with [] when !$config->active. So the response
+        # being served was built while the config still said inactive, on a lane
+        # where both channel and global scope now say active=true, and the
+        # plugin ships a ProfileCacheHeadersListener that makes the profile
+        # cacheable.
+        bin/console cache:clear:http --no-ansi || true
 
         # Restart the web server, which is the step everything above was missing.
         #
@@ -885,7 +897,11 @@ runs:
             print("  ", attributes.get("url"), "->", attributes.get("salesChannelId"))
         PY
 
-        curl -sS --max-time 15 "${APP_URL}/.well-known/ucp" -o served-profile.json || true
+        # Cache-Control: no-cache so this reads what the application produces
+        # rather than what a proxy or the HTTP cache kept. A verification served
+        # from the same cache it is meant to detect is worth nothing.
+        curl -sS --max-time 15 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+          "${APP_URL}/.well-known/ucp" -o served-profile.json || true
         python3 <<'PY'
         import json, os, pathlib
 
