@@ -467,9 +467,23 @@ jobs:
             # Six runs reported "(nothing matched)" from a directory that was
             # never going to contain it.
             hits=""
+            # An INVENTORY of what exists, separate from the grep. Two runs
+            # reported only symfony-cli access lines and no application log line
+            # at all, and with a filtered view there is no way to tell "the
+            # exception was not logged" from "the file holding it was not
+            # searched". This records which directories were searched, how many
+            # files each held, and the newest file in each — the facts needed to
+            # tell those two apart.
+            inventory=""
             swlog=$(find shopware/var -maxdepth 2 -type d -name log 2>/dev/null | head -1)
-            for dir in "${swlog}" "$HOME/.config/symfony-cli/log"; do
-              if [ -z "${dir}" ] || [ ! -d "${dir}" ]; then continue; fi
+            for dir in "${swlog}" "$HOME/.config/symfony-cli/log" shopware/var/log; do
+              if [ -z "${dir}" ] || [ ! -d "${dir}" ]; then
+                inventory="${inventory}[${dir:-unset}: absent] "
+                continue
+              fi
+              count=$(find "${dir}" -type f -name '*.log' 2>/dev/null | wc -l | tr -d ' ')
+              newest=$(find "${dir}" -type f -name '*.log' -exec ls -1t {} + 2>/dev/null | head -1)
+              inventory="${inventory}[${dir}: ${count} files, newest=$(basename "${newest:-none}")] "
               echo "=== ${dir}"
               ls -la "${dir}" 2>/dev/null || true
               # Match on SEVERITY and on the listener's own message, not on the
@@ -515,10 +529,16 @@ jobs:
             # message: newlines would truncate it at the first one.
             rest_body=$(printf '%s' "${rest_out}" | tr '\n' ' ' | tr -s ' ' | cut -c1-500)
             # Prefer the listener's own line, which names the exception class and
-            # message, over whatever happens to be last in the file.
+            # message, over whatever happens to be last in the file. Failing
+            # that, prefer ANY line mentioning an exception or a PHP fatal over
+            # the access log, which is what the fallback kept returning.
             log_tail=$(printf '%s' "${hits}" | grep -i 'Unhandled exception' | head -1 | tr -s ' ' | cut -c1-900)
             if [ -z "${log_tail}" ]; then
-              log_tail=$(printf '%s' "${hits}" | tail -3 | tr '\n' ' ' | tr -s ' ' | cut -c1-500)
+              log_tail=$(printf '%s' "${hits}" | grep -iE 'exception|fatal|stack trace|\.php:[0-9]' \
+                | grep -v '"source":"server"' | head -2 | tr '\n' ' ' | tr -s ' ' | cut -c1-900)
+            fi
+            if [ -z "${log_tail}" ]; then
+              log_tail="no application log line found — searched ${inventory}"
             fi
             echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AREST body: ${rest_body:-(empty)}%0AShopware log: ${log_tail:-(nothing matched)}%0AAddresses: runner=${APP_URL} profile=${profile_uri:-unknown}${server_app_url:+ server-APP_URL=${server_app_url}}"
           fi
