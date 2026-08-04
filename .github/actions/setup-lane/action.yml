@@ -733,6 +733,27 @@ runs:
         bin/console cache:clear:delayed --no-ansi
         bin/console cache:pool:clear cache.object --no-ansi
 
+        # Restart the web server, which is the step everything above was missing.
+        #
+        # The server is started earlier in this action, right after a
+        # `cache:warmup` — so its PHP-FPM workers warmed the UCP config while it
+        # still held the defaults (active=false, transports=[rest]), and every
+        # write in this step lands in the database AFTER that. Clearing caches
+        # from the CLI does not reach workers that already hold the value.
+        #
+        # This is what reconciles readings that looked contradictory for six
+        # runs: `system:config:get` said active=true because it reads the
+        # database, while the served profile stayed
+        # {"services":{},"capabilities":{}} because the workers answered from
+        # what they cached at warmup. The signing key showed up in that same
+        # profile precisely because keys are read per request rather than warmed,
+        # which is the detail that gives the mechanism away.
+        symfony server:stop 2>/dev/null || true
+        SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
+          symfony server:start
+        bash "$GITHUB_WORKSPACE/functional/ci/wait_for_http.sh" \
+          http://localhost:8000/api/_info/version 60 2
+
         # The stored value, read back key by key. This is here because the first
         # version of this step reported active=False / [rest] on CI while the
         # identical commands demonstrably worked on a local lane — and with only
