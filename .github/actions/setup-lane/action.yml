@@ -461,6 +461,15 @@ runs:
         # Restart the daemonized symfony web server so PHP-FPM workers reload
         # the freshly compiled container (otherwise opcache serves stale bytecode).
         symfony server:stop 2>/dev/null || true
+        # The UCP dev-mode flag is passed into the server's OWN environment, not
+        # left to .env.local. A real environment variable beats dotenv, and the
+        # daemonized server snapshots its environment when it starts — so the flag
+        # being in .env.local (where `debug:dotenv` and the assertion below both
+        # find it) does not put it in the process that serves UCP requests. That
+        # gap is why the lane kept answering "Plain http is only allowed when
+        # profile fetching development mode is enabled" in both prod and dev while
+        # every file-level check passed.
+        SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1 \
         SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
           symfony server:start
 
@@ -872,6 +881,15 @@ runs:
         # profile precisely because keys are read per request rather than warmed,
         # which is the detail that gives the mechanism away.
         symfony server:stop 2>/dev/null || true
+        # The UCP dev-mode flag is passed into the server's OWN environment, not
+        # left to .env.local. A real environment variable beats dotenv, and the
+        # daemonized server snapshots its environment when it starts — so the flag
+        # being in .env.local (where `debug:dotenv` and the assertion below both
+        # find it) does not put it in the process that serves UCP requests. That
+        # gap is why the lane kept answering "Plain http is only allowed when
+        # profile fetching development mode is enabled" in both prod and dev while
+        # every file-level check passed.
+        SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1 \
         SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
           symfony server:start
         bash "$GITHUB_WORKSPACE/functional/ci/wait_for_http.sh" \
@@ -980,15 +998,29 @@ runs:
         # Removed immediately after. A file under public/ is reachable by
         # anyone who can reach the lane, and this one exists for exactly one
         # request.
+        # Also reports the UCP dev-mode flag AS THE WEB PROCESS SEES IT, which is
+        # the reading that matters and the one nothing has checked. `bin/console
+        # debug:dotenv` shows the variable loaded, and the assertion further down
+        # greps .env.local and passes — yet UCP still answers "Plain http is only
+        # allowed when profile fetching development mode is enabled", which can
+        # only happen if the process serving the request does not have it. CLI and
+        # web are separate processes with separate environments here: the server is
+        # daemonized by symfony-cli, which snapshots the environment when it
+        # starts.
         cat > public/_scheme_probe.php <<'PHP'
         <?php
         header('Content-Type: application/json');
+        $flag = 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE';
         echo json_encode([
             'REQUEST_SCHEME' => $_SERVER['REQUEST_SCHEME'] ?? null,
             'HTTPS' => $_SERVER['HTTPS'] ?? null,
             'X-Forwarded-Proto' => $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null,
             'HTTP_HOST' => $_SERVER['HTTP_HOST'] ?? null,
             'SERVER_PORT' => $_SERVER['SERVER_PORT'] ?? null,
+            'APP_ENV' => $_SERVER['APP_ENV'] ?? ($_ENV['APP_ENV'] ?? getenv('APP_ENV') ?: null),
+            'devmode_getenv' => getenv($flag) === false ? 'UNSET' : getenv($flag),
+            'devmode_SERVER' => $_SERVER[$flag] ?? 'UNSET',
+            'devmode_ENV' => $_ENV[$flag] ?? 'UNSET',
         ]);
         PHP
         SCHEME_VIEW=$(curl -sS --max-time 10 "${APP_URL}/_scheme_probe.php" 2>&1 | tr '\n' ' ' | tr -s ' ' | cut -c1-300)
@@ -1084,12 +1116,19 @@ runs:
             )
         PY
 
-        # The dev-mode flag is the one gate that is not sales-channel config,
-        # so assert it rather than trusting the earlier step wrote it.
+        # The dev-mode flag, asserted in the file AND at runtime. The file check
+        # alone was worthless: it passed on every run while UCP kept refusing
+        # plain http, because the flag being in .env.local says nothing about the
+        # daemonized server process having it. The probe above reports what the
+        # web process actually sees; this reports what the CLI sees.
         grep -q 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' .env.local || {
           echo "::error::UCP profile-fetching dev mode is not set in .env.local, so plain-http profile URIs will be refused."
           exit 1
         }
+        echo "Dev-mode flag as the CLI resolves it:"
+        bin/console debug:dotenv --no-ansi 2>/dev/null \
+          | grep 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE' \
+          | tr -s ' ' || echo "  (not reported by debug:dotenv)"
 
     # The Store catalogue has never been snapshotted, so everything that
     # derives from one had to be guessed for it: toolclass could not read
