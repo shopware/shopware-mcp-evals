@@ -664,11 +664,25 @@ runs:
         bin/console system:config:set --json --salesChannelId="${SC_ID}" \
           SwagAgenticCommerce.config.enabledTransports '["rest","a2a","embedded","mcp"]'
 
-        # Reads are cached, and this cost an afternoon: after both writes had
-        # already landed in system_config, `ucp:config:show` still reported the
-        # old `enabledTransports: [rest]`, which reads exactly like a write that
-        # failed. Clear before verifying, or the verification lies.
-        bin/console cache:clear --no-warmup
+        # Reads are cached, and `cache:clear` is NOT what fixes it — measured, on
+        # CI, with the annotation below: the writes had landed
+        # (system:config:get reported active=true and all four transports) while
+        # ucp:config:show still reported active=False and [rest], AFTER a
+        # cache:clear --no-warmup.
+        #
+        # `SystemConfigService::set()` registers a *delayed* cache invalidation.
+        # Something has to deliver it, and on a CI lane with no message consumer
+        # running, nothing does — the stale value simply stays. `cache:clear`
+        # empties the application cache directory and never touches that queue,
+        # which is why it looked like the writes were the problem for two runs.
+        # `cache:clear:delayed` reported "Invalidated 4 delayed cache tags" on a
+        # lane that was sitting idle, so this is not hypothetical.
+        #
+        # Both, in this order: flush the pending invalidations, then clear the
+        # pool the config is actually served from. Together they cost under a
+        # second.
+        bin/console cache:clear:delayed --no-ansi
+        bin/console cache:pool:clear cache.object --no-ansi
 
         # The stored value, read back key by key. This is here because the first
         # version of this step reported active=False / [rest] on CI while the
