@@ -558,8 +558,23 @@ jobs:
           # was continue-on-error already, so its exit code changed nothing except
           # to post a red annotation on a green job. The report JSON in
           # static-results carries every assertion either way.
-          python -m functional.runner --endpoint store --allow-mutations \
-            || echo "::warning::Store API functional tests reported failures; see the log above and functional-store-*.json in static-results."
+          # Output captured with tee so the FAIL lines can go in the annotation as
+          # well as the log. "see the log above" is not a usable pointer here: one
+          # ANSI-coloured line anywhere in the job makes the whole log
+          # unretrievable through the API, so on a passing job the failing check
+          # names were readable in the web UI and nowhere else.
+          #
+          # PIPESTATUS, not $?: with `cmd | tee` the exit status is tee's, which is
+          # always 0, so the `||` branch would never fire.
+          set -o pipefail
+          python -m functional.runner --endpoint store --allow-mutations 2>&1 | tee /tmp/functional-store.log
+          rc=${PIPESTATUS[0]}
+          set +o pipefail
+          if [ "${rc}" -ne 0 ]; then
+            fails=$(grep -E '^\s*FAIL ' /tmp/functional-store.log | head -8 | tr '\n' '~' | sed 's/~/%0A/g' | cut -c1-1200)
+            counts=$(grep -E 'Results: ' /tmp/functional-store.log | tail -1 | tr -s ' ')
+            echo "::warning::Store API functional tests reported failures. ${counts}%0A${fails:-(no FAIL lines captured)}"
+          fi
 
       - name: Detect snapshot changes worth committing
         id: snapshot
