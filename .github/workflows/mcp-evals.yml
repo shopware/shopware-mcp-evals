@@ -452,22 +452,38 @@ jobs:
             echo "${rest_out}" | head -c 800
             echo
 
-            echo "--- shopware logs ---"
+            echo "--- logs ---"
+            # BOTH log locations, and the second one is the point. The SDK's
+            # ExceptionListener does log this exception — `debug:container` shows
+            # its logger argument wired to Service(monolog.logger), and the
+            # fallback branch calls
+            # $this->logger?->error('Unhandled exception while processing a UCP
+            # request.', ['exception' => $throwable]). So "the plugin logs
+            # nothing" was wrong: this block was reading the wrong file.
+            #
+            # Under `symfony server:start` the server's output goes to
+            # $HOME/.config/symfony-cli/log, not shopware/var/log — which is why
+            # .github/actions/dump-logs tails that directory and this did not.
+            # Six runs reported "(nothing matched)" from a directory that was
+            # never going to contain it.
             hits=""
-            logdir=$(find shopware/var -maxdepth 2 -type d -name log 2>/dev/null | head -1)
-            if [ -n "${logdir}" ]; then
-              ls -la "${logdir}"
-              # Match on SEVERITY, not on the message mentioning UCP. The previous
-              # pattern only caught the profile-fetch exception because its message
-              # happens to contain the profile URL — an exception from inside a
-              # capability (a DAL error, say) mentions no UCP at all and was
-              # invisible. Verified against both shapes.
-              hits=$(grep -hiE 'app\.(ERROR|CRITICAL)|request\.CRITICAL|Unhandled|ucp' "${logdir}"/*.log 2>/dev/null | tail -n 20 || true)
-              # `grep | tail` exits 0 on empty input, so `|| echo` never fires.
-              if [ -n "${hits}" ]; then echo "${hits}"; else echo "  (nothing matched)"; fi
-            else
-              echo "  no log directory under shopware/var — the plugin logs nothing for this path"
-            fi
+            swlog=$(find shopware/var -maxdepth 2 -type d -name log 2>/dev/null | head -1)
+            for dir in "${swlog}" "$HOME/.config/symfony-cli/log"; do
+              if [ -z "${dir}" ] || [ ! -d "${dir}" ]; then continue; fi
+              echo "=== ${dir}"
+              ls -la "${dir}" 2>/dev/null || true
+              # Match on SEVERITY and on the listener's own message, not on the
+              # text mentioning UCP: an exception thrown inside a capability (a
+              # DAL error, say) mentions no UCP at all and was invisible.
+              found=$(grep -rhiE 'Unhandled exception|app\.(ERROR|CRITICAL)|request\.CRITICAL|ucp' \
+                "${dir}" 2>/dev/null | tail -n 20 || true)
+              if [ -n "${found}" ]; then
+                echo "${found}"
+                hits="${hits}${found}"$'\n'
+              fi
+            done
+            # `grep | tail` exits 0 on empty input, so `|| echo` never fires.
+            if [ -z "${hits}" ]; then echo "  (nothing matched in either location)"; fi
             # ::warning::, not ::error::. The store suite being skipped is the
             # designed outcome of a plugin that cannot execute, and it does not
             # gate anything. An error annotation here is indistinguishable from
@@ -498,7 +514,12 @@ jobs:
             # Flattened to one line and capped, because an annotation is one
             # message: newlines would truncate it at the first one.
             rest_body=$(printf '%s' "${rest_out}" | tr '\n' ' ' | tr -s ' ' | cut -c1-500)
-            log_tail=$(printf '%s' "${hits}" | tail -3 | tr '\n' ' ' | tr -s ' ' | cut -c1-500)
+            # Prefer the listener's own line, which names the exception class and
+            # message, over whatever happens to be last in the file.
+            log_tail=$(printf '%s' "${hits}" | grep -i 'Unhandled exception' | head -1 | tr -s ' ' | cut -c1-900)
+            if [ -z "${log_tail}" ]; then
+              log_tail=$(printf '%s' "${hits}" | tail -3 | tr '\n' ' ' | tr -s ' ' | cut -c1-500)
+            fi
             echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AREST body: ${rest_body:-(empty)}%0AShopware log: ${log_tail:-(nothing matched)}%0AAddresses: runner=${APP_URL} profile=${profile_uri:-unknown}${server_app_url:+ server-APP_URL=${server_app_url}}"
           fi
 
