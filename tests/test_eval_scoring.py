@@ -115,12 +115,37 @@ def test_score_of_nothing_is_empty_not_an_error() -> None:
 def test_tokens_sum_across_results() -> None:
     results = [r("a", tokens={"input": 10, "output": 2}), r("b", tokens={"input": 5, "output": 1})]
 
-    assert S.total_tokens(results) == {"input": 15, "output": 3}
+    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 0}
 
 
 def test_tokens_tolerate_a_result_that_never_reached_the_model() -> None:
     """An errored fixture has no token record at all."""
-    assert S.total_tokens([r("a"), r("b", tokens=None)]) == {"input": 0, "output": 0}
+    assert S.total_tokens([r("a"), r("b", tokens=None)]) == {"input": 0, "output": 0, "cached_input": 0}
+
+
+def test_cached_input_is_summed_and_not_dropped() -> None:
+    """The regression this exists for: the aggregate used to sum `input` and
+    `output` only, so every cached token vanished from the report JSON while
+    eval/cost.py went on pricing them — the token table and the dollar figure
+    disagreed with nothing on screen to explain it."""
+    results = [
+        r("a", tokens={"input": 10, "output": 2, "cached_input": 100}),
+        r("b", tokens={"input": 5, "output": 1, "cached_input": 50}),
+    ]
+
+    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 150}
+
+
+def test_cached_input_defaults_when_a_producer_omits_it() -> None:
+    """`cached_input` is not Required on TokenCounts, and deliberately so: a
+    provider reporting no cache, or an older report, simply has no such key. A
+    mixed batch has to add up rather than raise."""
+    results = [
+        r("a", tokens={"input": 10, "output": 2}),
+        r("b", tokens={"input": 5, "output": 1, "cached_input": 7}),
+    ]
+
+    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 7}
 
 
 # ---------------------------------------------------------------------------

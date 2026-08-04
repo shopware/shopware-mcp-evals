@@ -368,10 +368,16 @@ runs:
         if [ "${STORE_PLUGIN_OK}" = "true" ]; then
           SDK_VERSION=$(composer show ucp-php-sdk/core --no-interaction 2>/dev/null \
             | sed -n 's/^versions *: *\**//p' | head -1)
+          # The success message says what the pin RULES OUT, not what it proves.
+          # It used to read "a store failure reported as `internal` is therefore
+          # NOT the profile fetch", which overreached: APP_ENV=test produced
+          # `internal` too, from StaticAgentProfileFetcher, and that inference
+          # invited exactly the wrong conclusion for several runs. The pin
+          # eliminates one cause out of several that share the symptom.
           if [ -f vendor/ucp-php-sdk/core/src/Exception/AgentProfileException.php ]; then
-            echo "::warning::ucp-php-sdk PIN TOOK: AgentProfileException present, version ${SDK_VERSION:-unknown}. A store failure reported as \`internal\` is therefore NOT the profile fetch."
+            echo "::warning::ucp-php-sdk PIN TOOK: AgentProfileException present, version ${SDK_VERSION:-unknown}. A profile-fetch failure will now be typed rather than flattened — but \`internal\` has other causes (APP_ENV=test wires a profile-fetcher test double), so this rules one out, it does not identify the fault."
           else
-            echo "::warning::ucp-php-sdk PIN DID NOT TAKE: no AgentProfileException, version ${SDK_VERSION:-unknown}. The released SDK is installed, so the store diagnosis will still report a bare \`internal\`."
+            echo "::warning::ucp-php-sdk PIN DID NOT TAKE: no AgentProfileException, version ${SDK_VERSION:-unknown}. The released SDK is installed, so a profile-fetch failure will report a bare \`internal\` with no type."
           fi
         fi
 

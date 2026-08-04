@@ -583,9 +583,30 @@ jobs:
           python -m functional.runner --endpoint store --allow-mutations \
             > /tmp/functional-store.log 2>&1 || rc=$?
           cat /tmp/functional-store.log
+
+          # ANSI stripped before matching. functional/reporting.py gates colour on
+          # `sys.stdout.isatty()`, so a redirect already yields plain text and the
+          # patterns below work — but they anchor on `^\s*FAIL`, which a single
+          # escape sequence would silently defeat, turning every annotation into
+          # "(none captured)" with nothing to say why. Cheap insurance, and it
+          # documents that the greps depend on that gating.
+          plain=$(sed $'s/\033\\[[0-9;]*m//g' /tmp/functional-store.log)
+          counts=$(printf '%s\n' "${plain}" | grep -E 'Results: ' | tail -1 | tr -s ' ')
+
+          # The tally and the SKIPs go out on EVERY run, as a notice, not only when
+          # something fails. A green run with a skipped check reported nothing at
+          # all before this, so "20 passed, 2 failed, 1 skipped" left the identity
+          # of that skip unknowable without opening the run — and a skip that
+          # nobody can see is indistinguishable from coverage. This is what makes
+          # the standing "is media-upload passing or skipping?" question answerable
+          # from the annotation alone.
+          skips=$(printf '%s\n' "${plain}" | grep -E '^\s*SKIP ' | head -8 \
+            | tr '\n' '~' | sed 's/~/%0A/g' | cut -c1-900)
+          echo "::notice::Store API functional tests. ${counts:-(no tally line)}%0A${skips:-No skipped checks.}"
+
           if [ "${rc}" -ne 0 ]; then
-            fails=$(grep -E '^\s*FAIL ' /tmp/functional-store.log | head -8 | tr '\n' '~' | sed 's/~/%0A/g' | cut -c1-1200)
-            counts=$(grep -E 'Results: ' /tmp/functional-store.log | tail -1 | tr -s ' ')
+            fails=$(printf '%s\n' "${plain}" | grep -E '^\s*FAIL ' | head -8 \
+              | tr '\n' '~' | sed 's/~/%0A/g' | cut -c1-1200)
             echo "::warning::Store API functional tests reported failures. ${counts}%0A${fails:-(no FAIL lines captured)}"
           fi
 
