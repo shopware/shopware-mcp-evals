@@ -169,8 +169,29 @@ runs:
     # log-seeding step defaulted to test. Each was treated as a quirk to work
     # around rather than as the lane running in the wrong environment.
     #
-    # prod is also what the suite is supposed to measure — a shop as a shopper's
-    # agent meets it, not a test harness.
+    # dev rather than prod, and the choice is load-bearing in three ways.
+    # TestAgentProfileFetcherCompilerPass gates the double on the environment
+    # being exactly 'test' — its own docblock says "a no-op outside the `test`
+    # environment, so deployed dev/prod keep the real fetcher" — so dev is enough
+    # to get the real HTTP fetcher back. Beyond that:
+    #
+    #   * `shopware.media.enable_url_validation` is false in dev/test/e2e and
+    #     true in the default config. Under prod the media-upload probe failed
+    #     with 'Provided URL "http://localhost:8000/mcp-evals-probe.png" is not
+    #     allowed' — a localhost URL cannot pass a validator meant for public
+    #     ones, so prod would need a config override to keep that fixture.
+    #   * dev writes var/log/dev-<date>.log. Under prod nothing was written at
+    #     all, which is what made the swallowed exception unreachable for eight
+    #     runs and forced a patch to the SDK to see it.
+    #   * prod additionally hides .env.local behind a dumped .env.local.php,
+    #     which is the likeliest reason the UCP profile-fetching dev-mode flag
+    #     had no effect there ("Plain http is only allowed when profile fetching
+    #     development mode is enabled") despite being present in .env.local.
+    #
+    # Worth being straight about the trade: prod is the more faithful thing to
+    # measure, and dev is chosen here because the lane serves itself over plain
+    # http on localhost — which prod is right to refuse. If this suite ever needs
+    # to measure prod, it needs a publicly-resolvable lane, not a config override.
     - name: Setup Shopware
       uses: shopware/setup-shopware@main
       with:
@@ -179,7 +200,7 @@ runs:
         shopware-github-token: ${{ inputs.github_token }}
         path: shopware
         install: true
-        env: prod
+        env: dev
         php-version: '8.3'
 
     # SwagMcpDevTools and SwagMcpMerchantTools track their repo DEFAULT branch:
@@ -382,6 +403,17 @@ runs:
           # loopback by RFC 6761 but the SDK's isLocalHost() matches the bare
           # name only, and no config setting can reach past that check.
           echo 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' >> .env.local
+        fi
+
+        # A dumped .env.local.php SHADOWS .env.local entirely — Symfony reads the
+        # snapshot and never looks at the file. If one was written at install
+        # time, every variable appended above is invisible, which is the likeliest
+        # reason the dev-mode flag had no effect under prod even though the
+        # assertion further down found it in .env.local. Removing it costs
+        # nothing on a throwaway lane and closes a trap that is silent by design.
+        if [ -f .env.local.php ]; then
+          echo "Removing .env.local.php: it would shadow the variables appended to .env.local."
+          rm -f .env.local.php
         fi
 
         # Turn the MCP rate limiter off on this throwaway instance.
