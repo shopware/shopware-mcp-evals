@@ -670,6 +670,20 @@ runs:
         # failed. Clear before verifying, or the verification lies.
         bin/console cache:clear --no-warmup
 
+        # The stored value, read back key by key. This is here because the first
+        # version of this step reported active=False / [rest] on CI while the
+        # identical commands demonstrably worked on a local lane — and with only
+        # the profile-level view below to go on, there was no way to tell a write
+        # that silently no-opped from a read that was stale. `system:config:get`
+        # answers that directly, so the next failure is diagnosable from the log
+        # instead of by another round of guessing.
+        echo "Stored config after the writes:"
+        bin/console system:config:get SwagAgenticCommerce.config.active \
+          --salesChannelId="${SC_ID}" || true
+        bin/console system:config:get SwagAgenticCommerce.config.enabledTransports \
+          --salesChannelId="${SC_ID}" || true
+        bin/console ucp:config:validate --sales-channel="${SC_ID}" || true
+
         # Verify from the config the application actually reads, not from the
         # exit status of the writes above, which is 0 either way.
         bin/console ucp:config:show --sales-channel="${SC_ID}" > ucp-config.json || true
@@ -685,11 +699,16 @@ runs:
         active = config.get("active")
         print(f"UCP active={active} enabledTransports={transports} "
               f"enabledCapabilities={config.get('enabledCapabilities') or []}")
+        # A warning, NOT a failure, and the distinction is the whole point: this
+        # action sets up every lane, and the first version exited 1 here, which
+        # took down the Admin eval — a suite that does not touch UCP and was
+        # green. The Store preflight is the gate that owns this; it already
+        # reports the failure and skips the Store suite. All this has to do is
+        # name the cause, because the preflight cannot see it.
         if not active or "mcp" not in transports:
-            print(f"::error::UCP is not exposed over MCP on sales channel {sys.argv[1]} "
-                  f"(active={active}, enabledTransports={transports}). Every Store "
-                  f"fixture would fail with a generic tool error.")
-            raise SystemExit(1)
+            print(f"::warning::UCP is not exposed over MCP on sales channel {sys.argv[1]} "
+                  f"(active={active}, enabledTransports={transports}). The Store suite "
+                  f"will fail its preflight; the Admin suite is unaffected.")
         PY
 
         # The dev-mode flag is the one gate that is not sales-channel config,
