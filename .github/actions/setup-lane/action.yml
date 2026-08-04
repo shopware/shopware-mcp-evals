@@ -726,20 +726,29 @@ runs:
         # green. The Store preflight is the gate that owns this; it already
         # reports the failure and skips the Store suite. All this has to do is
         # name the cause, because the preflight cannot see it.
-        if not active or "mcp" not in transports:
-            # Both readings, in one annotation, because the point is the
-            # comparison. Stored disagreeing with effective means the read is
-            # cached; stored agreeing means the write never landed. Reported
-            # through an annotation rather than the log, which is not
-            # retrievable through the API for a job that passes — and this step
-            # only warns, so it always passes.
+        # The verdict comes from `system:config:get`, NOT from the numbers above,
+        # and the difference is not academic. `ucp:config:show --sales-channel=<id>`
+        # reported active=False / [rest] on CI for three runs while
+        # `system:config:get` on the same channel reported active=true and all
+        # four transports. Those values are byte-identical to what
+        # `ucp:config:show` prints with NO --sales-channel at all — it falls back
+        # to global scope rather than erroring, so on CI's plugin version the
+        # argument is being ignored. Trusting it produced three runs of
+        # "UCP is not exposed", which was false, and sent the search in the wrong
+        # direction each time.
+        stored_active = os.environ.get("STORED_ACTIVE", "")
+        stored_transports = os.environ.get("STORED_TRANSPORTS", "")
+        exposed = "=> true" in stored_active and "=> mcp" in stored_transports
+        print(f"UCP exposed over MCP (per system:config:get): {exposed}")
+        if not exposed:
             print(
                 f"::warning::UCP is not exposed over MCP on sales channel {sys.argv[1]}. "
-                f"Effective (ucp:config:show): active={active}, enabledTransports={transports}.%0A"
-                f"Stored (system:config:get): active=[{os.environ.get('STORED_ACTIVE', '')}] "
-                f"transports=[{os.environ.get('STORED_TRANSPORTS', '')}].%0A"
-                f"If stored and effective disagree the read is cached; if they agree the write "
-                f"did not land. The Store suite will fail its preflight; Admin is unaffected."
+                f"Stored (system:config:get, authoritative): active=[{stored_active}] "
+                f"transports=[{stored_transports}].%0A"
+                f"For context, ucp:config:show reported active={active}, "
+                f"enabledTransports={transports} — which on this plugin version may be "
+                f"global scope rather than this channel.%0A"
+                f"The Store suite will fail its preflight; Admin is unaffected."
             )
         PY
 

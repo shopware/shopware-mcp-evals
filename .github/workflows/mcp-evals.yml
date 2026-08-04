@@ -453,6 +453,7 @@ jobs:
             echo
 
             echo "--- shopware logs ---"
+            hits=""
             logdir=$(find shopware/var -maxdepth 2 -type d -name log 2>/dev/null | head -1)
             if [ -n "${logdir}" ]; then
               ls -la "${logdir}"
@@ -484,7 +485,21 @@ jobs:
             err=$(sed -n 's/^  error: //p' /tmp/preflight.log | head -1)
             rest_status=$(printf '%s' "${rest_out}" | tail -1)
             rest_code=$(printf '%s' "${rest_out}" | sed -n 's/.*"code":"\([a-z_]*\)".*/\1/p' | head -1)
-            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AAddresses: runner=${APP_URL} profile=${profile_uri:-unknown}${server_app_url:+ server-APP_URL=${server_app_url}}%0AFull diagnosis in the Static checks log."
+            # The REST BODY, not just its status line. Three runs reported
+            # "Same call over REST: HTTP 500" and stopped there, which says only
+            # that something threw — the body is where the exception message is,
+            # and it was being captured into ${rest_out}, printed to stdout, and
+            # then dropped from the annotation. That mattered because the log it
+            # was left in turned out to be unreadable: one ANSI-coloured line
+            # anywhere in a job makes the whole log unretrievable through the
+            # REST API ("the response contains terminal escape sequences"), so
+            # "full diagnosis in the log" was not a fallback at all.
+            #
+            # Flattened to one line and capped, because an annotation is one
+            # message: newlines would truncate it at the first one.
+            rest_body=$(printf '%s' "${rest_out}" | tr '\n' ' ' | tr -s ' ' | cut -c1-500)
+            log_tail=$(printf '%s' "${hits}" | tail -3 | tr '\n' ' ' | tr -s ' ' | cut -c1-500)
+            echo "::warning::Store preflight failed - UCP tools cannot execute, so the store suite is skipped.%0AMCP said: ${err:-(no error line)}%0ASame call over REST: ${rest_status:-(no response)} ${rest_code:+code=${rest_code}}%0AREST body: ${rest_body:-(empty)}%0AShopware log: ${log_tail:-(nothing matched)}%0AAddresses: runner=${APP_URL} profile=${profile_uri:-unknown}${server_app_url:+ server-APP_URL=${server_app_url}}"
           fi
 
       - name: Run Store API functional tests
