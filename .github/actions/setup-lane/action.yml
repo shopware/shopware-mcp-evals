@@ -679,34 +679,48 @@ runs:
         CAPABILITIES='["catalog","cart","discount","checkout","order"]'
         TRANSPORTS='["rest","a2a","embedded","mcp"]'
 
-        bin/console system:config:set --json --salesChannelId="${SC_ID}" \
-          SwagAgenticCommerce.config.active true
-        bin/console system:config:set --json --salesChannelId="${SC_ID}" \
-          SwagAgenticCommerce.config.enabledTransports "${TRANSPORTS}"
-        bin/console system:config:set --json --salesChannelId="${SC_ID}" \
-          SwagAgenticCommerce.config.enabledCapabilities "${CAPABILITIES}"
+        # Written through the ADMIN API, because system_config is not where a
+        # sales-channel-scoped UCP config lives. UcpConfigService::getConfig():
+        #
+        #   $config = $this->repository->find($salesChannelId);
+        #   if (null !== $config) { return $config; }   // <- returns HERE
+        #   // system_config is only reached as a legacy fallback, and when it is
+        #   // used the values are migrated INTO the repository
+        #
+        # A fresh install writes a repository row holding the defaults, so
+        # find() returns non-null and every `system:config:set` this step used to
+        # make was read by nothing. It wrote real rows — `system:config:get` read
+        # them straight back, which is exactly why they looked like they had
+        # worked — into a table the plugin never consults for this scope. That
+        # single fact accounts for the whole run of contradictory readings:
+        # verification agreed with the writes because both used system_config,
+        # while the server answered from the repository.
+        #
+        # The lane the suite passes on works because it PREDATES that table: its
+        # legacy system_config rows hit the fallback above and were migrated in
+        # on first read. That is why copying its config was never going to be
+        # enough — the copy has to go through the service, not around it.
+        #
+        # PUT is a partial merge (see saveConfig's docblock), so this sets the
+        # Exposure subset the Administration owns and leaves signature policy,
+        # allowlists and signing keys to the ucp:config:set call above.
+        UCP_CONFIG_URL="${APP_URL}/api/_admin/ucp/sales-channels/${SC_ID}/config"
+        ucp_put=$(curl -sS -X PUT "${UCP_CONFIG_URL}" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H 'Content-Type: application/json' \
+          -d "{\"active\":true,\"enabledTransports\":${TRANSPORTS},\"enabledCapabilities\":${CAPABILITIES}}" \
+          -w '\nHTTP %{http_code}' --max-time 20 2>&1 || true)
+        echo "PUT ${UCP_CONFIG_URL}"
+        printf '%s\n' "${ucp_put}" | head -c 600
+        case "${ucp_put}" in
+          *"HTTP 200"*) : ;;
+          *) echo "::warning::Writing the UCP config through the admin API did not return 200. UCP exposure will not take effect, because a sales-channel-scoped config is read from the plugin's own table and not from system_config.%0A${ucp_put}" ;;
+        esac
 
-        # And the SAME three at GLOBAL scope, which is the fix the channel-scoped
-        # writes above were missing.
-        #
-        # The evidence: CI's served profile is
-        # {"services":{},"capabilities":{},"payment_handlers":{}} with signing
-        # keys present — so the profile route runs, finds a key, and advertises
-        # nothing. An inactive scope advertises nothing regardless of what
-        # enabledCapabilities holds. And `active: false` with
-        # enabledTransports: ["rest"] is byte-for-byte what `ucp:config:show`
-        # prints with NO --sales-channel at all, i.e. at global scope, while the
-        # channel scope has held active=true since the first commit in this
-        # series. /.well-known/ucp carries no sw-access-key, so it does not
-        # resolve a sales channel the way a Store-API call does — it reads the
-        # scope we never wrote.
-        #
-        # enabledCapabilities is set explicitly at both scopes rather than left
-        # to its default. The default IS all five, verified with
-        # `system:config:get` on a lane that serves a populated profile — but
-        # "verified to default correctly" is what was said about active and
-        # transports too, and an explicit write costs one line and removes the
-        # question.
+        # Global scope only. Here system_config IS the backing store —
+        # getConfig(null) reads the legacy payload directly — so these are not
+        # redundant with the PUT above, they cover the case where the profile
+        # request resolves no sales channel at all.
         bin/console system:config:set --json SwagAgenticCommerce.config.active true
         bin/console system:config:set --json \
           SwagAgenticCommerce.config.enabledTransports "${TRANSPORTS}"
@@ -808,28 +822,33 @@ runs:
         # green. The Store preflight is the gate that owns this; it already
         # reports the failure and skips the Store suite. All this has to do is
         # name the cause, because the preflight cannot see it.
-        # The verdict comes from `system:config:get`, NOT from the numbers above,
-        # and the difference is not academic. `ucp:config:show --sales-channel=<id>`
-        # reported active=False / [rest] on CI for three runs while
-        # `system:config:get` on the same channel reported active=true and all
-        # four transports. Those values are byte-identical to what
-        # `ucp:config:show` prints with NO --sales-channel at all — it falls back
-        # to global scope rather than erroring, so on CI's plugin version the
-        # argument is being ignored. Trusting it produced three runs of
-        # "UCP is not exposed", which was false, and sent the search in the wrong
-        # direction each time.
-        stored_active = os.environ.get("STORED_ACTIVE", "")
-        stored_transports = os.environ.get("STORED_TRANSPORTS", "")
-        exposed = "=> true" in stored_active and "=> mcp" in stored_transports
-        print(f"UCP exposed over MCP (per system:config:get): {exposed}")
+        # The verdict comes from `ucp:config:show`, which reads through
+        # UcpConfigService and therefore through the repository the application
+        # actually answers from.
+        #
+        # This was backwards for several runs, and the correction is worth
+        # recording. ucp:config:show reported active=False while
+        # `system:config:get` reported true, and that disagreement was read as
+        # ucp:config:show being broken — "it must be falling back to global
+        # scope". It was not: it was reporting the repository, which really did
+        # say false, while system:config:get reported a system_config row that
+        # nothing reads for this scope. The command that looked wrong was the
+        # only one telling the truth, and switching the verdict away from it
+        # turned a working detector into a rubber stamp.
+        #
+        # system:config:get is still printed above, as the global-scope reading
+        # and as the thing to compare against when these two disagree again.
+        exposed = bool(active) and "mcp" in transports
+        print(f"UCP exposed over MCP (per ucp:config:show): {exposed}")
         if not exposed:
             print(
                 f"::warning::UCP is not exposed over MCP on sales channel {sys.argv[1]}. "
-                f"Stored (system:config:get, authoritative): active=[{stored_active}] "
-                f"transports=[{stored_transports}].%0A"
-                f"For context, ucp:config:show reported active={active}, "
-                f"enabledTransports={transports} — which on this plugin version may be "
-                f"global scope rather than this channel.%0A"
+                f"Effective (ucp:config:show, reads the plugin's own config table): "
+                f"active={active}, enabledTransports={transports}.%0A"
+                f"For comparison, system_config holds active=[{os.environ.get('STORED_ACTIVE', '')}] "
+                f"transports=[{os.environ.get('STORED_TRANSPORTS', '')}] — which is the GLOBAL "
+                f"scope store, not this channel's, so the two disagreeing means the admin-API "
+                f"write did not land.%0A"
                 f"The Store suite will fail its preflight; Admin is unaffected."
             )
         PY
