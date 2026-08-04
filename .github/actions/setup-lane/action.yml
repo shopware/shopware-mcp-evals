@@ -634,6 +634,64 @@ runs:
           --agent-allowlist="${UCP_HOST}" \
           --platform-allowlist="${UCP_HOST}"
 
+        # Exposure and transports, which `ucp:config:set` cannot write — its
+        # --help lists sales-channel, signature-policy, idempotency, the three
+        # allowlists, embedded origins/frame-ancestors, webhook-url-override and
+        # continue-url-template, and nothing for either of these. The
+        # Administration writes them (Agentic Commerce > Exposure), so on a
+        # freshly installed lane nobody has, and CI's UCP profile came back
+        # advertising zero services and zero capabilities.
+        #
+        #   active            whether UCP answers on this channel at all.
+        #                     `ucp:config:validate` reports it as
+        #                     "[inactive] UCP is off on this sales channel".
+        #   enabledTransports which protocols are served. Defaults WITHOUT
+        #                     'mcp', which is the one this suite speaks.
+        #
+        # Capabilities are deliberately NOT set. `ucp:config:show` on a working
+        # lane reports enabledCapabilities already defaulting to all five
+        # (catalog, cart, discount, checkout, order) on every channel, exposed
+        # or not — so the empty `capabilities` in CI's advertised profile was a
+        # symptom of the channel being unexposed, not a separate thing to
+        # configure. Exposure and the transport are the whole difference.
+        #
+        # --json for both, and it is not cosmetic. Without it the value arrives
+        # as the string "true" / as two stray positional arguments, and
+        # `system:config:set` prints its usage line and exits 0 — a silent
+        # no-op. The verification below is what makes that visible.
+        bin/console system:config:set --json --salesChannelId="${SC_ID}" \
+          SwagAgenticCommerce.config.active true
+        bin/console system:config:set --json --salesChannelId="${SC_ID}" \
+          SwagAgenticCommerce.config.enabledTransports '["rest","a2a","embedded","mcp"]'
+
+        # Reads are cached, and this cost an afternoon: after both writes had
+        # already landed in system_config, `ucp:config:show` still reported the
+        # old `enabledTransports: [rest]`, which reads exactly like a write that
+        # failed. Clear before verifying, or the verification lies.
+        bin/console cache:clear --no-warmup
+
+        # Verify from the config the application actually reads, not from the
+        # exit status of the writes above, which is 0 either way.
+        bin/console ucp:config:show --sales-channel="${SC_ID}" > ucp-config.json || true
+        python3 - "$SC_ID" <<'PY'
+        import json, pathlib, sys
+
+        # `ucp:config:show` prints a "UCP config — <id>" heading and an underline
+        # before the JSON, so this decodes from the first brace rather than
+        # feeding the whole thing to json.loads.
+        text = pathlib.Path("ucp-config.json").read_text()
+        config, _ = json.JSONDecoder().raw_decode(text[text.index("{"):])
+        transports = config.get("enabledTransports") or []
+        active = config.get("active")
+        print(f"UCP active={active} enabledTransports={transports} "
+              f"enabledCapabilities={config.get('enabledCapabilities') or []}")
+        if not active or "mcp" not in transports:
+            print(f"::error::UCP is not exposed over MCP on sales channel {sys.argv[1]} "
+                  f"(active={active}, enabledTransports={transports}). Every Store "
+                  f"fixture would fail with a generic tool error.")
+            raise SystemExit(1)
+        PY
+
         # The dev-mode flag is the one gate that is not sales-channel config,
         # so assert it rather than trusting the earlier step wrote it.
         grep -q 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' .env.local || {
