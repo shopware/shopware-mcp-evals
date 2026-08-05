@@ -1,0 +1,346 @@
+{
+  "default_tools": [
+    "shopware-tool-search",
+    "shopware-toolset-enable",
+    "shopware-toolsets-list"
+  ],
+  "server_instructions": "This MCP server exposes Store API capabilities. All operations run in the current sales-channel context and use Store API authentication headers. The advertised tool list is not the full catalogue: if no advertised tool matches the requested action, call shopware-tool-search first instead of assuming the action is unsupported, then use shopware-toolsets-list and shopware-toolset-enable to make a matched tool callable if your client cannot invoke it inline.",
+  "tools": [
+    {
+      "description": "Read the current Store API sales-channel context for this MCP session, including sales channel, language, currency, context token, and whether a customer is authenticated.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "shopware-store-api-context"
+    },
+    {
+      "description": "Search the Store API MCP tool catalogue by free-text query and return the most relevant tool definitions inline. Use this when a needed tool is not visible in tools/list.",
+      "inputSchema": {
+        "properties": {
+          "maxResults": {
+            "default": 3,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-tool-search"
+    },
+    {
+      "description": "Enable one MCP toolset for the current session and ask the client to refresh tools/list. The toolset remains enabled only for this MCP session.",
+      "inputSchema": {
+        "properties": {
+          "toolset": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "toolset"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-toolset-enable"
+    },
+    {
+      "description": "List MCP toolsets that can be enabled for the current session. Use this first for any task: no domain tools are advertised until you enable their toolset.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "shopware-toolsets-list"
+    },
+    {
+      "description": "Cancel a cart through the shared UCP cart capability. Always use dryRun=true (the default) to validate the request without persisting it, then set dryRun=false to commit.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-cart-cancel"
+    },
+    {
+      "description": "Create a cart through the shared UCP cart capability. The payload parameter is a JSON object string matching the UCP cart.create request. Always use dryRun=true (the default) to validate the request without persisting it, then set dryRun=false to commit.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "payload": {
+            "default": "{}",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "shopware-ucp-cart-create"
+    },
+    {
+      "description": "Load a cart by id through the shared UCP cart capability.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-cart-get"
+    },
+    {
+      "description": "Set or change the quantity of a line item, or add, remove, or replace the line items, in an existing cart through the shared UCP cart capability. Use this, NOT shopware-ucp-cart-get, for any change to the cart contents or line-item quantities. The payload parameter is a JSON object string matching the UCP cart.update request. Always use dryRun=true (the default) to validate the request without persisting it, then set dryRun=false to commit.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "payload": {
+            "default": "{}",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-cart-update"
+    },
+    {
+      "description": "Load products by id from the current Store API sales-channel catalog through the shared UCP catalog capability. The ids parameter is a string, NOT an array: pass a JSON array string such as [\"id-a\",\"id-b\"], or a single id, or a comma-separated list of ids.",
+      "inputSchema": {
+        "properties": {
+          "ids": {
+            "default": "[]",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "shopware-ucp-catalog-lookup"
+    },
+    {
+      "description": "Search the current Store API sales-channel catalog through the same UCP catalog capability used by REST, A2A, and embedded flows.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "default": 10,
+            "type": "integer"
+          },
+          "query": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "shopware-ucp-catalog-search"
+    },
+    {
+      "description": "Cancel a checkout session through the shared UCP checkout capability. Always use dryRun=true (the default) to validate the request without persisting it, then set dryRun=false to commit.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-checkout-cancel"
+    },
+    {
+      "description": "Complete a checkout session through the shared UCP checkout capability. This places the order and takes payment. With dryRun=true (the default) nothing is placed: the current checkout is read back and reported together with anything that would block a commit. Set dryRun=false only once the buyer has confirmed the purchase.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-checkout-complete"
+    },
+    {
+      "description": "Create a checkout session through the shared UCP checkout capability. The payload parameter is a JSON object string matching the UCP checkout.create request. Always use dryRun=true (the default) to validate the request without persisting it, then set dryRun=false to commit.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "payload": {
+            "default": "{}",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "shopware-ucp-checkout-create"
+    },
+    {
+      "description": "Load a checkout session by id through the shared UCP checkout capability.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-checkout-get"
+    },
+    {
+      "description": "Update a checkout session through the shared UCP checkout capability. The payload parameter is a JSON object string matching the UCP checkout.update request. Always use dryRun=true (the default) to validate the request without persisting it, then set dryRun=false to commit.",
+      "inputSchema": {
+        "properties": {
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "payload": {
+            "default": "{}",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-checkout-update"
+    },
+    {
+      "description": "Apply a discount code to a cart through the shared UCP discount capability. Always use dryRun=true (the default) to check whether the code would be accepted without persisting it, then set dryRun=false to commit.",
+      "inputSchema": {
+        "properties": {
+          "cartId": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "dryRun": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "cartId",
+          "code"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-discount-apply"
+    },
+    {
+      "description": "Load an order by id through the shared UCP order capability.",
+      "inputSchema": {
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "name": "shopware-ucp-order-get"
+    }
+  ],
+  "toolsets": [
+    {
+      "description": "Tools explicitly assigned to the \"shopware-ucp\" MCP tool group.",
+      "name": "shopware-ucp",
+      "title": "Shopware ucp tools",
+      "tools": [
+        "shopware-ucp-discount-apply",
+        "shopware-ucp-order-get"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"shopware-ucp-cart\" MCP tool group.",
+      "name": "shopware-ucp-cart",
+      "title": "Shopware ucp cart tools",
+      "tools": [
+        "shopware-ucp-cart-cancel",
+        "shopware-ucp-cart-create",
+        "shopware-ucp-cart-get",
+        "shopware-ucp-cart-update"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"shopware-ucp-catalog\" MCP tool group.",
+      "name": "shopware-ucp-catalog",
+      "title": "Shopware ucp catalog tools",
+      "tools": [
+        "shopware-ucp-catalog-lookup",
+        "shopware-ucp-catalog-search"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"shopware-ucp-checkout\" MCP tool group.",
+      "name": "shopware-ucp-checkout",
+      "title": "Shopware ucp checkout tools",
+      "tools": [
+        "shopware-ucp-checkout-cancel",
+        "shopware-ucp-checkout-complete",
+        "shopware-ucp-checkout-create",
+        "shopware-ucp-checkout-get",
+        "shopware-ucp-checkout-update"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"store-api\" MCP tool group.",
+      "name": "store-api",
+      "title": "Store api tools",
+      "tools": [
+        "shopware-store-api-context"
+      ]
+    }
+  ]
+}
