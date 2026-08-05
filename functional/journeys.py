@@ -18,6 +18,14 @@ journey is skipped with a recorded reason when it is absent. This is the only
 place the suite writes real state, and it must be impossible to point at a
 developer's own shop by accident.
 
+The flow runs twice, as a guest and as a logged-in customer (see Persona). Both
+send byte-identical payloads apart from the one field that anchors a checkout to
+a customer session, so where the two outcomes differ, the difference is the
+server's and not the suite's. It is also where the interesting half of the
+checkout lives: a customer reads their own order back, and a guest is refused —
+and asserting that refusal is worth more than asserting the read, because it is
+the half the specification has a MUST about.
+
 What each step buys us:
 
   * every step's assertion is the next step's precondition, so a break is
@@ -45,7 +53,7 @@ import json
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import cast
 
 from eval.assertions import inband_error
@@ -131,6 +139,85 @@ SLOW_STEP_S = 5.0
 
 
 @dataclass(frozen=True)
+class Refusal:
+    """A step whose *refusal* is the pass condition, and the shape it must take.
+
+    `types/message_error.json` requires `code` and `severity` on every error, and
+    those two are the whole assertion: they are what an agent branches on. The
+    prose is not checked, because a server is free to reword it and a suite that
+    pinned the wording would fail on an improvement.
+    """
+
+    code: str
+    severity: str
+
+
+@dataclass(frozen=True)
+class Persona:
+    """Who the journey is shopping as.
+
+    The two personas are not two payloads — they are the same requests made with
+    and without a Shopware customer session, which is the only difference an
+    agent can actually control:
+
+      * **guest** — no context token. Every UCP write mints its own anonymous
+        Shopware context, `buyer.email` identifies the buyer, and the plugin
+        registers a guest customer at completion.
+      * **customer** — a context token from a Store API login, passed as
+        `sw-context-token` AND as `cart_id` on checkout.create.
+
+    That second half is the part worth knowing, and it was measured rather than
+    read: `ShopwareCheckoutAdapter::createCheckout` uses `cartId ?? generate()`
+    as its Shopware context token, and `ShopwareCartAdapter::createCart`
+    generates one unconditionally. So the header alone does NOT reach the
+    checkout — with it and without `cart_id`, the whole journey still passes and
+    the order lands on a freshly registered *guest* (verified in the database:
+    `customer.guest = 1`, the buyer-block email), while `order.get` — the one
+    operation that does read the incoming header — looks in the real customer's
+    orders and finds nothing. Passing the token as `cart_id` anchors the checkout
+    to that context, and then the order is the customer's own
+    (`customer.guest = 0`) and reads back.
+
+    A UCP cart id IS a Shopware context token here (cart.create returns the
+    token it generated as the cart's id), so this is coherent with the plugin's
+    own model rather than a trick — but nothing in discovery says so, which is
+    worth reporting on its own.
+    """
+
+    name: str
+    context_token: str = ""
+
+    @property
+    def authenticated(self) -> bool:
+        return bool(self.context_token)
+
+
+GUEST = Persona("guest")
+
+# What a guest order read must be refused with, and why a refusal is the correct
+# answer rather than a gap:
+#
+#   the order specification requires one — "the business MUST authenticate
+#   requests to order data before returning a response" — and only *permits* the
+#   case a UCP agent is in here, for businesses that "MAY allow access for orders
+#   the platform originated". The only credential on the request is the
+#   sales-channel access key, which is shared and semi-public, so serving the
+#   order on its strength would let any key holder read any order by id.
+#
+# So the suite asserts the refusal, and a *success* here is a finding: it means
+# that oracle is open. `not_found` rather than a forbidden-shaped code for the
+# same reason — "exists but not yours" and "does not exist" have to be
+# indistinguishable. Both values come from the plugin's own
+# UcpErrorDescriptor mapping (agentic-commerce#162, finding O9); before it, this
+# escaped as Shopware's `Customer is not logged in.` 403, reported as
+# `invalid_request` / `recoverable`, telling the agent to retry something no
+# retry can fix.
+GUEST_ORDER_REFUSAL = Refusal("not_found", "unrecoverable")
+
+ORDER_GET = "shopware-ucp-order-get"
+
+
+@dataclass(frozen=True)
 class JourneyStep:
     """One hop in the flow.
 
@@ -138,6 +225,9 @@ class JourneyStep:
     preconditions are missing is skipped with the reason naming what did not
     arrive, so one early break does not cascade into a wall of red that hides
     where it started.
+
+    `refusal`, when set, inverts the verdict: the step passes only if the server
+    refuses it in that shape.
     """
 
     tool: str
@@ -146,9 +236,24 @@ class JourneyStep:
     capture: Callable[[JsonObject, Context], None] = field(default=lambda payload, ctx: None)
     needs: tuple[str, ...] = ()
     commits: bool = False
+    refusal: Refusal | None = None
 
     def missing(self, ctx: Context) -> str:
         return next((key for key in self.needs if not ctx.get(key)), "")
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What one step's call produced.
+
+    `error_body` is carried alongside the flattened `error` string because the
+    refusal assertion is on `code` and `severity`, and flattening loses them.
+    """
+
+    elapsed: float
+    error: str
+    error_body: JsonObject
+    payload: JsonObject
 
 
 def _line_items(ctx: Context) -> list[JsonObject]:
@@ -190,6 +295,26 @@ def _fulfillment(ctx: Context) -> JsonObject:
             }
         ]
     }
+
+
+def _checkout_create_payload(ctx: Context) -> str:
+    """checkout.create's payload, anchored to the buyer's session when there is one.
+
+    `cart_id` is what carries an authenticated customer into the checkout: the
+    adapter uses it as the Shopware context token, and without it the checkout
+    gets a fresh anonymous one and the order is placed for a guest no matter who
+    the caller is logged in as. See Persona for the measurement.
+
+    The guest journey sends no `cart_id` on purpose, and deliberately does not
+    send the cart it created either — checkout.create takes line items directly
+    and has no cart reference of its own, which is worth pinning because it is
+    the opposite of what the tool names suggest.
+    """
+    payload: JsonObject = {"line_items": _line_items(ctx)}
+    if token := str(ctx.get("context_token", "")):
+        payload["cart_id"] = token
+
+    return json.dumps(payload)
 
 
 def _first(payload: JsonObject, key: str) -> JsonObject:
@@ -260,10 +385,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
     JourneyStep(
         tool="shopware-ucp-checkout-create",
         detail="start a checkout",
-        # Deliberately not derived from the cart: checkout.create takes line
-        # items directly and has no cart reference at all, which is worth pinning
-        # because it is the opposite of what the tool names suggest.
-        args=lambda ctx: {"payload": json.dumps({"line_items": _line_items(ctx)}), "dryRun": False},
+        args=lambda ctx: {"payload": _checkout_create_payload(ctx), "dryRun": False},
         # The line-item ids come back here and nowhere else the journey looks, and
         # the next step needs them for fulfillment.methods[].line_item_ids.
         capture=lambda payload, ctx: ctx.update(
@@ -310,7 +432,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         commits=True,
     ),
     JourneyStep(
-        tool="shopware-ucp-order-get",
+        tool=ORDER_GET,
         detail="read the placed order back",
         args=lambda ctx: {"id": ctx["order_id"]},
         needs=("order_id",),
@@ -325,20 +447,71 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
 )
 
 
-def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: Context) -> tuple[float, str, JsonObject]:
-    """Run one step. Returns (elapsed, error, payload)."""
+def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: Context) -> Outcome:
+    """Run one step."""
     started = time.monotonic()
     response = mcp_call(session, step.tool, step.args(ctx), endpoint=endpoint)
     elapsed = time.monotonic() - started
     text = mcp_result_text(response)
     error = (response.get("error") or {}).get("message", "") or inband_error(text) or ""
     if error:
-        return elapsed, error, {}
+        return Outcome(elapsed, error, _error_body(text), {})
     try:
         payload = as_object(cast(object, json.loads(text))).get("data")
     except (ValueError, TypeError):
-        return elapsed, "response was not readable JSON", {}
-    return elapsed, "", as_object(payload)
+        return Outcome(elapsed, "response was not readable JSON", {}, {})
+    return Outcome(elapsed, "", {}, as_object(payload))
+
+
+def _error_body(text: str) -> JsonObject:
+    """The tool's `error` object, for the fields `inband_error` flattens away."""
+    try:
+        return as_object(as_object(cast(object, json.loads(text))).get("error"))
+    except (ValueError, TypeError):
+        return {}
+
+
+def journey_for(persona: Persona) -> tuple[JourneyStep, ...]:
+    """The step list as this persona experiences it.
+
+    One step differs, and only in its verdict: a customer reads their own order
+    back, and a guest is refused. Everything else — every payload, every id — is
+    identical on purpose, so a difference in outcome is attributable to the
+    server rather than to the suite having sent two different things.
+    """
+    if persona.authenticated:
+        return UCP_JOURNEY
+
+    return tuple(replace(step, refusal=GUEST_ORDER_REFUSAL) if step.tool == ORDER_GET else step for step in UCP_JOURNEY)
+
+
+def _report_refusal(rep: Reporter, step: JourneyStep, outcome: Outcome, label: str) -> None:
+    """Grade a step whose refusal is the pass condition."""
+    expected = step.refusal
+    if expected is None:  # pragma: no cover - only called when it is set
+        return
+
+    if not outcome.error:
+        rep.tool_fail(
+            step.tool,
+            label,
+            f"the request succeeded; a {expected.code} refusal is required here, and serving it "
+            f"on a shared sales-channel key makes every order readable by id",
+        )
+        return
+
+    code = str(outcome.error_body.get("code", ""))
+    severity = str(outcome.error_body.get("severity", ""))
+    if (code, severity) != (expected.code, expected.severity):
+        rep.tool_fail(
+            step.tool,
+            label,
+            f"refused as {code or '<no code>'}/{severity or '<no severity>'}, expected "
+            f"{expected.code}/{expected.severity}: {outcome.error}",
+        )
+        return
+
+    rep.tool_pass(step.tool, label, f"refused as required: {code}/{severity} [{outcome.elapsed:.1f}s]")
 
 
 def run_ucp_journey(
@@ -347,6 +520,7 @@ def run_ucp_journey(
     endpoint: Endpoint,
     allow_mutations: bool = False,
     query: str = "",
+    persona: Persona = GUEST,
 ) -> Context:
     """Walk the buyer journey. Returns the context gathered along the way.
 
@@ -354,36 +528,44 @@ def run_ucp_journey(
     reported as skipped rather than silently omitted: a suite that quietly does
     less than it claims is worse than one that fails.
     """
-    steps = UCP_JOURNEY
+    steps = journey_for(persona)
     if not allow_mutations:
         for step in steps:
             rep.tool_skip(
                 step.tool,
-                f"{step.tool} ({step.detail})",
+                f"{step.tool} ({persona.name}: {step.detail})",
                 "journey needs --allow-mutations: it places a real order",
             )
         return {}
 
     ctx: Context = {"query": query}
+    if persona.authenticated:
+        # Read by checkout.create, and the reason the order belongs to this
+        # customer rather than to a guest registered on the spot.
+        ctx["context_token"] = persona.context_token
     if code := os.environ.get(PROMO_CODE_ENV, ""):
         ctx["promo_code"] = code
 
     for step in steps:
-        label = f"{step.tool} ({step.detail})"
+        label = f"{step.tool} ({persona.name}: {step.detail})"
         if missing := step.missing(ctx):
             # Name the precondition, not the symptom. "needs cart_id" points at
             # the step that should have produced it; "not found" does not.
             rep.tool_skip(step.tool, label, f"precondition missing: {missing}")
             continue
 
-        elapsed, error, payload = _call(session, endpoint, step, ctx)
-        if error:
-            rep.tool_fail(step.tool, label, f"{error} [{elapsed:.1f}s]")
+        outcome = _call(session, endpoint, step, ctx)
+        if step.refusal is not None:
+            _report_refusal(rep, step, outcome, label)
             continue
 
-        step.capture(payload, ctx)
-        note = f"{elapsed:.1f}s"
-        if elapsed > SLOW_STEP_S:
+        if outcome.error:
+            rep.tool_fail(step.tool, label, f"{outcome.error} [{outcome.elapsed:.1f}s]")
+            continue
+
+        step.capture(outcome.payload, ctx)
+        note = f"{outcome.elapsed:.1f}s"
+        if outcome.elapsed > SLOW_STEP_S:
             note += " — slow"
         rep.tool_pass(step.tool, label, note)
 

@@ -277,6 +277,57 @@ rather than counted: a failure at `checkout-update` with `cart-create` green is 
 different bug report from both failing. Steps whose preconditions never arrived
 are skipped naming the missing key, not failed.
 
+#### Both halves of the checkout: guest and customer
+
+The journey runs twice, and the two runs answer different questions.
+
+**As a guest**, the buyer exists only in the `buyer` block and the plugin
+registers a guest customer at completion. `order-get` is then *expected to be
+refused* — the order specification requires the business to authenticate order
+reads, and the only credential on the request is the sales-channel access key,
+which is shared and semi-public. Serving the order on its strength would let any
+key holder read any order by id, so the refusal is the correct answer and the
+journey passes on it. It is graded on `code` and `severity` (`not_found` /
+`unrecoverable`), not on prose, and a *successful* read here is reported as a
+failure naming what it costs.
+
+**As a customer**, a real account is logged in through the Store API and its
+context token sent as `sw-context-token` — and, crucially, as `cart_id` on
+`checkout.create`. That second part is measured, not documented:
+`ShopwareCheckoutAdapter::createCheckout` uses `cartId ?? generate()` as its
+Shopware context token, so *the header alone does not reach the checkout*. With
+the header and no `cart_id`, every step still passes and the order lands on a
+freshly registered guest (verified in the database: `customer.guest = 1`), while
+`order-get` — the one operation that does read the header — looks in the real
+customer's orders and finds nothing. With `cart_id`, the order is the customer's
+own and reads back.
+
+One more measurement, because it decides how the run starts: **Shopware hands the
+same context token back on every login** for one customer, and a UCP checkout id
+can only be completed once — `CheckoutCompletionStore` keeps the record keyed by
+checkout id, permanently. Token-as-checkout-id plus a stable token means the
+second run is refused with `Completed checkout sessions cannot be updated.` So
+provisioning logs out and back in, which is the only thing that mints a new token.
+Worth reporting rather than only working around: a real buyer stays logged in, and
+for them "place a second order" has no answer.
+
+The customer is created on first run and reused after, so no lane setup is
+needed:
+
+```bash
+# Defaults to mcp-evals-customer@example.invalid, registered through the Store
+# API on first use. Override to point at an account that already exists.
+UCP_JOURNEY_CUSTOMER_EMAIL=someone@example.com \
+UCP_JOURNEY_CUSTOMER_PASSWORD=... \
+  python -m functional.runner --endpoint store --allow-mutations
+```
+
+If the customer cannot be provisioned, the skip is recorded against
+`order-get` alone — the guest run already proved the other tools work, and the
+read-back is the only coverage this half is uniquely responsible for. `skipped`
+outranks `pass` in the health map, so `order-get` then reads as "nobody proved it
+works", which is exactly true.
+
 ## Layer 2: LLM eval
 
 Loads `eval/fixtures.yaml` and runs each fixture in **discovery** mode:

@@ -310,6 +310,10 @@ python -m functional.runner --endpoint store
 # reason, and a test asserts no call escapes the guard.
 python -m functional.runner --endpoint store --allow-mutations
 
+# The customer half of the journey registers mcp-evals-customer@example.invalid on
+# first run and logs it in after. Override with UCP_JOURNEY_CUSTOMER_EMAIL /
+# UCP_JOURNEY_CUSTOMER_PASSWORD to use an account that already exists.
+
 # Gate the eval on what the static layer proved. A fixture whose expected tool
 # failed is skipped WITH THAT REASON rather than graded, so a plugin bug is not
 # charged to the model. An absent file grades everything.
@@ -390,7 +394,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
-| `functional/journeys.py` | The UCP buyer journey. Those tools are one flow, so an isolated call mostly measures how the server words "not found". Commits, behind `--allow-mutations` |
+| `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
+| `functional/customer.py` | Logs the customer half in, registering the account through the Store API on first use. The context token is only in the `sw-context-token` header, and `storefrontUrl` has to come from the sales channel — both cost a debugging round to find |
 | `eval/preflight.py` | One read-only call, no model, ~1s. Fails with a named cause and, on the Store endpoint, probes the UCP profile URI — the one cause the error text can never name |
 | `eval/registry_check.py` | The server's declared ACL privileges against `toolclass`. Two independent sources disagreeing is what catches a tool wrongly filed as READ_ONLY, which would then be executed for real |
 | `.github/actions/setup-lane/` | Everything up to "a live lane with credentials". Values that used to cross step boundaries via `$GITHUB_ENV` are outputs here, because neither survives a job boundary |
