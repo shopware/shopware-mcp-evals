@@ -114,12 +114,19 @@ DIAGNOSES = (
         # 'Internal server error.' So this advice names the causes that have ACTUALLY
         # produced it, in the order they were found, rather than guessing at one.
         #
-        # The previous text asserted the exception 'logs nothing' and that REST 'is not
-        # swallowed'. Both were false and both cost real time: the SDK's
-        # ExceptionListener does log it (its logger argument is wired to
-        # monolog.logger), and REST flattens the message exactly as MCP does.
+        # The two transports differ, and getting this wrong has now cost time in both
+        # directions. REST goes through the SDK's ExceptionListener, which logs the
+        # throwable via monolog and (since 0.0.3) types a profile-fetch failure as 424.
+        # MCP does NOT: `isUcpRequest()` returns false for `/ucp/mcp`, and the plugin's
+        # UcpMcpToolContext::failure() catches first, emits only {type, message}, and
+        # has no logger injected at all. So "logs nothing" is wrong for REST and right
+        # for MCP — which is the transport this suite uses.
         "`internal` means the exception did not survive the response — no code, no "
-        "severity, and REST answers the same call with a bare 'Internal server error.'\n"
+        "severity. Nothing is logged for the MCP path: UcpMcpToolContext::failure() "
+        "catches before the SDK's ExceptionListener, which skips /ucp/mcp anyway, and "
+        "takes no logger. The same call over REST does reach that listener, so it is "
+        "logged there and typed (424 for a profile fetch since SDK 0.0.3) even though "
+        "its body is flattened the same way.\n"
         "  Causes seen so far, most common first:\n"
         "  1. The lane is running APP_ENV=test. The plugin then wires "
         "StaticAgentProfileFetcher, a PHPUnit double that throws "
@@ -335,11 +342,12 @@ def profile_report(error: str) -> str:
 
     `internal` means an exception escaped the tool, and the response carries no
     code and no severity — so from the outside it is indistinguishable from any
-    other internal failure. (It IS logged server-side, contrary to what this
-    docstring used to claim; the SDK's ExceptionListener writes it through
-    monolog. Reaching that log is the problem, not its absence.) Measured against
-    a live lane, one cause is the profile fetch: a valid profile answers in
-    ~0.16s, a 404 fails in ~0.19s with exactly this error, and CI failed in 0.14s.
+    other internal failure. On the MCP path it is also not logged:
+    UcpMcpToolContext::failure() catches it, takes no logger, and the SDK's
+    ExceptionListener — which would log it — skips `/ucp/mcp` by design. The same
+    call over REST does get logged. Measured against a live lane, one cause is the
+    profile fetch: a valid profile answers in ~0.16s, a 404 fails in ~0.19s with
+    exactly this error, and CI failed in 0.14s.
 
     The server fetches this URI itself, mid-request, which is why the URI has to
     be one the SERVER can reach and why a published host:port is not automatically

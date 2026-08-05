@@ -8,6 +8,24 @@ on:
   #
   # `labeled` starts a run the moment the label goes on; `synchronize` re-runs it
   # on later pushes for as long as the label stays. Remove the label to stop.
+  #
+  # WHO CAN SPEND MONEY HERE — the label IS the access control, and it is GitHub's,
+  # not ours:
+  #
+  #   * Applying a label requires **triage permission or higher** on this
+  #     repository. An outside contributor cannot label their own PR, so they
+  #     cannot start a paid run. There is nothing to add here; a hand-rolled
+  #     membership check would be weaker than the permission it duplicates.
+  #   * `pull_request`, never `pull_request_target`. That matters: the fork's code
+  #     never runs with our secrets, so there is no pwn-request path to the API
+  #     keys.
+  #   * GitHub does not pass repository secrets to a `pull_request` run from a
+  #     fork. So even a labelled fork PR cannot reach OPENAI_API_KEY — which is
+  #     also why the gate below refuses forks outright rather than building a lane
+  #     that could only fail on an empty key after burning the minutes.
+  #
+  # Keep it that way. Switching to `pull_request_target`, or widening the trigger
+  # to run without the label, converts a free PR into a billable one.
   pull_request:
     branches: [main]
     types: [opened, reopened, synchronize, labeled]
@@ -164,9 +182,23 @@ jobs:
   # model on a tool that cannot run charges a plugin bug to the model and pays
   # full model price per fixture to rediscover what one direct call establishes.
   # ---------------------------------------------------------------------------
+  # Runs ONLY for a labelled fork PR, to say why nothing else will. Without it
+  # the label looks broken: applied, accepted, and then silence. Costs one
+  # ubuntu-latest second and no secrets.
+  fork-notice:
+    name: Why this PR cannot run the evals
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && contains(github.event.pull_request.labels.*.name, 'run-evals') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "::warning::The \`run-evals\` label is set, but this PR comes from a fork and the evals cannot run for it. GitHub does not pass repository secrets to a \`pull_request\` run from a fork, so OPENAI_API_KEY would be empty and the suite would fail after installing Shopware — minutes spent for no measurement.%0ATo evaluate these changes, push the branch to this repository and label that PR, or run the workflow manually from the Actions tab against a branch here."
+
   static:
     name: Static checks
-    if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals') }}
+    # Three conditions, and the fork one is not paranoia: a labelled fork PR gets
+    # no secrets, so it can only burn a full Shopware install and then fail on an
+    # empty API key. `fork-notice` above explains that in the run itself.
+    if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'run-evals') && !github.event.pull_request.head.repo.fork) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
