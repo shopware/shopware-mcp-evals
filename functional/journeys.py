@@ -447,6 +447,62 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
 )
 
 
+# The steps a returning buyer repeats. Not the whole journey: the catalogue and the
+# cart tools were already proven, and repeating them would only add duplicate records.
+SECOND_ORDER_STEPS = (
+    "shopware-ucp-checkout-create",
+    "shopware-ucp-checkout-update",
+    "shopware-ucp-checkout-complete",
+)
+
+SECOND_ORDER_CHECK = "a signed-in buyer can place a second order"
+
+
+def run_second_order(rep: Reporter, session: str, endpoint: Endpoint, ctx: Context) -> None:
+    """Order again on the session that just ordered — which is what buyers do.
+
+    One order proves the checkout works once. This proves it is not a one-shot,
+    and that distinction is not academic: the checkout id doubles as the Shopware
+    context token, `CheckoutCompletionStore` marks a completed id spent
+    permanently (so a repeated `checkout.complete` replays instead of charging
+    twice), and Shopware hands a signed-in buyer the same token on every login.
+    While those three hold, a buyer's second order is refused with `Completed
+    checkout sessions cannot be updated.` and logging in again does not clear it.
+
+    Reported as a check rather than as tool assertions on purpose. `checkout-update`
+    is not broken — it works for every first order — so failing its health entry
+    would suppress its fixtures and misname the fault, which is in the session
+    lifecycle. Tracked as O12; see agentic-commerce#162 for the two designs that
+    did not survive contact with it.
+
+    Deliberately runs on the *same* context token the first order used, since
+    replacing it is the workaround this check exists to not rely on.
+    """
+    first_order = str(ctx.get("order_id", ""))
+    steps = [step for step in UCP_JOURNEY if step.tool in SECOND_ORDER_STEPS]
+
+    for step in steps:
+        if missing := step.missing(ctx):
+            rep.check_fail(SECOND_ORDER_CHECK, f"precondition missing: {missing}")
+            return
+
+        outcome = _call(session, endpoint, step, ctx)
+        if outcome.error:
+            rep.check_fail(SECOND_ORDER_CHECK, f"{step.tool}: {outcome.error}")
+            return
+
+        step.capture(outcome.payload, ctx)
+
+    second_order = str(ctx.get("order_id", ""))
+    if not second_order or second_order == first_order:
+        # A replayed order id is the same failure wearing a success: completion
+        # answered from the first order's record instead of placing a new one.
+        rep.check_fail(SECOND_ORDER_CHECK, f"the second checkout returned order {second_order or '<none>'} again")
+        return
+
+    rep.check_pass(f"{SECOND_ORDER_CHECK} ({second_order[:8]}… after {first_order[:8]}…)")
+
+
 def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: Context) -> Outcome:
     """Run one step."""
     started = time.monotonic()

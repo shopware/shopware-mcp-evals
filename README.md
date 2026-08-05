@@ -323,6 +323,22 @@ UCP_JOURNEY_CUSTOMER_PASSWORD=... \
   python -m functional.runner --endpoint store --allow-mutations
 ```
 
+Then it orders **again**, on the same session, because that is what buyers do and it
+is the half that has been broken:
+
+```
+FAIL a signed-in buyer can place a second order:
+     shopware-ucp-checkout-update: validation: Completed checkout sessions cannot be updated.
+```
+
+That failure is real and currently expected — tracked as O12. The checkout id doubles
+as the Shopware context token, `CheckoutCompletionStore` marks a completed id spent
+permanently (so a repeated `checkout.complete` replays rather than charging twice), and
+a signed-in buyer's token never changes, so the second order is refused and logging in
+again does not clear it. It is reported as a **check**, not as a tool assertion:
+`checkout-update` works for every first order, so failing its health entry would
+suppress its fixtures and misname the fault, which is in the session lifecycle.
+
 If the customer cannot be provisioned, the skip is recorded against
 `order-get` alone — the guest run already proved the other tools work, and the
 read-back is the only coverage this half is uniquely responsible for. `skipped`

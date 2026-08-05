@@ -44,7 +44,7 @@ from functional.checks import (
     ToolCheck,
 )
 from functional.customer import CustomerUnavailable, provision
-from functional.journeys import ORDER_GET, Persona, run_ucp_journey
+from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
     BASE,
@@ -846,13 +846,17 @@ def run_customer_journey(rep: Reporter, allow_mutations: bool) -> None:
     session, _ = mcp_init(endpoint=customer_endpoint)
     enable_all_toolsets(session, endpoint=customer_endpoint)
 
-    run_ucp_journey(
+    ctx = run_ucp_journey(
         rep,
         session,
         customer_endpoint,
         allow_mutations=allow_mutations,
         persona=Persona("customer", context_token),
     )
+
+    # Ordering once is the easy half. A buyer who comes back is the half that has
+    # been broken, so the suite asks for it rather than assuming.
+    run_second_order(rep, session, customer_endpoint, ctx)
 
 
 # ---------------------------------------------------------------------------

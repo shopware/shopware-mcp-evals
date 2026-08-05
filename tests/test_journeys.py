@@ -373,6 +373,95 @@ def test_both_personas_send_the_same_requests_apart_from_the_anchor(monkeypatch:
     assert differing == ["shopware-ucp-checkout-create"]
 
 
+def _ordered_context() -> JsonObject:
+    """A context as the customer journey leaves it: one order already placed."""
+    return {"product_id": "prod-1", "context_token": CUSTOMER.context_token, "order_id": "order-1"}
+
+
+def test_a_second_order_repeats_only_the_checkout_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The catalogue and cart tools were proven by the journey; repeating them would
+    add duplicate records and prove nothing new."""
+    seen = _stub_transport(
+        monkeypatch,
+        {"shopware-ucp-checkout-complete": {"success": True, "data": {"order": {"id": "order-2"}}}},
+    )
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, _ordered_context())
+
+    assert [tool for tool, _ in seen] == list(journeys.SECOND_ORDER_STEPS)
+    assert rep.failed == 0
+    assert rep.passed == 1
+
+
+def test_a_second_order_runs_on_the_same_session_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Starting a fresh session would test the workaround instead of the thing that
+    is broken. The point is that the buyer who just ordered can order again."""
+    seen = _stub_transport(
+        monkeypatch,
+        {"shopware-ucp-checkout-complete": {"success": True, "data": {"order": {"id": "order-2"}}}},
+    )
+
+    journeys.run_second_order(_reporter(), "sid", STORE, _ordered_context())
+
+    create = next(args for tool, args in seen if tool == "shopware-ucp-checkout-create")
+    assert as_object(cast(object, json.loads(str(create["payload"]))))["cart_id"] == CUSTOMER.context_token
+
+
+def test_the_refusal_a_returning_buyer_actually_gets_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the live lane answers today (O12): the checkout id doubles as the context
+    token, a completed id is spent permanently, and a signed-in buyer's token never
+    changes — so the second order is refused."""
+    _stub_transport(
+        monkeypatch,
+        {
+            "shopware-ucp-checkout-update": {
+                "success": False,
+                "error": {
+                    "type": "validation",
+                    "code": "invalid_request",
+                    "severity": "recoverable",
+                    "message": "Completed checkout sessions cannot be updated.",
+                },
+            }
+        },
+    )
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, _ordered_context())
+
+    failure = next(r for r in rep.records if r["status"] == "fail")
+    assert failure["tool"] == "check", "the fault is in the session lifecycle, not in the tool"
+    assert "cannot be updated" in failure.get("error", "")
+
+
+def test_a_replayed_order_id_does_not_count_as_a_second_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same failure wearing a success: completion answered from the first order's
+    record instead of placing a new one, and the ids give it away."""
+    _stub_transport(
+        monkeypatch,
+        {"shopware-ucp-checkout-complete": {"success": True, "data": {"order": {"id": "order-1"}}}},
+    )
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, _ordered_context())
+
+    assert rep.failed == 1
+    assert any("order-1 again" in r.get("error", "") for r in rep.records)
+
+
+def test_a_second_order_is_not_attempted_without_a_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A journey that never reached an order has nothing to repeat, and saying
+    "precondition missing" points at where it actually stopped."""
+    seen = _stub_transport(monkeypatch, {})
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, {"context_token": CUSTOMER.context_token})
+
+    assert seen == []
+    assert any("precondition missing" in r.get("error", "") for r in rep.records)
+
+
 def test_the_promo_code_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(journeys.PROMO_CODE_ENV, "SAVE15")
     seen = _stub_transport(monkeypatch, dict(GUEST_OK))
