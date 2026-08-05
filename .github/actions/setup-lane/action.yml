@@ -300,9 +300,21 @@ runs:
       env:
         STORE_CHECKOUT_OK: ${{ steps.agentic_checkout.outcome == 'success' }}
         # `ucp_sdk_ref` used to name a branch to check out; it now names a
-        # Composer constraint, since the SDK comes from Packagist. Default is the
-        # first release carrying #107 and #108.
-        UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '^0.0.3' }}
+        # Composer constraint, since the SDK comes from Packagist.
+        #
+        # A RANGE, not a caret, and that is the whole point. Composer's caret pins
+        # the last specified digit on a 0.0.x package, so `^0.0.3` means
+        # `>=0.0.3 <0.0.4` and EXCLUDES 0.0.4 — verified with Composer's own semver.
+        # That is exactly what broke this lane: the plugin now requires
+        # `ucp-php-sdk/symfony-bundle: >=0.0.4 <0.1.0` (agentic-commerce#160), so
+        # requiring `^0.0.3` alongside it is unsatisfiable, `composer require` fails,
+        # and the store plugin never installs.
+        #
+        # This is the FOURTH time this repo family has been bitten by caret-on-0.0.x:
+        # the plugin's own `^0.0.2` (retired by agentic-commerce#157), the SDK
+        # bundle's `^0.0.2` on core (ucp-php-sdk#110), the SDK 0.0.4 floor bump
+        # (ucp-php-sdk#113), and here. Ranges do not have this failure mode.
+        UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '>=0.0.4 <0.1.0' }}
       run: |
         set -euo pipefail
 
@@ -378,7 +390,7 @@ runs:
           if [ -f vendor/ucp-php-sdk/core/src/Exception/AgentProfileException.php ]; then
             echo "::notice::ucp-php-sdk ${SDK_VERSION:-unknown} installed, AgentProfileException present (#108). A profile-fetch failure will be typed and answered 424 rather than flattened to 500 — but \`internal\` has other causes (APP_ENV=test wires a profile-fetcher test double), so this rules one out, it does not identify the fault."
           else
-            echo "::warning::ucp-php-sdk ${SDK_VERSION:-unknown} has no AgentProfileException, so #107/#108 are MISSING and a profile-fetch failure will report a bare \`internal\`. Most likely the plugin's \`^0.0.2\` constraint resolved to 0.0.2 — check the composer patch earlier in this step."
+            echo "::warning::ucp-php-sdk ${SDK_VERSION:-unknown} has no AgentProfileException, so #107/#108 are MISSING and a profile-fetch failure will report a bare \`internal\`. Most likely the requested constraint resolved below 0.0.3 — check the \`composer require\` resolver output earlier in this step."
           fi
         fi
 
@@ -446,8 +458,23 @@ runs:
         # which of the two wins depends on whether the plugin's extension() call is
         # merged before or after app config — and with both set, either order gives
         # true.
-        mkdir -p config/packages
-        cat > config/packages/zzz-mcp-evals-ucp.yaml <<'YAML'
+        # ONLY when the SDK is actually installed. `ucp_sdk` is that bundle's
+        # extension namespace, so writing this key without it makes EVERY later
+        # `bin/console` call die:
+        #
+        #   There is no extension able to load the configuration for "ucp_sdk"
+        #   ... Looked for namespace "ucp_sdk", found "framework", "monolog", …
+        #   Error: Process completed with exit code 255
+        #
+        # Which is how a store-plugin failure took down `debug:mcp` and the whole
+        # static-checks job — directly against this step's own intent, three
+        # paragraphs up, that a store-plugin problem "must not take down the admin
+        # evals, which are the main signal". It was unguarded, so the skip was not a
+        # skip: it was a fatal error two steps later, in a job that has nothing to do
+        # with the store.
+        if [ "${STORE_PLUGIN_OK}" = "true" ]; then
+          mkdir -p config/packages
+          cat > config/packages/zzz-mcp-evals-ucp.yaml <<'YAML'
         # Written by .github/actions/setup-lane. CI lane only.
         #
         # The lane serves its own UCP profile over plain http on localhost, which
@@ -459,7 +486,12 @@ runs:
         ucp_sdk:
             profile_fetching_development_mode: true
         YAML
-        echo "Wrote config/packages/zzz-mcp-evals-ucp.yaml (ucp_sdk.profile_fetching_development_mode: true)"
+          echo "Wrote config/packages/zzz-mcp-evals-ucp.yaml (ucp_sdk.profile_fetching_development_mode: true)"
+        else
+          # Belt and braces: a previous run on a cached lane may have left one.
+          rm -f config/packages/zzz-mcp-evals-ucp.yaml
+          echo "Skipped config/packages/zzz-mcp-evals-ucp.yaml — the SDK is not installed, so the ucp_sdk namespace does not exist."
+        fi
 
         # A dumped .env.local.php SHADOWS .env.local entirely — Symfony reads the
         # snapshot and never looks at the file. If one was written at install
