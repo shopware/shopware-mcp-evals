@@ -123,14 +123,17 @@ def test_checkout_update_resends_the_whole_line_items_array() -> None:
     assert "fulfillment_address" not in payload, "not a schema property; silently ignored"
     method = as_object(as_list(as_object(payload["fulfillment"])["methods"])[0])
     assert method["line_item_ids"] == ["li-1"], "the required field has to name real line items"
-    # No `destinations`, and this pins a measurement rather than a preference: the
-    # installed validator rejects EVERY value for it — a bare postal address, an
-    # address without names, and {id, name, address} all fail
-    # `destinations[0] must match exactly one allowed schema`, while omitting it
-    # validates. See journeys.DESTINATIONS_UNUSABLE. Sending one makes
-    # checkout-update fail on our own payload and hides the real gap, which is
-    # that completion demands a shipping address no request schema can carry.
-    assert "destinations" not in method, "every value for destinations fails validation"
+    # The destination, in the one shape the oneOf accepts, and this pins a
+    # measurement rather than a preference. Branch 0 (shipping_destination)
+    # REQUIRES `id`; branch 1 (retail_location) requires `id` and `name`. So an
+    # `id` with the address inline and no `name` matches branch 0 alone, while a
+    # bare address matches neither and anything carrying `name` matches both.
+    # See journeys.DESTINATION_SHAPE for the measured table.
+    destination = as_object(as_list(method["destinations"])[0])
+    assert destination["id"], "branch 0 requires an id; without one the oneOf matches nothing"
+    assert "name" not in destination, "name pulls the object into retail_location too, matching both branches"
+    assert destination["street_address"], "schema.org names, not Shopware's street/zipcode/city"
+    assert method["selected_destination_id"] == destination["id"]
 
 
 def test_cart_update_repeats_the_id_inside_the_payload() -> None:
