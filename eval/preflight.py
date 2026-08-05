@@ -109,24 +109,31 @@ DIAGNOSES = (
     ),
     (
         "internal",
-        # `internal` carries no information at all: the MCP error body has no `code`
-        # and no `severity`, and the REST route answers the same operation with a bare
-        # 'Internal server error.' So this advice names the causes that have ACTUALLY
-        # produced it, in the order they were found, rather than guessing at one.
+        # This advice described the world before agentic-commerce#160 and SDK 0.0.4,
+        # and both halves of it were falsified by them. Kept as a correction rather
+        # than a rewrite, because the OLD text is what a reader will find quoted in
+        # older notes:
         #
-        # The two transports differ, and getting this wrong has now cost time in both
-        # directions. REST goes through the SDK's ExceptionListener, which logs the
-        # throwable via monolog and (since 0.0.3) types a profile-fetch failure as 424.
-        # MCP does NOT: `isUcpRequest()` returns false for `/ucp/mcp`, and the plugin's
-        # UcpMcpToolContext::failure() catches first, emits only {type, message}, and
-        # has no logger injected at all. So "logs nothing" is wrong for REST and right
-        # for MCP — which is the transport this suite uses.
-        "`internal` means the exception did not survive the response — no code, no "
-        "severity. Nothing is logged for the MCP path: UcpMcpToolContext::failure() "
-        "catches before the SDK's ExceptionListener, which skips /ucp/mcp anyway, and "
-        "takes no logger. The same call over REST does reach that listener, so it is "
-        "logged there and typed (424 for a profile fetch since SDK 0.0.3) even though "
-        "its body is flattened the same way.\n"
+        #   was: "the MCP error body has no code and no severity"
+        #   now: it carries both, from UcpErrorDescriptor (SDK 0.0.4), the same
+        #        mapping the REST ExceptionListener reads. So the two transports no
+        #        longer describe one exception differently.
+        #
+        #   was: "nothing is logged for the MCP path ... takes no logger"
+        #   now: UcpMcpToolContext takes a LoggerInterface and logs EVERY throwable
+        #        as 'UCP MCP tool call failed.' with the throwable attached, before
+        #        flattening the response.
+        #
+        # `internal` is therefore both rarer and more informative than it was: a
+        # Shopware 4xx now passes its own message through, so a bare `internal` means
+        # a genuinely unexpected throwable rather than "any failure at all".
+        "`internal` now means a genuinely unmodelled exception: since "
+        "agentic-commerce#160 the MCP body carries `code` and `severity` from the "
+        "SDK's UcpErrorDescriptor, and a Shopware 4xx passes its message through, so "
+        "the domain failures that used to land here name themselves. The generic "
+        "message is deliberate (do not leak internals to an unauthenticated client), "
+        "but the throwable IS logged now — 'UCP MCP tool call failed.' with the "
+        "exception attached.\n"
         "  Causes seen so far, most common first:\n"
         "  1. The lane is running APP_ENV=test. The plugin then wires "
         "StaticAgentProfileFetcher, a PHPUnit double that throws "
@@ -135,9 +142,11 @@ DIAGNOSES = (
         "  2. The server cannot fetch the profile URI from where it runs — a published "
         "host:port is not necessarily reachable from inside a container.\n"
         "  To see the real exception: check var/log (dev writes dev-<date>.log; under "
-        "`symfony server:start` also look in $HOME/.config/symfony-cli/log), or patch "
-        "the SDK's ExceptionListener fallback to append $throwable::class and "
-        "getMessage() to the 500 body.",
+        "`symfony server:start` also look in $HOME/.config/symfony-cli/log).\n"
+        "  BUT absence from var/log does not mean it was not logged: core's "
+        "ErrorCodeLogLevelHandler downgrades a long list of error codes to `notice` "
+        "via shopware.logger.error_code_log_levels, which in prod falls below the "
+        "file handler's threshold. CHECKOUT__ORDER_CUSTOMER_NOT_LOGGED_IN is one.",
     ),
 )
 
