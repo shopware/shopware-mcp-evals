@@ -98,16 +98,17 @@ def _fresh_session(base: str, access_key: str, token: str, email: str, password:
     ignored in favour of it. Logging out first deletes that context, so the next
     login mints a new one.
 
-    That matters because the journey uses the token as the checkout id, and a
-    checkout id can only be completed once: `CheckoutCompletionStore` keeps the
-    record keyed by checkout id, permanently, so the next run's
-    `checkout.update` is refused with `Completed checkout sessions cannot be
-    updated.` Without this the customer half passes exactly once per account and
-    then fails on every subsequent run.
+    That matters because the journey passes the token as `cart_id`, and against a
+    plugin without agentic-commerce#162 a spent checkout id can never be used
+    again: `CheckoutCompletionStore` keeps the record keyed by checkout id,
+    permanently, so the second run's `checkout.update` is refused with `Completed
+    checkout sessions cannot be updated.` The customer half would pass exactly once
+    per account and fail on every run after that.
 
-    Worth reporting rather than only working around: a real buyer stays logged in,
-    and for them "place a second order" has no answer — the same refusal, and
-    logging in again does not clear it because the token comes back unchanged.
+    Finding this is what produced #162, which separates the checkout id from the
+    context token so a cart can order twice. This stays for two reasons: the suite
+    has to run against plugin versions from before that fix, and a clean session
+    per run is the honest starting state either way.
     """
     _call(base, access_key, "POST", "/store-api/account/logout", None, token=token)
 

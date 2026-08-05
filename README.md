@@ -303,13 +303,14 @@ customer's orders and finds nothing. With `cart_id`, the order is the customer's
 own and reads back.
 
 One more measurement, because it decides how the run starts: **Shopware hands the
-same context token back on every login** for one customer, and a UCP checkout id
-can only be completed once — `CheckoutCompletionStore` keeps the record keyed by
-checkout id, permanently. Token-as-checkout-id plus a stable token means the
-second run is refused with `Completed checkout sessions cannot be updated.` So
-provisioning logs out and back in, which is the only thing that mints a new token.
-Worth reporting rather than only working around: a real buyer stays logged in, and
-for them "place a second order" has no answer.
+same context token back on every login** for one customer, and against a plugin
+without [agentic-commerce#162](https://github.com/shopware/agentic-commerce/pull/162)
+a UCP checkout id can only be completed once — `CheckoutCompletionStore` keeps the
+record keyed by checkout id, permanently. Token-as-checkout-id plus a stable token
+means the second run is refused with `Completed checkout sessions cannot be
+updated.` So provisioning logs out and back in, which is the only thing that mints
+a new token. That measurement is what produced #162: a real buyer stays logged in,
+and for them "place a second order" had no answer.
 
 The customer is created on first run and reused after, so no lane setup is
 needed:
