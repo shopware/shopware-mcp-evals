@@ -463,20 +463,28 @@ def run_second_order(rep: Reporter, session: str, endpoint: Endpoint, ctx: Conte
 
     One order proves the checkout works once. This proves it is not a one-shot,
     and that distinction is not academic: the checkout id doubles as the Shopware
-    context token, `CheckoutCompletionStore` marks a completed id spent
-    permanently (so a repeated `checkout.complete` replays instead of charging
-    twice), and Shopware hands a signed-in buyer the same token on every login.
-    While those three hold, a buyer's second order is refused with `Completed
-    checkout sessions cannot be updated.` and logging in again does not clear it.
+    context token, and `CheckoutCompletionStore` marks a completed id spent
+    permanently, so a repeated `checkout.complete` replays instead of charging
+    twice. A buyer's second order is then refused with `Completed checkout
+    sessions cannot be updated.`
+
+    The part that makes it the business's problem rather than the agent's:
+    **Shopware rotates the context token during completion** (the guest
+    registration calls `SalesChannelContextPersister::replace()`, which migrates
+    the row to a new token), so the id `checkout.complete` handed back is already
+    retired. The plugin knows the successor and stores it in its session metadata,
+    and returns it to nobody. So a returning agent has no correct move: the only
+    id it holds is a dead one. Tracked as O12; agentic-commerce#162 records the
+    two designs that failed because they defended the wrong invariant.
 
     Reported as a check rather than as tool assertions on purpose. `checkout-update`
     is not broken — it works for every first order — so failing its health entry
     would suppress its fixtures and misname the fault, which is in the session
-    lifecycle. Tracked as O12; see agentic-commerce#162 for the two designs that
-    did not survive contact with it.
+    lifecycle.
 
-    Deliberately runs on the *same* context token the first order used, since
-    replacing it is the workaround this check exists to not rely on.
+    Deliberately runs on the *same* id the first order used, because that is the
+    only id an agent has. Starting a fresh session works and proves nothing: it is
+    the workaround this check exists not to rely on.
     """
     first_order = str(ctx.get("order_id", ""))
     steps = [step for step in UCP_JOURNEY if step.tool in SECOND_ORDER_STEPS]
