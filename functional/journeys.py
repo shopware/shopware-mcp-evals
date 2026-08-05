@@ -61,13 +61,46 @@ type Context = JsonObject
 # A buyer who is obviously synthetic, so a leftover order in a dev shop is
 # identifiable at a glance rather than looking like a real customer.
 BUYER = {"email": "mcp-evals@example.invalid", "first_name": "MCP", "last_name": "Evals"}
+# UCP postal-address field names, which are schema.org's and not Shopware's.
+# Checked against the generated 2026-04-08 schema: the address object accepts
+# street_address, extended_address, address_locality, address_region,
+# postal_code, address_country, first_name, last_name and phone_number — so the
+# `line_one` / `city` / `country` / `name` spelling this used to carry matched
+# nothing and was silently dropped.
 ADDRESS = {
-    "name": "MCP Evals",
-    "line_one": "Evaluation Street 1",
-    "city": "Berlin",
+    "street_address": "Evaluation Street 1",
+    "address_locality": "Berlin",
     "postal_code": "10115",
-    "country": "DE",
+    "address_country": "DE",
+    "first_name": "MCP",
+    "last_name": "Evals",
 }
+
+DESTINATIONS_UNUSABLE = """`destinations` is omitted because NO value for it validates.
+
+Measured directly against the installed validator
+(GeneratedSchemaValidator, checkout.update.request, ucp-php-sdk 0.0.3):
+
+    destinations: [<bare postal address>]        -> Validation failed
+    destinations: [<address, no first/last name>]-> Validation failed
+    destinations: [{id, name, address}]          -> Validation failed
+    destinations omitted entirely                -> VALID
+
+Always `$.fulfillment.methods[0].destinations[0] must match exactly one allowed
+schema`. The item is a `oneOf` of shipping_destination (an allOf of
+postal_address, nothing required) and retail_location (requires id + name), and
+the first branch matches any object at all — so an id/name object matches both,
+and a bare address ought to match only the first yet is rejected too.
+
+The consequence is not cosmetic: `checkout-complete` refuses with "Checkout
+session is missing fulfillment.shipping_address; set it on checkout create or
+update before completion", and `shipping_address` is not a property of
+checkout.create, checkout.update or checkout.complete anywhere in the generated
+schemas. Destinations are the only address channel there is, and nothing can be
+put in them — so the UCP journey cannot place an order. Reported upstream; this
+sends the part that validates so the step passes and the failure lands on the
+real gap instead of on our payload.
+"""
 
 # A promotion code to exercise discount-apply. There is no reliable way to
 # discover one from the Store API alone, and demo data differs per shop, so this
@@ -126,6 +159,42 @@ class JourneyStep:
 
 def _line_items(ctx: Context) -> list[JsonObject]:
     return [{"item": {"id": ctx["product_id"]}, "quantity": 1}]
+
+
+def _line_item_ids(payload: JsonObject) -> list[str]:
+    """The ids the server assigned to the checkout's line items.
+
+    `id` is REQUIRED on a checkout response's line items (generated
+    checkout.get.response, branch `dev.ucp.shopping.checkout`), so these are
+    dependable rather than best-effort — which matters because
+    `fulfillment.methods[].line_item_ids` is required and has to name real ones.
+    """
+    return [id for row in as_list(payload.get("line_items")) if (id := str(as_object(row).get("id", "")))]
+
+
+def _fulfillment(ctx: Context) -> JsonObject:
+    """The shipping destination, in the one place the schema puts it.
+
+    `fulfillment.methods[].destinations[].address` — not a top-level
+    `fulfillment_address`, which is not a property of checkout.create/update at
+    all. The plugin only notices at completion, and says so:
+    "Checkout session is missing fulfillment.shipping_address; set it on
+    checkout create or update before completion."
+
+    `line_item_ids` is the one required field on a method, so this is built from
+    the ids captured off checkout-create rather than invented.
+    """
+    return {
+        "methods": [
+            {
+                "type": "shipping",
+                "line_item_ids": as_list(ctx.get("line_item_ids")),
+                # No `destinations`: see DESTINATIONS_UNUSABLE above. ADDRESS is
+                # kept because it is the payload to restore the moment the schema
+                # accepts one.
+            }
+        ]
+    }
 
 
 def _first(payload: JsonObject, key: str) -> JsonObject:
@@ -200,31 +269,39 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         # items directly and has no cart reference at all, which is worth pinning
         # because it is the opposite of what the tool names suggest.
         args=lambda ctx: {"payload": json.dumps({"line_items": _line_items(ctx)}), "dryRun": False},
-        capture=lambda payload, ctx: ctx.update(checkout_id=str(payload.get("id", ""))),
+        # The line-item ids come back here and nowhere else the journey looks, and
+        # the next step needs them for fulfillment.methods[].line_item_ids.
+        capture=lambda payload, ctx: ctx.update(
+            checkout_id=str(payload.get("id", "")),
+            line_item_ids=_line_item_ids(payload),
+        ),
         needs=("product_id",),
         commits=True,
     ),
     JourneyStep(
         tool="shopware-ucp-checkout-update",
-        detail="add buyer and address",
+        detail="add buyer, address and payment",
         # line_items again: update is PUT, not PATCH. `payment` is required for
         # the checkout to reach ready_for_complete, and is where it has to be set
-        # — checkout-complete takes only an id, so there is no later opportunity.
-        # Its contents are not validated (an empty object works), so this carries
-        # the shape an agent would plausibly send rather than a magic value.
+        # — checkout-complete takes only an id and a payload of its own, so this
+        # is the last chance to attach the shipping destination.
         args=lambda ctx: {
             "id": ctx["checkout_id"],
             "payload": json.dumps(
                 {
                     "line_items": _line_items(ctx),
                     "buyer": BUYER,
-                    "fulfillment_address": ADDRESS,
+                    "fulfillment": _fulfillment(ctx),
                     "payment": PAYMENT,
                 }
             ),
             "dryRun": False,
         },
-        needs=("checkout_id", "product_id"),
+        # line_item_ids is a precondition, not an optional extra: without it the
+        # fulfillment block would be sent with an empty required field, and the
+        # journey would fail on our own malformed request rather than on anything
+        # the server did. Skipping names the missing piece instead.
+        needs=("checkout_id", "product_id", "line_item_ids"),
         commits=True,
     ),
     JourneyStep(

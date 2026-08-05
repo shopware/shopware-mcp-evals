@@ -12,7 +12,7 @@ from typing import cast
 
 import pytest
 
-from eval.result_schema import JsonObject, McpResponse, as_object
+from eval.result_schema import JsonObject, McpResponse, as_list, as_object
 from functional import journeys
 from functional.reporting import Reporter
 from mcp_client import Endpoint, store_endpoint
@@ -80,7 +80,20 @@ def test_ids_thread_forward_through_the_flow() -> None:
         missing = set(step.needs) - produced
         assert not missing, f"{step.tool} needs {sorted(missing)}, which no earlier step produces"
         ctx: JsonObject = {}
-        step.capture({"id": "x", "products": [{"id": "p", "title": "t"}], "order": {"id": "o"}}, ctx)
+        # `line_items` carries ids because a checkout response is REQUIRED to
+        # carry them (generated checkout.get.response, branch
+        # dev.ucp.shopping.checkout: required id, item, quantity, totals). A fake
+        # without them is not a response the server can produce, and leaving it
+        # out made this test claim nothing produces `line_item_ids`.
+        step.capture(
+            {
+                "id": "x",
+                "products": [{"id": "p", "title": "t"}],
+                "line_items": [{"id": "li-1", "item": {"id": "p"}, "quantity": 1}],
+                "order": {"id": "o"},
+            },
+            ctx,
+        )
         produced |= {key for key, value in ctx.items() if value}
 
 
@@ -97,11 +110,27 @@ def test_checkout_update_resends_the_whole_line_items_array() -> None:
     address" sends only the address and fails every time — so the journey has to
     demonstrate the working shape."""
     step = next(s for s in journeys.UCP_JOURNEY if s.tool == "shopware-ucp-checkout-update")
-    payload = as_object(cast(object, json.loads(str(step.args({"checkout_id": "c", "product_id": "p"})["payload"]))))
+    ctx: JsonObject = {"checkout_id": "c", "product_id": "p", "line_item_ids": ["li-1"]}
+    payload = as_object(cast(object, json.loads(str(step.args(ctx)["payload"]))))
 
     assert payload["line_items"], "update dropped line_items"
-    assert "buyer" in payload and "fulfillment_address" in payload
+    assert "buyer" in payload
     assert "payment" in payload, "without payment the checkout never reaches ready_for_complete"
+    # `fulfillment`, NOT a top-level `fulfillment_address` — that spelling is not
+    # a property of checkout.create/update at all, so it was accepted and dropped,
+    # and only surfaced at completion as "Checkout session is missing
+    # fulfillment.shipping_address".
+    assert "fulfillment_address" not in payload, "not a schema property; silently ignored"
+    method = as_object(as_list(as_object(payload["fulfillment"])["methods"])[0])
+    assert method["line_item_ids"] == ["li-1"], "the required field has to name real line items"
+    # No `destinations`, and this pins a measurement rather than a preference: the
+    # installed validator rejects EVERY value for it — a bare postal address, an
+    # address without names, and {id, name, address} all fail
+    # `destinations[0] must match exactly one allowed schema`, while omitting it
+    # validates. See journeys.DESTINATIONS_UNUSABLE. Sending one makes
+    # checkout-update fail on our own payload and hides the real gap, which is
+    # that completion demands a shipping address no request schema can carry.
+    assert "destinations" not in method, "every value for destinations fails validation"
 
 
 def test_cart_update_repeats_the_id_inside_the_payload() -> None:
@@ -137,7 +166,21 @@ def _stub_transport(monkeypatch: pytest.MonkeyPatch, responses: dict[str, JsonOb
     def fake_call(_session: str, tool: str, args: JsonObject, endpoint: Endpoint | None = None) -> McpResponse:
         assert endpoint is None or endpoint is STORE
         seen.append((tool, args))
-        body = responses.get(tool, {"success": True, "data": {"id": f"{tool}-id"}})
+        # `line_items` on every default body, because a real cart or checkout
+        # response is required to carry them with ids, and the journey reads those
+        # ids to build fulfillment.methods[].line_item_ids. Without them the
+        # checkout-update step skips on a missing precondition and takes the rest
+        # of the flow with it — which is a fake-shaped failure, not a real one.
+        body = responses.get(
+            tool,
+            {
+                "success": True,
+                "data": {
+                    "id": f"{tool}-id",
+                    "line_items": [{"id": f"{tool}-li-1", "item": {"id": "prod-1"}, "quantity": 1}],
+                },
+            },
+        )
         return {"result": {"content": [{"type": "text", "text": json.dumps(body)}]}}
 
     def result_text(resp: McpResponse) -> str:
