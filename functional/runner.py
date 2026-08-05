@@ -43,7 +43,8 @@ from functional.checks import (
     Context,
     ToolCheck,
 )
-from functional.journeys import run_ucp_journey
+from functional.customer import CustomerUnavailable, provision
+from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
     BASE,
@@ -61,6 +62,7 @@ from mcp_client import (
     mcp_result_text,
     mcp_tools_list_all,
     mcp_toolsets_list,
+    store_endpoint,
 )
 
 # typeId of the Storefront sales-channel type (used to find a storefront channel).
@@ -802,10 +804,59 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     # the discovery layer around them; only the journey tests the tools, because
     # they are one flow and an isolated call to any of them mostly proves how the
     # server words "not found".
-    rep.section("UCP buyer journey")
+    rep.section("UCP buyer journey — guest")
     journey_session, _ = mcp_init(endpoint=endpoint)
     enable_all_toolsets(journey_session, endpoint=endpoint)
     run_ucp_journey(rep, journey_session, endpoint, allow_mutations=allow_mutations)
+
+    # --- the same journey, as a real customer ---
+    #
+    # The guest flow cannot read its own order back — correctly, and the journey
+    # asserts that refusal. So without this half, nothing in the suite ever proves
+    # order-get returns an order at all, and its fixtures would be graded on a
+    # tool that has only ever said no.
+    rep.section("UCP buyer journey — authenticated customer")
+    run_customer_journey(rep, allow_mutations)
+
+
+def run_customer_journey(rep: Reporter, allow_mutations: bool) -> None:
+    """The journey again, logged in as a real customer.
+
+    A failure to provision is reported against `order-get` specifically, not
+    against every tool the journey touches: the guest run already proved those
+    work, and the read-back is the only coverage this half is uniquely
+    responsible for. `skipped` outranks `pass` in the health map, so order-get
+    then reads as "nobody proved it works", which is exactly true.
+    """
+    if not allow_mutations:
+        rep.skip("customer journey needs --allow-mutations: it registers a customer and places a real order")
+        return
+
+    try:
+        email, context_token = provision(SW_BASE_URL, SW_SC_ACCESS_KEY)
+    except CustomerUnavailable as exc:
+        rep.skip(f"customer journey: {exc}")
+        rep.tool_skip(ORDER_GET, f"{ORDER_GET} (customer: read the placed order back)", f"read-back unproven: {exc}")
+        return
+
+    rep.info(f"  shopping as {email}")
+    # A second endpoint rather than a mutated one: the guest journey's cart lives
+    # on the process-wide token, and rebuilding that would silently abandon it.
+    customer_endpoint = store_endpoint(context_token=context_token)
+    session, _ = mcp_init(endpoint=customer_endpoint)
+    enable_all_toolsets(session, endpoint=customer_endpoint)
+
+    ctx = run_ucp_journey(
+        rep,
+        session,
+        customer_endpoint,
+        allow_mutations=allow_mutations,
+        persona=Persona("customer", context_token),
+    )
+
+    # Ordering once is the easy half. A buyer who comes back is the half that has
+    # been broken, so the suite asks for it rather than assuming.
+    run_second_order(rep, session, customer_endpoint, ctx)
 
 
 # ---------------------------------------------------------------------------

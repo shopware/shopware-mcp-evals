@@ -26,6 +26,8 @@
 #   SW_ACCESS_KEY/SECRET  integration credentials, for the admin suite
 #   UCP_PROFILE_URI       a profile URL the SERVER can fetch (see above)
 #   UCP_JOURNEY_PROMO_CODE  a promotion code, or discount-apply skips
+#   UCP_JOURNEY_CUSTOMER_EMAIL/_PASSWORD  the account the customer half of the
+#                         journey shops as; registered on first use if absent
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
