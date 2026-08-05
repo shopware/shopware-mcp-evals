@@ -76,30 +76,32 @@ ADDRESS = {
     "last_name": "Evals",
 }
 
-DESTINATIONS_UNUSABLE = """`destinations` is omitted because NO value for it validates.
+# The id the journey gives its destination. Any string works; naming it after the
+# suite keeps a stray checkout session identifiable in a dev shop.
+DESTINATION_ID = "mcp-evals-destination"
 
-Measured directly against the installed validator
-(GeneratedSchemaValidator, checkout.update.request, ucp-php-sdk 0.0.3):
+DESTINATION_SHAPE = """Exactly one destination shape validates, and it needs an `id` and NO `name`.
 
-    destinations: [<bare postal address>]        -> Validation failed
-    destinations: [<address, no first/last name>]-> Validation failed
-    destinations: [{id, name, address}]          -> Validation failed
-    destinations omitted entirely                -> VALID
+The item is a `oneOf`. Branch 0, shipping_destination, is an allOf of
+postal_address AND `{properties: {id}, required: [id]}` — so it needs an `id`.
+Branch 1, retail_location, requires `id` AND `name`. Measured against the
+installed validator (GeneratedSchemaValidator, checkout.update.request,
+ucp-php-sdk 0.0.3):
 
-Always `$.fulfillment.methods[0].destinations[0] must match exactly one allowed
-schema`. The item is a `oneOf` of shipping_destination (an allOf of
-postal_address, nothing required) and retail_location (requires id + name), and
-the first branch matches any object at all — so an id/name object matches both,
-and a bare address ought to match only the first yet is rejected too.
+    [<bare postal address>]         -> INVALID   no id, so neither branch matches
+    [<address, no first/last name>] -> INVALID   same reason
+    [{id, name, address}]           -> INVALID   matches BOTH branches
+    [{id, name}]                    -> INVALID   matches BOTH branches
+    [{id, ...postal address}]       -> VALID     branch 0 only
 
-The consequence is not cosmetic: `checkout-complete` refuses with "Checkout
-session is missing fulfillment.shipping_address; set it on checkout create or
-update before completion", and `shipping_address` is not a property of
-checkout.create, checkout.update or checkout.complete anywhere in the generated
-schemas. Destinations are the only address channel there is, and nothing can be
-put in them — so the UCP journey cannot place an order. Reported upstream; this
-sends the part that validates so the step passes and the failure lands on the
-real gap instead of on our payload.
+Adding `name` is what makes an object ambiguous, so the shape below carries an
+`id` and never a `name`. An earlier reading of this called the oneOf
+unsatisfiable and omitted `destinations` entirely, on the strength of the first
+three rows — the fourth combination was never tried, and the plugin's
+"Checkout session is missing fulfillment.shipping_address" looked like
+confirmation. It was not: that message named a field which is not a property of
+checkout.create, checkout.update or checkout.complete in any UCP version, and
+the plugin has since been fixed to read the destination and to say so.
 """
 
 # A promotion code to exercise discount-apply. There is no reliable way to
@@ -109,24 +111,16 @@ real gap instead of on our payload.
 PROMO_CODE_ENV = "UCP_JOURNEY_PROMO_CODE"
 
 # checkout.update accepts `payment` and the checkout reaches ready_for_complete,
-# but checkout-get shows it was never persisted — and it would not help anyway.
-# UcpCheckoutCompleteTool builds its request with a hardcoded empty payload:
+# but checkout-get shows it was never persisted. It does not need to be:
+# UcpCheckoutCompleteTool fills in `payment: {instruments: []}` when the agent
+# omits one (UcpCheckoutCompletionPayment::apply, plugin #155), which is what
+# `checkout.complete.request` requires, and completion charges the sales channel
+# default. This block stays because it is what an agent would plausibly send.
 #
-#     new ShoppingOperationRequest('checkout.complete', [], $context, $id)
-#
-# against checkout-update's `$requestPayload` in the same slot. That empty array
-# is validated against checkout.complete.request, which requires `$.payment`, so
-# the call fails every time regardless of what the checkout holds or which
-# payment method is chosen.
-#
-# Worth knowing for the fix: a no-input handler already exists —
-# ShopwareInvoicePaymentHandler, `com.shopware.invoice`, tokenization false, "the
-# sales channel default invoice/offline payment flow". Nothing needs to be
-# collected from the buyer. It is simply never sent, and discovery advertises
-# `payment_handlers: {}`, so an agent cannot discover it either.
-#
-# This block is kept because it is what an agent would plausibly send, and it is
-# what gets the checkout to ready_for_complete — the last state reachable today.
+# Still true and worth knowing: the no-input handler that satisfies this —
+# ShopwareInvoicePaymentHandler, `com.shopware.invoice`, tokenization false —
+# exists but discovery advertises `payment_handlers: {}`, so an agent cannot find
+# it. Nothing here depends on that, since omitting payment works.
 PAYMENT = {"method": "invoice"}
 
 # A step that takes longer than this is reported as slow. Not a failure on its
@@ -175,11 +169,10 @@ def _line_item_ids(payload: JsonObject) -> list[str]:
 def _fulfillment(ctx: Context) -> JsonObject:
     """The shipping destination, in the one place the schema puts it.
 
-    `fulfillment.methods[].destinations[].address` — not a top-level
+    `fulfillment.methods[].destinations[]` — not a top-level
     `fulfillment_address`, which is not a property of checkout.create/update at
-    all. The plugin only notices at completion, and says so:
-    "Checkout session is missing fulfillment.shipping_address; set it on
-    checkout create or update before completion."
+    all. See DESTINATION_SHAPE for why the destination carries an `id` and no
+    `name`; that is the only combination the oneOf accepts.
 
     `line_item_ids` is the one required field on a method, so this is built from
     the ids captured off checkout-create rather than invented.
@@ -189,9 +182,11 @@ def _fulfillment(ctx: Context) -> JsonObject:
             {
                 "type": "shipping",
                 "line_item_ids": as_list(ctx.get("line_item_ids")),
-                # No `destinations`: see DESTINATIONS_UNUSABLE above. ADDRESS is
-                # kept because it is the payload to restore the moment the schema
-                # accepts one.
+                "destinations": [{"id": DESTINATION_ID, **ADDRESS}],
+                # Redundant with a single destination, but it is what an agent
+                # offered several would send, so the plugin's selection path is
+                # exercised rather than only its fallback to the first entry.
+                "selected_destination_id": DESTINATION_ID,
             }
         ]
     }
