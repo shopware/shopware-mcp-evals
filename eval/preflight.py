@@ -349,14 +349,13 @@ def probe_profile(uri: str) -> tuple[int | None, str]:
 def profile_report(error: str) -> str:
     """Resolve the one cause the error text can never name.
 
-    `internal` means an exception escaped the tool, and the response carries no
-    code and no severity — so from the outside it is indistinguishable from any
-    other internal failure. On the MCP path it is also not logged:
-    UcpMcpToolContext::failure() catches it, takes no logger, and the SDK's
-    ExceptionListener — which would log it — skips `/ucp/mcp` by design. The same
-    call over REST does get logged. Measured against a live lane, one cause is the
-    profile fetch: a valid profile answers in ~0.16s, a 404 fails in ~0.19s with
-    exactly this error, and CI failed in 0.14s.
+    `internal` means an exception escaped the tool. Since agentic-commerce#160 the
+    response does carry `code` and `severity` and the throwable IS logged, so this
+    is no longer the information-free signal it was — but `internal_error` still
+    names a class rather than a cause, and the profile fetch is the one cause the
+    error text can never point at. Measured against a live lane: a valid profile
+    answers in ~0.16s, a 404 fails in ~0.19s with exactly this error, and CI failed
+    in 0.14s.
 
     The server fetches this URI itself, mid-request, which is why the URI has to
     be one the SERVER can reach and why a published host:port is not automatically

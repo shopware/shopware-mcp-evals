@@ -49,8 +49,12 @@ def test_the_two_allowlists_are_not_confused_with_each_other() -> None:
 
 
 def test_the_swallowed_internal_error_explains_where_to_actually_look() -> None:
-    """`internal` carries no information at all — the plugin logs nothing — so
-    the diagnosis has to supply the context the error does not."""
+    """`internal_error` names a class, not a cause, so the diagnosis has to supply
+    the context the error text cannot.
+
+    It used to carry nothing at all and go unlogged; agentic-commerce#160 gave it a
+    code, a severity and a log line. The advice still has to point at the causes,
+    because those name the class rather than the fault."""
     advice = preflight.diagnose("internal: The tool call failed unexpectedly.")
 
     assert "container" in advice.lower()
