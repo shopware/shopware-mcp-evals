@@ -181,6 +181,49 @@ def test_a_channel_that_does_not_sell_to_the_journeys_country_falls_back_to_its_
     assert cast(JsonObject, _registration(store)["billingAddress"])["countryId"] == "channel-country"
 
 
+def test_throttling_is_not_reported_as_a_wrong_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured on a lane after a batch of login/logout cycles: the account was fine and
+    Shopware was rate-limiting, but every non-200 was read as bad credentials, so
+    provisioning went on to register, got `already in use`, and advised changing a
+    password that was already correct."""
+    store = _install(
+        monkeypatch,
+        FakeStore(
+            FakeResponse(
+                429,
+                {
+                    "errors": [
+                        {
+                            "code": "CHECKOUT__CUSTOMER_AUTH_THROTTLED",
+                            "detail": "Too many requests.",
+                            "meta": {"parameters": {"waitTime": 42}},
+                        }
+                    ]
+                },
+            )
+        ),
+    )
+
+    with pytest.raises(customer.CustomerUnavailable) as excinfo:
+        customer.provision(BASE, KEY)
+
+    message = str(excinfo.value)
+    assert "rate-limiting" in message
+    assert "retry in 42s" in message, "the wait the server asked for is the actionable part"
+    assert customer.PASSWORD_ENV not in message, "advising a password change would be the old bug"
+    assert not any(path == "/store-api/account/register" for path, _ in store.calls), (
+        "a throttled login must not lead to a registration attempt"
+    )
+
+
+def test_an_unexpected_status_is_neither_credentials_nor_throttling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 500 used to arrive as "the password did not authenticate it" too."""
+    _install(monkeypatch, FakeStore(FakeResponse(500, {"errors": [{"detail": "Internal Server Error"}]})))
+
+    with pytest.raises(customer.CustomerUnavailable, match="HTTP 500"):
+        customer.provision(BASE, KEY)
+
+
 def test_an_existing_account_with_the_wrong_password_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one failure that is a configuration answer rather than a bug. Reporting
     the raw `already in use` violation sends the reader looking at registration,

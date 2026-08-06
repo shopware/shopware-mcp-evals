@@ -339,6 +339,13 @@ again does not clear it. It is reported as a **check**, not as a tool assertion:
 `checkout-update` works for every first order, so failing its health entry would
 suppress its fixtures and misname the fault, which is in the session lifecycle.
 
+Provisioning distinguishes the three ways a login can fail, because conflating them
+produced the most confidently wrong message this suite has emitted — *"the password did
+not authenticate it — set `UCP_JOURNEY_CUSTOMER_PASSWORD`"* on a lane where the account
+was fine and Shopware was **rate-limiting** after a batch of login/logout cycles. Bad
+credentials fall through to registration; throttling and any other status say what they
+are and stop.
+
 If the customer cannot be provisioned, the skip is recorded against
 `order-get` alone — the guest run already proved the other tools work, and the
 read-back is the only coverage this half is uniquely responsible for. `skipped`

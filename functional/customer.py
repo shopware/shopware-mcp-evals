@@ -120,19 +120,40 @@ def _fresh_session(base: str, access_key: str, token: str, email: str, password:
 
 
 def _login(base: str, access_key: str, email: str, password: str) -> str:
-    """The context token for a successful login, or "" for bad credentials."""
+    """The context token for a successful login, or "" for genuinely bad credentials.
+
+    Only bad credentials return "" — everything else raises, because the caller's
+    next move on "" is to register, and registration then answers `already in use`.
+    That chain produced the most confidently wrong message this module has emitted:
+    `exists but the password did not authenticate it — set
+    UCP_JOURNEY_CUSTOMER_PASSWORD to the real one`, on a lane where the account was
+    fine and Shopware was rate-limiting after a batch of login/logout cycles. The
+    advice was to change a password that was already correct.
+    """
     status, body, headers = _call(
         base, access_key, "POST", "/store-api/account/login", {"email": email, "password": password}
     )
-    if status != 200:
+
+    if status == 429 or _has_error_code(body, "CHECKOUT__CUSTOMER_AUTH_THROTTLED"):
+        raise CustomerUnavailable(
+            f"Shopware is rate-limiting logins for {email}{_wait_hint(body)}. The account and the "
+            f"password are not in question; the login attempts are. Wait it out, or clear the "
+            f"`rate_limit` entries for this route on the lane."
+        )
+
+    if status == 200:
+        # Body first for older versions that carried it there, header for current
+        # ones. Whichever answers, an empty result here has to stay empty rather
+        # than falling back to a fresh anonymous token.
+        return str(body.get("contextToken", "")) or headers.get("sw-context-token", "")
+
+    if status == 401 or _has_error_code(body, "CHECKOUT__CUSTOMER_AUTH_BAD_CREDENTIALS"):
         return ""
 
-    # Body first for older versions that carried it there, header for current
-    # ones. Whichever answers, an empty result here has to stay empty rather
-    # than falling back to a fresh anonymous token.
-    token = str(body.get("contextToken", "")) or headers.get("sw-context-token", "")
-
-    return token
+    raise CustomerUnavailable(
+        f"logging {email} in failed with HTTP {status}, which is neither a credential problem nor "
+        f"throttling: {_violations(body) or '(no violations reported)'}"
+    )
 
 
 def _register(base: str, access_key: str, email: str, password: str) -> None:
@@ -236,6 +257,22 @@ def _country_id(base: str, access_key: str) -> str:
         return country_id
 
     raise CustomerUnavailable(f"no country matches {iso} and the sales channel names no default")
+
+
+def _has_error_code(body: JsonObject, code: str) -> bool:
+    """Whether the Store API named this error code, whatever the status was."""
+    return any(str(as_object(row).get("code", "")) == code for row in as_list(body.get("errors")))
+
+
+def _wait_hint(body: JsonObject) -> str:
+    """` (retry in 42s)`, when the throttle says how long it wants."""
+    for row in as_list(body.get("errors")):
+        parameters = as_object(as_object(as_object(row).get("meta")).get("parameters"))
+        for key in ("waitTime", "seconds"):
+            if (wait := parameters.get(key)) not in (None, ""):
+                return f" (retry in {wait}s)"
+
+    return ""
 
 
 def _violations(body: JsonObject) -> str:
