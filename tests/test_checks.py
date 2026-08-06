@@ -238,9 +238,12 @@ def _log_reply(files: list[str]) -> str:
 
 
 def _pick(monkeypatch: pytest.MonkeyPatch, files: list[str]) -> str:
+    monkeypatch.delenv(R.LOG_FILE_ENV, raising=False)
     monkeypatch.setattr(R, "mcp_call", const(cast(McpResponse, cast(object, {}))))
     monkeypatch.setattr(R, "mcp_result_text", const(_log_reply(files)))
-    return R.newest_log_file("sid", ADMIN)
+    chosen, reason = R.newest_log_file("sid", ADMIN)
+    assert not reason, f"a file was chosen, so there is nothing to explain: {reason}"
+    return chosen
 
 
 def test_the_newest_log_file_wins_regardless_of_the_order_returned(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,13 +259,71 @@ def test_an_instance_with_only_dev_log_still_gets_a_readable_file(monkeypatch: p
     assert _pick(monkeypatch, ["dev.log"]) == "dev.log"
 
 
-def test_no_log_files_yields_no_file_so_the_checks_skip(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skipped-with-a-reason, not failed: an instance that has not logged
-    anything yet says nothing about whether the tool works."""
+def test_the_name_the_lane_seeded_wins_over_asking_the_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point of the env var. The discovery below recovers the filename by
+    parsing an error message, so a lane that seeded a log perfectly still skipped
+    both readers once that text moved — while reporting it as the shop's fault."""
+    monkeypatch.setenv(R.LOG_FILE_ENV, "test-2026-08-06.log")
+
+    def explode(*_args: object, **_kwargs: object) -> McpResponse:
+        raise AssertionError("the tool must not be asked when the lane already said which file")
+
+    monkeypatch.setattr(R, "mcp_call", explode)
+
+    assert R.newest_log_file("sid", ADMIN) == ("test-2026-08-06.log", "")
+
+
+def test_a_missing_tool_is_not_reported_as_a_missing_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured on a lane without SwagMcpDevTools installed: the tool does not
+    exist, and "no log files on this instance" sent the reader to the seeding step,
+    which was working."""
+    monkeypatch.delenv(R.LOG_FILE_ENV, raising=False)
+    reply = {"error": {"code": -32601, "message": 'Tool not found: "swag-dev-tools-log-search".'}}
+    monkeypatch.setattr(R, "mcp_call", const(cast(McpResponse, cast(object, reply))))
+
+    _file, reason = R.newest_log_file("sid", ADMIN)
+
+    assert "not callable" in reason
+    assert "Tool not found" in reason, "the server's own words, so the cause is not re-guessed"
+
+
+def test_a_changed_error_format_says_so_rather_than_blaming_the_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The parse depends on the words "Available files:" appearing in an error
+    message — the least stable part of any tool's contract. When it moves, the
+    honest report is that no filename could be read, not that none exists."""
+    monkeypatch.delenv(R.LOG_FILE_ENV, raising=False)
     monkeypatch.setattr(R, "mcp_call", const(cast(McpResponse, cast(object, {}))))
     monkeypatch.setattr(R, "mcp_result_text", const(json.dumps({"success": True, "data": []})))
 
-    assert R.newest_log_file("sid", ADMIN) == ""
+    _file, reason = R.newest_log_file("sid", ADMIN)
+
+    assert "Available files:" in reason
+    assert "no log files" not in reason, "that is a claim about the shop this function never checked"
+
+
+def test_an_empty_file_list_is_the_one_case_that_is_the_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shop that has genuinely not logged anything yet. Skipped rather than
+    failed: it says nothing about whether the tool works."""
+    monkeypatch.delenv(R.LOG_FILE_ENV, raising=False)
+    monkeypatch.setattr(R, "mcp_call", const(cast(McpResponse, cast(object, {}))))
+    monkeypatch.setattr(R, "mcp_result_text", const(_log_reply([])))
+
+    file, reason = R.newest_log_file("sid", ADMIN)
+
+    assert file == ""
+    assert reason == "the tool lists no log files on this instance"
+
+
+def test_the_skip_reason_reaches_the_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reason discovered and then dropped is the same bug in a new place."""
+    _ = monkeypatch
+    check = next(c for c in K.ALL_CHECKS if c.tool == "swag-dev-tools-log-search")
+
+    blocked = check.blocked_by({"log_file": "", "log_file_reason": "swag-dev-tools-log-search is not callable"})
+
+    assert blocked == "swag-dev-tools-log-search is not callable"
 
 
 # ---------------------------------------------------------------------------

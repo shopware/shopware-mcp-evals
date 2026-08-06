@@ -69,6 +69,14 @@ outputs:
       if the promotion could not be created, which makes that step skip rather
       than fail.
     value: ${{ steps.sc.outputs.promo_code }}
+  log_file:
+    description: >
+      Basename of the log file this lane seeded a known line into, e.g.
+      `test-2026-08-06.log`. Empty if the seeding could not verify its own write,
+      in which case the two dev-tools log readers fall back to asking the tool
+      what files exist. Passed to the suite as MCP_EVALS_LOG_FILE so it never has
+      to recover the name from an error message.
+    value: ${{ steps.seed.outputs.log_file }}
   store_plugin_ok:
     description: Whether agentic-commerce installed. Gates every Store step downstream.
     value: ${{ steps.plugins.outputs.store_plugin_ok }}
@@ -583,6 +591,7 @@ runs:
     # so they actually run. Non-fatal: if seeding fails, those assertions just
     # skip as before — it must never turn the whole eval red.
     - name: Seed demo data
+      id: seed
       shell: bash
       working-directory: shopware
       continue-on-error: true
@@ -652,8 +661,16 @@ runs:
         # The step's own receipt. `continue-on-error` above hides an exit code,
         # so the only way a half-run seeding is visible is if the last thing it
         # does is check its own work.
+        #
+        # It also publishes the filename, which is the point. The suite used to
+        # recover it by calling the log tool with no `file` and parsing the list
+        # out of the resulting *error message* — so a lane that had seeded a log
+        # perfectly still skipped both readers the moment that error text moved,
+        # and reported it as "no log files on this instance". The name is known
+        # right here; there is no reason to make anything guess it.
         if grep -q 'mcp-evals lane probe 4f21a7' "${PROBE_LOG}" 2>/dev/null; then
           echo "Seeded log probe into ${PROBE_LOG}"
+          echo "log_file=${PROBE_LOG#var/log/}" >> "$GITHUB_OUTPUT"
         else
           echo "::warning::log probe not written to ${PROBE_LOG}; the dev-tools log readers will SKIP"
         fi

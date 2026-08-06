@@ -360,6 +360,13 @@ jobs:
           # Served by the shop itself (see setup-lane), so the media-upload check
           # does not depend on a third-party host being reachable from the runner.
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
+          # The log file the lane seeded, by name. Without this the suite recovers
+          # the name by calling the log tool with no `file` and parsing the list
+          # out of the resulting error message — which is how both log readers
+          # came to SKIP with "no log files on this instance" on a lane that had
+          # seeded one. Empty if the seeding could not verify its write, and the
+          # discovery still runs then.
+          MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
         run: python -m functional.runner --endpoint admin
 
       # The Store catalogue has never been snapshotted, so everything that

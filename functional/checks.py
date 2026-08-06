@@ -53,7 +53,13 @@ class ToolCheck:
     # which is the difference between "it worked" and "it worked on this input".
     detail: str | Callable[[Context], str] = ""
     args: Callable[[Context], JsonObject] = field(default=lambda _ctx: {})
-    requires: tuple[tuple[str, str], ...] = ()
+    # A callable reason for the same reason `detail` takes one: a fixed string has
+    # to guess the cause, and a guessed cause is worse than none. Both log readers
+    # skipped with "no log files on this instance" on a lane holding 40 log files,
+    # and on a lane where the dev-tools bundle was not installed at all — one
+    # message, two wrong diagnoses, and it sent us looking at the seeding step
+    # that was working.
+    requires: tuple[tuple[str, str | Callable[[Context], str]], ...] = ()
     # Text the response must contain. Without it a check only asserts that the
     # tool answered *something*, which for a reader is satisfied by an empty
     # result — the tool can be pointed at the wrong file, find nothing, and pass.
@@ -71,7 +77,7 @@ class ToolCheck:
         """The reason this check cannot run, or None. First missing key wins."""
         for key, reason in self.requires:
             if not ctx.get(key):
-                return reason
+                return reason(ctx) if callable(reason) else reason
         return None
 
 
@@ -269,14 +275,14 @@ DEV_CHECKS: tuple[ToolCheck, ...] = (
         "swag-dev-tools-log-search",
         lambda c: f"(finds the seeded line in {c['log_file']})" if c.get("log_probe") else "(query: error)",
         lambda c: {"query": LOG_PROBE_TEXT if c.get("log_probe") else "error", "limit": 5, "file": c["log_file"]},
-        (("log_file", "no log files on this instance"),),
+        (("log_file", lambda c: str(c.get("log_file_reason") or "no log file could be resolved")),),
         contains=LOG_PROBE_TEXT,
     ),
     ToolCheck(
         "swag-dev-tools-log-stream",
         "(last 10)",
         lambda c: {"limit": 50, "file": c["log_file"]},
-        (("log_file", "no log files on this instance"),),
+        (("log_file", lambda c: str(c.get("log_file_reason") or "no log file could be resolved")),),
     ),
     ToolCheck("swag-dev-tools-list-extensions", ""),
     ToolCheck("swag-dev-tools-list-skills", ""),
