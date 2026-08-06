@@ -314,7 +314,11 @@ runs:
         # the plugin's own `^0.0.2` (retired by agentic-commerce#157), the SDK
         # bundle's `^0.0.2` on core (ucp-php-sdk#110), the SDK 0.0.4 floor bump
         # (ucp-php-sdk#113), and here. Ranges do not have this failure mode.
-        UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '>=0.0.4 <0.1.0' }}
+        #
+        # The floor tracks the plugin's, which is now 0.0.5
+        # (agentic-commerce#167): a lower constraint here is unsatisfiable
+        # alongside it, so this value is not free to lag behind.
+        UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '>=0.0.5 <0.1.0' }}
       run: |
         set -euo pipefail
 

@@ -71,7 +71,7 @@ on:
         required: false
         default: ''
       ucp_sdk_ref:
-        description: 'ucp-php-sdk Composer constraint, e.g. 0.0.4 or >=0.0.4 <0.1.0. Default: >=0.0.4 <0.1.0, the release carrying UcpErrorDescriptor and PaymentInstrument.billing_address. Use a RANGE, not a caret: on a 0.0.x package Composer pins the patch, so ^0.0.4 excludes 0.0.5. No longer a git ref — the SDK comes from Packagist.'
+        description: 'ucp-php-sdk Composer constraint, e.g. 0.0.5 or >=0.0.5 <0.1.0. Default: >=0.0.5 <0.1.0, the release whose oneOf failures name the branch and the missing field — the difference between "$ must match exactly one allowed schema" and being told order_confirmation lacks permalink_url. Use a RANGE, not a caret: on a 0.0.x package Composer pins the patch, so ^0.0.5 excludes 0.0.6. No longer a git ref — the SDK comes from Packagist.'
         required: false
         default: ''
       run_store:
