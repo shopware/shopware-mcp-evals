@@ -89,7 +89,14 @@ def print_discovery_block(discovery: list[FixtureResult]):
             f"correct toolset: {s.get('toolset_enable_correct', 0)}/{s.get('toolset_enable_graded', 0)}"
         )
     d_tok = s.get("tokens", {})
-    print(f"  Tokens: {d_tok.get('input', 0):,} in / {d_tok.get('output', 0):,} out")
+    # Cached input shown separately rather than folded into `in`, matching how
+    # eval/summary.py renders the cost line. It is priced differently by both
+    # providers, so adding it silently would make this number disagree with the
+    # dollar figure next to it — which is the confusion the aggregate itself
+    # caused while it was dropping the field entirely.
+    cached = d_tok.get("cached_input", 0)
+    cached_note = f" ({cached:,} cached)" if cached else ""
+    print(f"  Tokens: {d_tok.get('input', 0):,} in{cached_note} / {d_tok.get('output', 0):,} out")
 
     skipped = [r for r in discovery if r.get("skipped")]
     if skipped:

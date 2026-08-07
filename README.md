@@ -98,10 +98,14 @@ they say; see the first bullet of `AGENTS.md` for where that line falls.
 ├── functional/
 │   ├── runner.py          # Layer 1: v2 discovery mechanics + per-tool dryRun calls (--endpoint admin|store)
 │   ├── checks.py          # the per-tool assertion table (payloads, labels, prerequisites)
+│   ├── journeys.py        # the UCP buyer journey, as one flow rather than thirteen tools
 │   ├── reporting.py       # pass/fail/skip harness + JSON report writer
+│   ├── assets/            # fixtures committed so no test depends on a third-party URL
 │   └── ci/                # reusable shell helpers used by the workflow (shellcheck-linted)
 ├── eval/
 │   ├── runner.py          # Layer 2: discovery-mode LLM eval (--endpoint admin|store)
+│   ├── result_schema.py   # the TypedDicts every JSON shape here is read through
+│   ├── preflight.py       # can the UCP tools execute at all, and if not which gate refused
 │   ├── scoring.py         # results → counts, rates and the gate verdict (pure)
 │   ├── assertions.py      # did the executed call satisfy the fixture (pure)
 │   ├── tool_scorecard.py  # per-tool recall, precision, F1, confusion (pure)
@@ -109,15 +113,23 @@ they say; see the first bullet of `AGENTS.md` for where that line falls.
 │   ├── cost_drift.py      # this run vs the previous nightly, per fixture; warns, never gates
 │   ├── report.py          # terminal rendering of a run (pure of scoring)
 │   ├── compare_runs.py    # primary vs second validator; the both-fail set to act on
-│   ├── summary.py         # one GitHub job summary for every run in the job
+│   ├── summary.py         # one report per job: GitHub job summary and the PR comment
 │   ├── snapshot_tools.py  # full-catalogue snapshot for drift detection
+│   ├── drift.py           # snapshot vs snapshot: what the catalogue did between runs
 │   ├── fixtures.yaml      # admin natural-language prompts + expected tool
 │   ├── fixtures_store.yaml # Store API / UCP prompts + expected tool
 │   └── requirements.txt   # anthropic, openai, requests, pyyaml
+├── scripts/
+│   ├── lint_workflow_shell.py  # ShellCheck over the shell inside workflow `run:` blocks
+│   └── trunk-lane.sh      # bring up a local trunk lane to test against
 ├── tests/                 # pytest unit tests (reporting, runner logic, throttle retry)
+│   ├── __init__.py        # makes the repo root the sys.path anchor, so `pytest` and
+│   │                      # `python -m pytest` agree — without it CI failed on 14 modules
+│   └── stubs.py           # const/raiser/never: typed fakes, no mock objects
+├── pyrightconfig.json     # basedpyright: `recommended`, tests included, 4 rules off with reasons
 ├── ruff.toml              # Python lint config
-├── requirements-dev.txt   # eval deps + pytest + pytest-cov + ruff
-├── tool-history/          # committed snapshot baseline (latest.json)
+├── requirements-dev.txt   # eval deps + pytest + pytest-cov + ruff + basedpyright
+├── tool-history/          # committed snapshot baseline (latest.json, store.json)
 └── results/               # JSON reports, gitignored
 ```
 
@@ -157,7 +169,11 @@ the skip reasons, the error budget and the gate thresholds live.
 **Conventions:** both test layers are Python — don't add `.sh` runners (extend
 `functional/runner.py` or `mcp_client.py`; the only shell here is CI glue under
 `functional/ci/`). New functional/eval/client logic ships with a pytest test
-under `tests/`. `ruff`, `pytest`, and `shellcheck` run on every push.
+under `tests/`. On every push CI gates on `ruff check`, `ruff format --check`,
+`basedpyright` (`recommended` mode, source *and* tests, zero errors *and*
+warnings), `pytest --cov` with a 90% floor, and `shellcheck` — twice: over the
+`.sh` files, and over the shell embedded in workflow `run:` blocks
+(`scripts/lint_workflow_shell.py`). `toollint` also runs, advisory.
 
 ## Setup
 
@@ -249,7 +265,10 @@ python -m functional.runner --endpoint store
 # Only for a disposable lane — CI, or a local trunk lane.
 python -m functional.runner --endpoint store --allow-mutations
 
-# discount-apply needs a promotion code; without one that step skips.
+# discount-apply needs a redeemable promotion code; without one that step skips
+# with "precondition missing: promo_code". Any code that resolves on the lane works.
+# CI does not need this: setup-lane creates a 10%-off cart promotion on the sales
+# channel and passes its code through as UCP_JOURNEY_PROMO_CODE.
 UCP_JOURNEY_PROMO_CODE=WELCOME10 python -m functional.runner --endpoint store --allow-mutations
 ```
 
@@ -257,6 +276,81 @@ Each step's assertion is the next step's precondition, so a break is *located*
 rather than counted: a failure at `checkout-update` with `cart-create` green is a
 different bug report from both failing. Steps whose preconditions never arrived
 are skipped naming the missing key, not failed.
+
+#### Both halves of the checkout: guest and customer
+
+The journey runs twice, and the two runs answer different questions.
+
+**As a guest**, the buyer exists only in the `buyer` block and the plugin
+registers a guest customer at completion. `order-get` is then *expected to be
+refused* — the order specification requires the business to authenticate order
+reads, and the only credential on the request is the sales-channel access key,
+which is shared and semi-public. Serving the order on its strength would let any
+key holder read any order by id, so the refusal is the correct answer and the
+journey passes on it. It is graded on `code` and `severity` (`not_found` /
+`unrecoverable`), not on prose, and a *successful* read here is reported as a
+failure naming what it costs.
+
+**As a customer**, a real account is logged in through the Store API and its
+context token sent as `sw-context-token` — and, crucially, as `cart_id` on
+`checkout.create`. That second part is measured, not documented:
+`ShopwareCheckoutAdapter::createCheckout` uses `cartId ?? generate()` as its
+Shopware context token, so *the header alone does not reach the checkout*. With
+the header and no `cart_id`, every step still passes and the order lands on a
+freshly registered guest (verified in the database: `customer.guest = 1`), while
+`order-get` — the one operation that does read the header — looks in the real
+customer's orders and finds nothing. With `cart_id`, the order is the customer's
+own and reads back.
+
+One more measurement, because it decides how the run starts: **Shopware hands the
+same context token back on every login** for one customer, and against a plugin
+without [agentic-commerce#162](https://github.com/shopware/agentic-commerce/pull/162)
+a UCP checkout id can only be completed once — `CheckoutCompletionStore` keeps the
+record keyed by checkout id, permanently. Token-as-checkout-id plus a stable token
+means the second run is refused with `Completed checkout sessions cannot be
+updated.` So provisioning logs out and back in, which is the only thing that mints
+a new token. That measurement is what produced #162: a real buyer stays logged in,
+and for them "place a second order" had no answer.
+
+The customer is created on first run and reused after, so no lane setup is
+needed:
+
+```bash
+# Defaults to mcp-evals-customer@example.invalid, registered through the Store
+# API on first use. Override to point at an account that already exists.
+UCP_JOURNEY_CUSTOMER_EMAIL=someone@example.com \
+UCP_JOURNEY_CUSTOMER_PASSWORD=... \
+  python -m functional.runner --endpoint store --allow-mutations
+```
+
+Then it orders **again**, on the same session, because that is what buyers do and it
+is the half that has been broken:
+
+```
+FAIL a signed-in buyer can place a second order:
+     shopware-ucp-checkout-update: validation: Completed checkout sessions cannot be updated.
+```
+
+That failure is real and currently expected — tracked as O12. The checkout id doubles
+as the Shopware context token, `CheckoutCompletionStore` marks a completed id spent
+permanently (so a repeated `checkout.complete` replays rather than charging twice), and
+a signed-in buyer's token never changes, so the second order is refused and logging in
+again does not clear it. It is reported as a **check**, not as a tool assertion:
+`checkout-update` works for every first order, so failing its health entry would
+suppress its fixtures and misname the fault, which is in the session lifecycle.
+
+Provisioning distinguishes the three ways a login can fail, because conflating them
+produced the most confidently wrong message this suite has emitted — *"the password did
+not authenticate it — set `UCP_JOURNEY_CUSTOMER_PASSWORD`"* on a lane where the account
+was fine and Shopware was **rate-limiting** after a batch of login/logout cycles. Bad
+credentials fall through to registration; throttling and any other status say what they
+are and stop.
+
+If the customer cannot be provisioned, the skip is recorded against
+`order-get` alone — the guest run already proved the other tools work, and the
+read-back is the only coverage this half is uniquely responsible for. `skipped`
+outranks `pass` in the health map, so `order-get` then reads as "nobody proved it
+works", which is exactly true.
 
 ## Layer 2: LLM eval
 
@@ -907,3 +1001,109 @@ Both layers write a JSON report to `results/`. Reports are gitignored.
 discovery_path, search_hit, enabled_correct_toolset, tokens, latency_s, ...}`)
 plus a `discovery_summary` aggregate (pass rate, average steps, path
 distribution, search-hit rate, token totals).
+
+## Reading the results
+
+On a pull request the whole report is posted as a **single comment, edited in
+place on every run** — no need to open the run. The same document is also the job
+summary (which is the only rendering for scheduled runs and pushes, where there
+is no PR).
+
+Read it in this order:
+
+1. **The pass-rate table.** One row per arm. `primary` is the gate; the others
+   exist to attribute a failure rather than to be judged:
+
+   | arm | what it isolates |
+   |---|---|
+   | `admin · primary` | the number that gates the build |
+   | `admin · second validator` | a different model, same fixtures. Both models failing a fixture points at the **tool description**; one failing is noise about that model. |
+   | `admin · no context prompt` | the fixture without its context prompt — the difference measures what the prompt is worth (~11 points, measured) |
+   | `admin · core prompt only` | a generic prompt instead of the tailored one |
+   | `store · UCP` | the Store endpoint, separate because it skips wholesale when UCP is not exposed |
+
+2. **The failing-fixture list.** Each entry names `expected_tool` vs
+   `selected_tool`. That pair is the finding: a plausible wrong tool is a
+   description problem, a meta-tool as the final call is a discovery problem.
+   *Errored* fixtures are listed separately — an error is not a wrong choice.
+
+3. **The tool-catalogue lint** (advisory). Judgements about prose, never gating,
+   so a build never goes red over word choice.
+
+4. **Cost drift** (advisory), against the nightly baseline rather than the
+   previous PR run. A regression here is invisible in the pass rate: two extra
+   discovery rounds per fixture, or a tool that starts returning ten times the
+   payload, moves the bill and nothing else.
+
+Three things that are easy to misread:
+
+- **`skip` is not `pass`.** The Store suite skips wholesale when UCP is not
+  exposed, and the annotation names the gate. A green job with everything skipped
+  measured nothing.
+- **A single failing fixture is rarely a regression.** Compare arms first.
+- **Discovery steps are recorded, not scored.** A model that takes six rounds and
+  lands on the right tool passes; that is deliberate, because the cost of those
+  rounds shows up in the cost table instead.
+
+## Adding a new MCP tool to the suite
+
+The suite does not enumerate tools by hand — it reads the catalogue off the live
+instance. Adding coverage for a new tool means telling the two layers what
+"correct" looks like.
+
+1. **Refresh the catalogue snapshot** so drift detection and the linter know the
+   tool exists:
+   ```bash
+   python -m eval.snapshot_tools --output tool-history/latest.json
+   python -m eval.snapshot_tools --endpoint store --output tool-history/store.json
+   ```
+   In CI the nightly reconciliation PR does this; a hand edit of
+   `tool-history/latest.json` is the wrong move, because the snapshot is evidence
+   of what the server actually served. `python -m eval.drift --old <a> --new <b>`
+   is what reports the difference.
+
+2. **Layer 1 — a functional assertion** in `functional/checks.py`: the payload to
+   send and what a healthy response looks like. Anything mutating must go through
+   `dryRun`; `toolclass.py` decides whether a tool may be executed at all, so a
+   new mutating tool without a `dryRun` mode belongs there first. Ids come from
+   `lane.py` (read off the instance) — never hardcode a UUID, and note that
+   Shopware ids are 32-char hex without dashes.
+
+3. **Layer 2 — a fixture** in `eval/fixtures.yaml` (or `fixtures_store.yaml`):
+   ```yaml
+   - id: product-stock-update
+     category: catalog
+     prompt: "Set the stock of SKU SW10001 to 42"
+     expected_tool: shopware-product-stock-update
+     expected_toolset: shopware-catalog   # validated against the snapshot
+   ```
+   Write the prompt the way a merchant would ask, not the way the tool is named —
+   a prompt that quotes the tool name tests string matching, not tool selection.
+
+4. **Ownership**, in `ownership.py`: which repository owns the tool, so a failure
+   is routed rather than just counted.
+
+### Testing it
+
+```bash
+# Layer 1 — fast, no model, no tokens. There is no per-tool filter: the suite
+# runs the whole assertion table, which takes seconds.
+python -m functional.runner --endpoint admin
+
+# Layer 0 — is the description any good, and is the fixture self-consistent?
+python -m toollint --snapshot tool-history/latest.json
+pytest tests/test_fixtures.py -q     # expected_toolset must exist in the snapshot
+
+# Layer 2, just this fixture (--id, repeatable)
+python -m eval.runner --id product-stock-update --provider openai
+
+# ...or the whole category it belongs to
+python -m eval.runner --category catalog --provider openai
+
+# The whole gate, as CI runs it
+ruff check . && basedpyright && pytest tests -q --cov
+```
+
+A fixture that passes on the first try is worth a second look: check the model
+actually discovered the tool rather than being handed it, in the
+`discovery_path` field of the report.

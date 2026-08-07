@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -43,7 +44,8 @@ from functional.checks import (
     Context,
     ToolCheck,
 )
-from functional.journeys import run_ucp_journey
+from functional.customer import CustomerUnavailable, provision
+from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
     BASE,
@@ -61,6 +63,7 @@ from mcp_client import (
     mcp_result_text,
     mcp_tools_list_all,
     mcp_toolsets_list,
+    store_endpoint,
 )
 
 # typeId of the Storefront sales-channel type (used to find a storefront channel).
@@ -602,27 +605,57 @@ def sellable_products(session: str, endpoint: Endpoint, sales_channel_id: str) -
     return lane.sellable_products(session, endpoint, sales_channel_id)
 
 
-def newest_log_file(session: str, endpoint: Endpoint) -> str:
-    """A log file the dev-tools log readers can actually open.
+LOG_FILE_ENV = "MCP_EVALS_LOG_FILE"
 
-    `file` defaults to an empty string, which is never a real filename, so both
-    log checks failed with "Log file not found" on every instance. The tool lists
-    the valid values in that very error, so ask it rather than guessing a name
-    that depends on the date and the APP_ENV.
+
+def newest_log_file(session: str, endpoint: Endpoint) -> tuple[str, str]:
+    """A log file the dev-tools log readers can open, and why there is none.
+
+    Returns `(file, reason)` — exactly one is ever non-empty. The reason exists
+    because the old signature could only say "" and the caller then reported *no
+    log files on this instance*, a claim about the shop that this function never
+    checked. It was wrong in both directions we have actually seen: a CI lane that
+    had seeded a log file, and a local lane where `SwagMcpDevTools` was not
+    installed so the tool did not exist at all.
+
+    `MCP_EVALS_LOG_FILE` wins when set. The lane seeds a known line into
+    `var/log/<env>-<date>.log` during setup and now exports that name, so on our
+    own lanes the filename is *known* rather than recovered — the discovery below
+    reverse-engineers it out of an error message, and an error message is the
+    least stable part of any tool's contract.
+
+    The discovery stays for shops we did not build: `file` defaults to an empty
+    string, which is never a real filename, and the tool helpfully lists the valid
+    values in the resulting error.
     """
-    text = mcp_result_text(
-        mcp_call(session, "swag-dev-tools-log-search", {"query": "x", "limit": 1}, endpoint=endpoint)
-    )
+    if named := os.environ.get(LOG_FILE_ENV, "").strip():
+        return named, ""
+
+    reply = mcp_call(session, "swag-dev-tools-log-search", {"query": "x", "limit": 1}, endpoint=endpoint)
+    if error := as_object(reply.get("error")).get("message"):
+        # A missing tool is not a missing log. This is what a lane without
+        # SwagMcpDevTools answers, and reporting it as an absent log file sends
+        # the reader to the seeding step, which is fine.
+        return "", f"swag-dev-tools-log-search is not callable: {error}"
+
+    text = mcp_result_text(reply)
     marker = "Available files:"
     if marker not in (text or ""):
-        return ""
+        # The tool answered, and not with the list this parse depends on. Naming
+        # that is the whole point: the contract moved, and no amount of seeding
+        # will fix it.
+        return "", f"the tool answered without an {marker!r} list, so no filename could be read"
+
     listed = text.split(marker, 1)[1].strip().rstrip('"}').split(",")
     files = [f.strip().strip('"') for f in listed if f.strip()]
+    if not files:
+        return "", "the tool lists no log files on this instance"
+
     # max(), not files[-1]. A dated name sorts chronologically so the newest wins
     # either way IF the server returns them ordered — and nothing promises that.
     # Taking the last element made a correct-looking result depend on an
     # undocumented detail of somebody else's response.
-    return max(files) if files else ""
+    return max(files), ""
 
 
 def find_log_probe(session: str, endpoint: Endpoint, files_hint: str) -> tuple[str, bool]:
@@ -709,7 +742,8 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     if cast(bool, args.skip_dev_tools):
         rep.skip("dev tools (--skip-dev-tools)")
         return
-    ctx["log_file"], ctx["log_probe"] = find_log_probe(session, endpoint, newest_log_file(session, endpoint))
+    log_file, ctx["log_file_reason"] = newest_log_file(session, endpoint)
+    ctx["log_file"], ctx["log_probe"] = find_log_probe(session, endpoint, log_file) if log_file else ("", False)
     # Needs the tool it is named after to have run, so it cannot be part of ctx.
     ctx["skill_name"] = first_skill_name(session, endpoint)
     run_checks(rep, session, endpoint, DEV_CHECKS, ctx)
@@ -802,10 +836,59 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     # the discovery layer around them; only the journey tests the tools, because
     # they are one flow and an isolated call to any of them mostly proves how the
     # server words "not found".
-    rep.section("UCP buyer journey")
+    rep.section("UCP buyer journey — guest")
     journey_session, _ = mcp_init(endpoint=endpoint)
     enable_all_toolsets(journey_session, endpoint=endpoint)
     run_ucp_journey(rep, journey_session, endpoint, allow_mutations=allow_mutations)
+
+    # --- the same journey, as a real customer ---
+    #
+    # The guest flow cannot read its own order back — correctly, and the journey
+    # asserts that refusal. So without this half, nothing in the suite ever proves
+    # order-get returns an order at all, and its fixtures would be graded on a
+    # tool that has only ever said no.
+    rep.section("UCP buyer journey — authenticated customer")
+    run_customer_journey(rep, allow_mutations)
+
+
+def run_customer_journey(rep: Reporter, allow_mutations: bool) -> None:
+    """The journey again, logged in as a real customer.
+
+    A failure to provision is reported against `order-get` specifically, not
+    against every tool the journey touches: the guest run already proved those
+    work, and the read-back is the only coverage this half is uniquely
+    responsible for. `skipped` outranks `pass` in the health map, so order-get
+    then reads as "nobody proved it works", which is exactly true.
+    """
+    if not allow_mutations:
+        rep.skip("customer journey needs --allow-mutations: it registers a customer and places a real order")
+        return
+
+    try:
+        email, context_token = provision(SW_BASE_URL, SW_SC_ACCESS_KEY)
+    except CustomerUnavailable as exc:
+        rep.skip(f"customer journey: {exc}")
+        rep.tool_skip(ORDER_GET, f"{ORDER_GET} (customer: read the placed order back)", f"read-back unproven: {exc}")
+        return
+
+    rep.info(f"  shopping as {email}")
+    # A second endpoint rather than a mutated one: the guest journey's cart lives
+    # on the process-wide token, and rebuilding that would silently abandon it.
+    customer_endpoint = store_endpoint(context_token=context_token)
+    session, _ = mcp_init(endpoint=customer_endpoint)
+    enable_all_toolsets(session, endpoint=customer_endpoint)
+
+    ctx = run_ucp_journey(
+        rep,
+        session,
+        customer_endpoint,
+        allow_mutations=allow_mutations,
+        persona=Persona("customer", context_token),
+    )
+
+    # Ordering once is the easy half. A buyer who comes back is the half that has
+    # been broken, so the suite asks for it rather than assuming.
+    run_second_order(rep, session, customer_endpoint, ctx)
 
 
 # ---------------------------------------------------------------------------

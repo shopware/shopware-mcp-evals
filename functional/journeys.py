@@ -18,6 +18,14 @@ journey is skipped with a recorded reason when it is absent. This is the only
 place the suite writes real state, and it must be impossible to point at a
 developer's own shop by accident.
 
+The flow runs twice, as a guest and as a logged-in customer (see Persona). Both
+send byte-identical payloads apart from the one field that anchors a checkout to
+a customer session, so where the two outcomes differ, the difference is the
+server's and not the suite's. It is also where the interesting half of the
+checkout lives: a customer reads their own order back, and a guest is refused —
+and asserting that refusal is worth more than asserting the read, because it is
+the half the specification has a MUST about.
+
 What each step buys us:
 
   * every step's assertion is the next step's precondition, so a break is
@@ -45,7 +53,7 @@ import json
 import os
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import cast
 
 from eval.assertions import inband_error
@@ -61,13 +69,48 @@ type Context = JsonObject
 # A buyer who is obviously synthetic, so a leftover order in a dev shop is
 # identifiable at a glance rather than looking like a real customer.
 BUYER = {"email": "mcp-evals@example.invalid", "first_name": "MCP", "last_name": "Evals"}
+# UCP postal-address field names, which are schema.org's and not Shopware's.
+# Checked against the generated 2026-04-08 schema: the address object accepts
+# street_address, extended_address, address_locality, address_region,
+# postal_code, address_country, first_name, last_name and phone_number — so the
+# `line_one` / `city` / `country` / `name` spelling this used to carry matched
+# nothing and was silently dropped.
 ADDRESS = {
-    "name": "MCP Evals",
-    "line_one": "Evaluation Street 1",
-    "city": "Berlin",
+    "street_address": "Evaluation Street 1",
+    "address_locality": "Berlin",
     "postal_code": "10115",
-    "country": "DE",
+    "address_country": "DE",
+    "first_name": "MCP",
+    "last_name": "Evals",
 }
+
+# The id the journey gives its destination. Any string works; naming it after the
+# suite keeps a stray checkout session identifiable in a dev shop.
+DESTINATION_ID = "mcp-evals-destination"
+
+DESTINATION_SHAPE = """Exactly one destination shape validates, and it needs an `id` and NO `name`.
+
+The item is a `oneOf`. Branch 0, shipping_destination, is an allOf of
+postal_address AND `{properties: {id}, required: [id]}` — so it needs an `id`.
+Branch 1, retail_location, requires `id` AND `name`. Measured against the
+installed validator (GeneratedSchemaValidator, checkout.update.request,
+ucp-php-sdk 0.0.3):
+
+    [<bare postal address>]         -> INVALID   no id, so neither branch matches
+    [<address, no first/last name>] -> INVALID   same reason
+    [{id, name, address}]           -> INVALID   matches BOTH branches
+    [{id, name}]                    -> INVALID   matches BOTH branches
+    [{id, ...postal address}]       -> VALID     branch 0 only
+
+Adding `name` is what makes an object ambiguous, so the shape below carries an
+`id` and never a `name`. An earlier reading of this called the oneOf
+unsatisfiable and omitted `destinations` entirely, on the strength of the first
+three rows — the fourth combination was never tried, and the plugin's
+"Checkout session is missing fulfillment.shipping_address" looked like
+confirmation. It was not: that message named a field which is not a property of
+checkout.create, checkout.update or checkout.complete in any UCP version, and
+the plugin has since been fixed to read the destination and to say so.
+"""
 
 # A promotion code to exercise discount-apply. There is no reliable way to
 # discover one from the Store API alone, and demo data differs per shop, so this
@@ -76,24 +119,16 @@ ADDRESS = {
 PROMO_CODE_ENV = "UCP_JOURNEY_PROMO_CODE"
 
 # checkout.update accepts `payment` and the checkout reaches ready_for_complete,
-# but checkout-get shows it was never persisted — and it would not help anyway.
-# UcpCheckoutCompleteTool builds its request with a hardcoded empty payload:
+# but checkout-get shows it was never persisted. It does not need to be:
+# UcpCheckoutCompleteTool fills in `payment: {instruments: []}` when the agent
+# omits one (UcpCheckoutCompletionPayment::apply, plugin #155), which is what
+# `checkout.complete.request` requires, and completion charges the sales channel
+# default. This block stays because it is what an agent would plausibly send.
 #
-#     new ShoppingOperationRequest('checkout.complete', [], $context, $id)
-#
-# against checkout-update's `$requestPayload` in the same slot. That empty array
-# is validated against checkout.complete.request, which requires `$.payment`, so
-# the call fails every time regardless of what the checkout holds or which
-# payment method is chosen.
-#
-# Worth knowing for the fix: a no-input handler already exists —
-# ShopwareInvoicePaymentHandler, `com.shopware.invoice`, tokenization false, "the
-# sales channel default invoice/offline payment flow". Nothing needs to be
-# collected from the buyer. It is simply never sent, and discovery advertises
-# `payment_handlers: {}`, so an agent cannot discover it either.
-#
-# This block is kept because it is what an agent would plausibly send, and it is
-# what gets the checkout to ready_for_complete — the last state reachable today.
+# Still true and worth knowing: the no-input handler that satisfies this —
+# ShopwareInvoicePaymentHandler, `com.shopware.invoice`, tokenization false —
+# exists but discovery advertises `payment_handlers: {}`, so an agent cannot find
+# it. Nothing here depends on that, since omitting payment works.
 PAYMENT = {"method": "invoice"}
 
 # A step that takes longer than this is reported as slow. Not a failure on its
@@ -104,6 +139,85 @@ SLOW_STEP_S = 5.0
 
 
 @dataclass(frozen=True)
+class Refusal:
+    """A step whose *refusal* is the pass condition, and the shape it must take.
+
+    `types/message_error.json` requires `code` and `severity` on every error, and
+    those two are the whole assertion: they are what an agent branches on. The
+    prose is not checked, because a server is free to reword it and a suite that
+    pinned the wording would fail on an improvement.
+    """
+
+    code: str
+    severity: str
+
+
+@dataclass(frozen=True)
+class Persona:
+    """Who the journey is shopping as.
+
+    The two personas are not two payloads — they are the same requests made with
+    and without a Shopware customer session, which is the only difference an
+    agent can actually control:
+
+      * **guest** — no context token. Every UCP write mints its own anonymous
+        Shopware context, `buyer.email` identifies the buyer, and the plugin
+        registers a guest customer at completion.
+      * **customer** — a context token from a Store API login, passed as
+        `sw-context-token` AND as `cart_id` on checkout.create.
+
+    That second half is the part worth knowing, and it was measured rather than
+    read: `ShopwareCheckoutAdapter::createCheckout` uses `cartId ?? generate()`
+    as its Shopware context token, and `ShopwareCartAdapter::createCart`
+    generates one unconditionally. So the header alone does NOT reach the
+    checkout — with it and without `cart_id`, the whole journey still passes and
+    the order lands on a freshly registered *guest* (verified in the database:
+    `customer.guest = 1`, the buyer-block email), while `order.get` — the one
+    operation that does read the incoming header — looks in the real customer's
+    orders and finds nothing. Passing the token as `cart_id` anchors the checkout
+    to that context, and then the order is the customer's own
+    (`customer.guest = 0`) and reads back.
+
+    A UCP cart id IS a Shopware context token here (cart.create returns the
+    token it generated as the cart's id), so this is coherent with the plugin's
+    own model rather than a trick — but nothing in discovery says so, which is
+    worth reporting on its own.
+    """
+
+    name: str
+    context_token: str = ""
+
+    @property
+    def authenticated(self) -> bool:
+        return bool(self.context_token)
+
+
+GUEST = Persona("guest")
+
+# What a guest order read must be refused with, and why a refusal is the correct
+# answer rather than a gap:
+#
+#   the order specification requires one — "the business MUST authenticate
+#   requests to order data before returning a response" — and only *permits* the
+#   case a UCP agent is in here, for businesses that "MAY allow access for orders
+#   the platform originated". The only credential on the request is the
+#   sales-channel access key, which is shared and semi-public, so serving the
+#   order on its strength would let any key holder read any order by id.
+#
+# So the suite asserts the refusal, and a *success* here is a finding: it means
+# that oracle is open. `not_found` rather than a forbidden-shaped code for the
+# same reason — "exists but not yours" and "does not exist" have to be
+# indistinguishable. Both values come from the plugin's own
+# UcpErrorDescriptor mapping (agentic-commerce#162, finding O9); before it, this
+# escaped as Shopware's `Customer is not logged in.` 403, reported as
+# `invalid_request` / `recoverable`, telling the agent to retry something no
+# retry can fix.
+GUEST_ORDER_REFUSAL = Refusal("not_found", "unrecoverable")
+
+ORDER_GET = "shopware-ucp-order-get"
+
+
+@dataclass(frozen=True)
 class JourneyStep:
     """One hop in the flow.
 
@@ -111,6 +225,9 @@ class JourneyStep:
     preconditions are missing is skipped with the reason naming what did not
     arrive, so one early break does not cascade into a wall of red that hides
     where it started.
+
+    `refusal`, when set, inverts the verdict: the step passes only if the server
+    refuses it in that shape.
     """
 
     tool: str
@@ -119,13 +236,85 @@ class JourneyStep:
     capture: Callable[[JsonObject, Context], None] = field(default=lambda payload, ctx: None)
     needs: tuple[str, ...] = ()
     commits: bool = False
+    refusal: Refusal | None = None
 
     def missing(self, ctx: Context) -> str:
         return next((key for key in self.needs if not ctx.get(key)), "")
 
 
+@dataclass(frozen=True)
+class Outcome:
+    """What one step's call produced.
+
+    `error_body` is carried alongside the flattened `error` string because the
+    refusal assertion is on `code` and `severity`, and flattening loses them.
+    """
+
+    elapsed: float
+    error: str
+    error_body: JsonObject
+    payload: JsonObject
+
+
 def _line_items(ctx: Context) -> list[JsonObject]:
     return [{"item": {"id": ctx["product_id"]}, "quantity": 1}]
+
+
+def _line_item_ids(payload: JsonObject) -> list[str]:
+    """The ids the server assigned to the checkout's line items.
+
+    `id` is REQUIRED on a checkout response's line items (generated
+    checkout.get.response, branch `dev.ucp.shopping.checkout`), so these are
+    dependable rather than best-effort — which matters because
+    `fulfillment.methods[].line_item_ids` is required and has to name real ones.
+    """
+    return [id for row in as_list(payload.get("line_items")) if (id := str(as_object(row).get("id", "")))]
+
+
+def _fulfillment(ctx: Context) -> JsonObject:
+    """The shipping destination, in the one place the schema puts it.
+
+    `fulfillment.methods[].destinations[]` — not a top-level
+    `fulfillment_address`, which is not a property of checkout.create/update at
+    all. See DESTINATION_SHAPE for why the destination carries an `id` and no
+    `name`; that is the only combination the oneOf accepts.
+
+    `line_item_ids` is the one required field on a method, so this is built from
+    the ids captured off checkout-create rather than invented.
+    """
+    return {
+        "methods": [
+            {
+                "type": "shipping",
+                "line_item_ids": as_list(ctx.get("line_item_ids")),
+                "destinations": [{"id": DESTINATION_ID, **ADDRESS}],
+                # Redundant with a single destination, but it is what an agent
+                # offered several would send, so the plugin's selection path is
+                # exercised rather than only its fallback to the first entry.
+                "selected_destination_id": DESTINATION_ID,
+            }
+        ]
+    }
+
+
+def _checkout_create_payload(ctx: Context) -> str:
+    """checkout.create's payload, anchored to the buyer's session when there is one.
+
+    `cart_id` is what carries an authenticated customer into the checkout: the
+    adapter uses it as the Shopware context token, and without it the checkout
+    gets a fresh anonymous one and the order is placed for a guest no matter who
+    the caller is logged in as. See Persona for the measurement.
+
+    The guest journey sends no `cart_id` on purpose, and deliberately does not
+    send the cart it created either — checkout.create takes line items directly
+    and has no cart reference of its own, which is worth pinning because it is
+    the opposite of what the tool names suggest.
+    """
+    payload: JsonObject = {"line_items": _line_items(ctx)}
+    if token := str(ctx.get("context_token", "")):
+        payload["cart_id"] = token
+
+    return json.dumps(payload)
 
 
 def _first(payload: JsonObject, key: str) -> JsonObject:
@@ -196,35 +385,40 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
     JourneyStep(
         tool="shopware-ucp-checkout-create",
         detail="start a checkout",
-        # Deliberately not derived from the cart: checkout.create takes line
-        # items directly and has no cart reference at all, which is worth pinning
-        # because it is the opposite of what the tool names suggest.
-        args=lambda ctx: {"payload": json.dumps({"line_items": _line_items(ctx)}), "dryRun": False},
-        capture=lambda payload, ctx: ctx.update(checkout_id=str(payload.get("id", ""))),
+        args=lambda ctx: {"payload": _checkout_create_payload(ctx), "dryRun": False},
+        # The line-item ids come back here and nowhere else the journey looks, and
+        # the next step needs them for fulfillment.methods[].line_item_ids.
+        capture=lambda payload, ctx: ctx.update(
+            checkout_id=str(payload.get("id", "")),
+            line_item_ids=_line_item_ids(payload),
+        ),
         needs=("product_id",),
         commits=True,
     ),
     JourneyStep(
         tool="shopware-ucp-checkout-update",
-        detail="add buyer and address",
+        detail="add buyer, address and payment",
         # line_items again: update is PUT, not PATCH. `payment` is required for
         # the checkout to reach ready_for_complete, and is where it has to be set
-        # — checkout-complete takes only an id, so there is no later opportunity.
-        # Its contents are not validated (an empty object works), so this carries
-        # the shape an agent would plausibly send rather than a magic value.
+        # — checkout-complete takes only an id and a payload of its own, so this
+        # is the last chance to attach the shipping destination.
         args=lambda ctx: {
             "id": ctx["checkout_id"],
             "payload": json.dumps(
                 {
                     "line_items": _line_items(ctx),
                     "buyer": BUYER,
-                    "fulfillment_address": ADDRESS,
+                    "fulfillment": _fulfillment(ctx),
                     "payment": PAYMENT,
                 }
             ),
             "dryRun": False,
         },
-        needs=("checkout_id", "product_id"),
+        # line_item_ids is a precondition, not an optional extra: without it the
+        # fulfillment block would be sent with an empty required field, and the
+        # journey would fail on our own malformed request rather than on anything
+        # the server did. Skipping names the missing piece instead.
+        needs=("checkout_id", "product_id", "line_item_ids"),
         commits=True,
     ),
     JourneyStep(
@@ -238,7 +432,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         commits=True,
     ),
     JourneyStep(
-        tool="shopware-ucp-order-get",
+        tool=ORDER_GET,
         detail="read the placed order back",
         args=lambda ctx: {"id": ctx["order_id"]},
         needs=("order_id",),
@@ -253,20 +447,135 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
 )
 
 
-def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: Context) -> tuple[float, str, JsonObject]:
-    """Run one step. Returns (elapsed, error, payload)."""
+# The steps a returning buyer repeats. Not the whole journey: the catalogue and the
+# cart tools were already proven, and repeating them would only add duplicate records.
+SECOND_ORDER_STEPS = (
+    "shopware-ucp-checkout-create",
+    "shopware-ucp-checkout-update",
+    "shopware-ucp-checkout-complete",
+)
+
+SECOND_ORDER_CHECK = "a signed-in buyer can place a second order"
+
+
+def run_second_order(rep: Reporter, session: str, endpoint: Endpoint, ctx: Context) -> None:
+    """Order again on the session that just ordered — which is what buyers do.
+
+    One order proves the checkout works once. This proves it is not a one-shot,
+    and that distinction is not academic: the checkout id doubles as the Shopware
+    context token, and `CheckoutCompletionStore` marks a completed id spent
+    permanently, so a repeated `checkout.complete` replays instead of charging
+    twice. A buyer's second order is then refused with `Completed checkout
+    sessions cannot be updated.`
+
+    The part that makes it the business's problem rather than the agent's:
+    **Shopware rotates the context token during completion** (the guest
+    registration calls `SalesChannelContextPersister::replace()`, which migrates
+    the row to a new token), so the id `checkout.complete` handed back is already
+    retired. The plugin knows the successor and stores it in its session metadata,
+    and returns it to nobody. So a returning agent has no correct move: the only
+    id it holds is a dead one. Tracked as O12; agentic-commerce#162 records the
+    two designs that failed because they defended the wrong invariant.
+
+    Reported as a check rather than as tool assertions on purpose. `checkout-update`
+    is not broken — it works for every first order — so failing its health entry
+    would suppress its fixtures and misname the fault, which is in the session
+    lifecycle.
+
+    Deliberately runs on the *same* id the first order used, because that is the
+    only id an agent has. Starting a fresh session works and proves nothing: it is
+    the workaround this check exists not to rely on.
+    """
+    first_order = str(ctx.get("order_id", ""))
+    steps = [step for step in UCP_JOURNEY if step.tool in SECOND_ORDER_STEPS]
+
+    for step in steps:
+        if missing := step.missing(ctx):
+            rep.check_fail(SECOND_ORDER_CHECK, f"precondition missing: {missing}")
+            return
+
+        outcome = _call(session, endpoint, step, ctx)
+        if outcome.error:
+            rep.check_fail(SECOND_ORDER_CHECK, f"{step.tool}: {outcome.error}")
+            return
+
+        step.capture(outcome.payload, ctx)
+
+    second_order = str(ctx.get("order_id", ""))
+    if not second_order or second_order == first_order:
+        # A replayed order id is the same failure wearing a success: completion
+        # answered from the first order's record instead of placing a new one.
+        rep.check_fail(SECOND_ORDER_CHECK, f"the second checkout returned order {second_order or '<none>'} again")
+        return
+
+    rep.check_pass(f"{SECOND_ORDER_CHECK} ({second_order[:8]}… after {first_order[:8]}…)")
+
+
+def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: Context) -> Outcome:
+    """Run one step."""
     started = time.monotonic()
     response = mcp_call(session, step.tool, step.args(ctx), endpoint=endpoint)
     elapsed = time.monotonic() - started
     text = mcp_result_text(response)
     error = (response.get("error") or {}).get("message", "") or inband_error(text) or ""
     if error:
-        return elapsed, error, {}
+        return Outcome(elapsed, error, _error_body(text), {})
     try:
         payload = as_object(cast(object, json.loads(text))).get("data")
     except (ValueError, TypeError):
-        return elapsed, "response was not readable JSON", {}
-    return elapsed, "", as_object(payload)
+        return Outcome(elapsed, "response was not readable JSON", {}, {})
+    return Outcome(elapsed, "", {}, as_object(payload))
+
+
+def _error_body(text: str) -> JsonObject:
+    """The tool's `error` object, for the fields `inband_error` flattens away."""
+    try:
+        return as_object(as_object(cast(object, json.loads(text))).get("error"))
+    except (ValueError, TypeError):
+        return {}
+
+
+def journey_for(persona: Persona) -> tuple[JourneyStep, ...]:
+    """The step list as this persona experiences it.
+
+    One step differs, and only in its verdict: a customer reads their own order
+    back, and a guest is refused. Everything else — every payload, every id — is
+    identical on purpose, so a difference in outcome is attributable to the
+    server rather than to the suite having sent two different things.
+    """
+    if persona.authenticated:
+        return UCP_JOURNEY
+
+    return tuple(replace(step, refusal=GUEST_ORDER_REFUSAL) if step.tool == ORDER_GET else step for step in UCP_JOURNEY)
+
+
+def _report_refusal(rep: Reporter, step: JourneyStep, outcome: Outcome, label: str) -> None:
+    """Grade a step whose refusal is the pass condition."""
+    expected = step.refusal
+    if expected is None:  # pragma: no cover - only called when it is set
+        return
+
+    if not outcome.error:
+        rep.tool_fail(
+            step.tool,
+            label,
+            f"the request succeeded; a {expected.code} refusal is required here, and serving it "
+            f"on a shared sales-channel key makes every order readable by id",
+        )
+        return
+
+    code = str(outcome.error_body.get("code", ""))
+    severity = str(outcome.error_body.get("severity", ""))
+    if (code, severity) != (expected.code, expected.severity):
+        rep.tool_fail(
+            step.tool,
+            label,
+            f"refused as {code or '<no code>'}/{severity or '<no severity>'}, expected "
+            f"{expected.code}/{expected.severity}: {outcome.error}",
+        )
+        return
+
+    rep.tool_pass(step.tool, label, f"refused as required: {code}/{severity} [{outcome.elapsed:.1f}s]")
 
 
 def run_ucp_journey(
@@ -275,6 +584,7 @@ def run_ucp_journey(
     endpoint: Endpoint,
     allow_mutations: bool = False,
     query: str = "",
+    persona: Persona = GUEST,
 ) -> Context:
     """Walk the buyer journey. Returns the context gathered along the way.
 
@@ -282,36 +592,44 @@ def run_ucp_journey(
     reported as skipped rather than silently omitted: a suite that quietly does
     less than it claims is worse than one that fails.
     """
-    steps = UCP_JOURNEY
+    steps = journey_for(persona)
     if not allow_mutations:
         for step in steps:
             rep.tool_skip(
                 step.tool,
-                f"{step.tool} ({step.detail})",
+                f"{step.tool} ({persona.name}: {step.detail})",
                 "journey needs --allow-mutations: it places a real order",
             )
         return {}
 
     ctx: Context = {"query": query}
+    if persona.authenticated:
+        # Read by checkout.create, and the reason the order belongs to this
+        # customer rather than to a guest registered on the spot.
+        ctx["context_token"] = persona.context_token
     if code := os.environ.get(PROMO_CODE_ENV, ""):
         ctx["promo_code"] = code
 
     for step in steps:
-        label = f"{step.tool} ({step.detail})"
+        label = f"{step.tool} ({persona.name}: {step.detail})"
         if missing := step.missing(ctx):
             # Name the precondition, not the symptom. "needs cart_id" points at
             # the step that should have produced it; "not found" does not.
             rep.tool_skip(step.tool, label, f"precondition missing: {missing}")
             continue
 
-        elapsed, error, payload = _call(session, endpoint, step, ctx)
-        if error:
-            rep.tool_fail(step.tool, label, f"{error} [{elapsed:.1f}s]")
+        outcome = _call(session, endpoint, step, ctx)
+        if step.refusal is not None:
+            _report_refusal(rep, step, outcome, label)
             continue
 
-        step.capture(payload, ctx)
-        note = f"{elapsed:.1f}s"
-        if elapsed > SLOW_STEP_S:
+        if outcome.error:
+            rep.tool_fail(step.tool, label, f"{outcome.error} [{outcome.elapsed:.1f}s]")
+            continue
+
+        step.capture(outcome.payload, ctx)
+        note = f"{outcome.elapsed:.1f}s"
+        if outcome.elapsed > SLOW_STEP_S:
             note += " — slow"
         rep.tool_pass(step.tool, label, note)
 

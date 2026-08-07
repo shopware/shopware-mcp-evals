@@ -12,7 +12,7 @@ from typing import cast
 
 import pytest
 
-from eval.result_schema import JsonObject, McpResponse, as_object
+from eval.result_schema import JsonObject, McpResponse, as_list, as_object
 from functional import journeys
 from functional.reporting import Reporter
 from mcp_client import Endpoint, store_endpoint
@@ -80,7 +80,20 @@ def test_ids_thread_forward_through_the_flow() -> None:
         missing = set(step.needs) - produced
         assert not missing, f"{step.tool} needs {sorted(missing)}, which no earlier step produces"
         ctx: JsonObject = {}
-        step.capture({"id": "x", "products": [{"id": "p", "title": "t"}], "order": {"id": "o"}}, ctx)
+        # `line_items` carries ids because a checkout response is REQUIRED to
+        # carry them (generated checkout.get.response, branch
+        # dev.ucp.shopping.checkout: required id, item, quantity, totals). A fake
+        # without them is not a response the server can produce, and leaving it
+        # out made this test claim nothing produces `line_item_ids`.
+        step.capture(
+            {
+                "id": "x",
+                "products": [{"id": "p", "title": "t"}],
+                "line_items": [{"id": "li-1", "item": {"id": "p"}, "quantity": 1}],
+                "order": {"id": "o"},
+            },
+            ctx,
+        )
         produced |= {key for key, value in ctx.items() if value}
 
 
@@ -97,11 +110,30 @@ def test_checkout_update_resends_the_whole_line_items_array() -> None:
     address" sends only the address and fails every time — so the journey has to
     demonstrate the working shape."""
     step = next(s for s in journeys.UCP_JOURNEY if s.tool == "shopware-ucp-checkout-update")
-    payload = as_object(cast(object, json.loads(str(step.args({"checkout_id": "c", "product_id": "p"})["payload"]))))
+    ctx: JsonObject = {"checkout_id": "c", "product_id": "p", "line_item_ids": ["li-1"]}
+    payload = as_object(cast(object, json.loads(str(step.args(ctx)["payload"]))))
 
     assert payload["line_items"], "update dropped line_items"
-    assert "buyer" in payload and "fulfillment_address" in payload
+    assert "buyer" in payload
     assert "payment" in payload, "without payment the checkout never reaches ready_for_complete"
+    # `fulfillment`, NOT a top-level `fulfillment_address` — that spelling is not
+    # a property of checkout.create/update at all, so it was accepted and dropped,
+    # and only surfaced at completion as "Checkout session is missing
+    # fulfillment.shipping_address".
+    assert "fulfillment_address" not in payload, "not a schema property; silently ignored"
+    method = as_object(as_list(as_object(payload["fulfillment"])["methods"])[0])
+    assert method["line_item_ids"] == ["li-1"], "the required field has to name real line items"
+    # The destination, in the one shape the oneOf accepts, and this pins a
+    # measurement rather than a preference. Branch 0 (shipping_destination)
+    # REQUIRES `id`; branch 1 (retail_location) requires `id` and `name`. So an
+    # `id` with the address inline and no `name` matches branch 0 alone, while a
+    # bare address matches neither and anything carrying `name` matches both.
+    # See journeys.DESTINATION_SHAPE for the measured table.
+    destination = as_object(as_list(method["destinations"])[0])
+    assert destination["id"], "branch 0 requires an id; without one the oneOf matches nothing"
+    assert "name" not in destination, "name pulls the object into retail_location too, matching both branches"
+    assert destination["street_address"], "schema.org names, not Shopware's street/zipcode/city"
+    assert method["selected_destination_id"] == destination["id"]
 
 
 def test_cart_update_repeats_the_id_inside_the_payload() -> None:
@@ -137,7 +169,21 @@ def _stub_transport(monkeypatch: pytest.MonkeyPatch, responses: dict[str, JsonOb
     def fake_call(_session: str, tool: str, args: JsonObject, endpoint: Endpoint | None = None) -> McpResponse:
         assert endpoint is None or endpoint is STORE
         seen.append((tool, args))
-        body = responses.get(tool, {"success": True, "data": {"id": f"{tool}-id"}})
+        # `line_items` on every default body, because a real cart or checkout
+        # response is required to carry them with ids, and the journey reads those
+        # ids to build fulfillment.methods[].line_item_ids. Without them the
+        # checkout-update step skips on a missing precondition and takes the rest
+        # of the flow with it — which is a fake-shaped failure, not a real one.
+        body = responses.get(
+            tool,
+            {
+                "success": True,
+                "data": {
+                    "id": f"{tool}-id",
+                    "line_items": [{"id": f"{tool}-li-1", "item": {"id": "prod-1"}, "quantity": 1}],
+                },
+            },
+        )
         return {"result": {"content": [{"type": "text", "text": json.dumps(body)}]}}
 
     def result_text(resp: McpResponse) -> str:
@@ -151,9 +197,27 @@ def _stub_transport(monkeypatch: pytest.MonkeyPatch, responses: dict[str, JsonOb
 
 SEARCH_OK: JsonObject = {"success": True, "data": {"products": [{"id": "prod-1", "title": "A Guitar"}]}}
 
+# What a conformant server answers a guest order read with, and what the guest
+# journey therefore has to see to pass. `code` and `severity` are the assertion;
+# the prose is here only to look like the real thing.
+ORDER_REFUSED: JsonObject = {
+    "success": False,
+    "error": {
+        "type": "not_found",
+        "code": "not_found",
+        "severity": "unrecoverable",
+        "message": 'Order "o" is not available to this request. Use the permalink_url returned by checkout.complete.',
+    },
+}
+
+GUEST_OK: dict[str, JsonObject] = {
+    "shopware-ucp-catalog-search": SEARCH_OK,
+    "shopware-ucp-order-get": ORDER_REFUSED,
+}
+
 
 def test_a_full_pass_threads_ids_and_records_every_tool(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen = _stub_transport(monkeypatch, {"shopware-ucp-catalog-search": SEARCH_OK})
+    seen = _stub_transport(monkeypatch, dict(GUEST_OK))
     rep = _reporter()
 
     ctx = journeys.run_ucp_journey(rep, "sid", STORE, allow_mutations=True)
@@ -171,16 +235,11 @@ def test_a_full_pass_threads_ids_and_records_every_tool(monkeypatch: pytest.Monk
 def test_an_in_band_failure_is_a_failure_and_stops_its_dependants(monkeypatch: pytest.MonkeyPatch) -> None:
     """The failure mode the whole exercise exists for: HTTP 200, no JSON-RPC
     error, `success: false` in the body."""
-    _stub_transport(
-        monkeypatch,
-        {
-            "shopware-ucp-catalog-search": SEARCH_OK,
-            "shopware-ucp-cart-create": {
-                "success": False,
-                "error": {"type": "validation", "message": "nope", "violations": ["$.line_items is required"]},
-            },
-        },
-    )
+    cart_create_rejected: JsonObject = {
+        "success": False,
+        "error": {"type": "validation", "message": "nope", "violations": ["$.line_items is required"]},
+    }
+    _stub_transport(monkeypatch, GUEST_OK | {"shopware-ucp-cart-create": cart_create_rejected})
     rep = _reporter()
 
     ctx = journeys.run_ucp_journey(rep, "sid", STORE, allow_mutations=True)
@@ -193,9 +252,219 @@ def test_an_in_band_failure_is_a_failure_and_stops_its_dependants(monkeypatch: p
     assert "shopware-ucp-cart-get" in skipped and "shopware-ucp-cart-update" in skipped
 
 
+CUSTOMER = journeys.Persona("customer", "ctx-token-42")
+
+
+def test_a_guest_passes_by_being_refused_the_order_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The order spec's MUST: a business authenticates order reads, and a
+    platform credential does not authenticate the session that placed a guest
+    order. So the refusal is the correct answer and the journey grades it as one."""
+    _stub_transport(monkeypatch, dict(GUEST_OK))
+    rep = _reporter()
+
+    journeys.run_ucp_journey(rep, "sid", STORE, allow_mutations=True)
+
+    read = next(r for r in rep.records if r["tool"] == journeys.ORDER_GET)
+    assert read["status"] == "pass"
+    assert "not_found/unrecoverable" in read.get("preview", "")
+
+
+def test_a_guest_order_read_that_succeeds_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a shared, semi-public sales-channel key, serving the order means any
+    key holder can read any order by id. A green here would report that as
+    working."""
+    _stub_transport(monkeypatch, {"shopware-ucp-catalog-search": SEARCH_OK})
+    rep = _reporter()
+
+    journeys.run_ucp_journey(rep, "sid", STORE, allow_mutations=True)
+
+    read = next(r for r in rep.records if r["tool"] == journeys.ORDER_GET)
+    assert read["status"] == "fail"
+    assert "readable by id" in read.get("error", ""), "the report has to say what the success costs"
+
+
+def test_the_refusal_is_graded_on_code_and_severity_not_on_being_an_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure this exists for: Shopware's own `Customer is not logged in.`
+    403, which reaches the agent as invalid_request/recoverable and tells it to
+    retry something no retry can fix (agentic-commerce#162). It is an error, so a
+    suite checking only "did it fail" would have passed it for a year."""
+    _stub_transport(
+        monkeypatch,
+        {
+            "shopware-ucp-catalog-search": SEARCH_OK,
+            journeys.ORDER_GET: {
+                "success": False,
+                "error": {
+                    "type": "validation",
+                    "code": "invalid_request",
+                    "severity": "recoverable",
+                    "message": "Customer is not logged in.",
+                },
+            },
+        },
+    )
+    rep = _reporter()
+
+    journeys.run_ucp_journey(rep, "sid", STORE, allow_mutations=True)
+
+    read = next(r for r in rep.records if r["tool"] == journeys.ORDER_GET)
+    assert read["status"] == "fail"
+    assert "invalid_request/recoverable" in read.get("error", "")
+    assert "not_found/unrecoverable" in read.get("error", ""), "the report has to name what was expected"
+
+
+def test_a_customer_must_read_their_own_order_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half: authenticated, the read has to work. Nothing else in the
+    suite proves order-get ever returns an order."""
+    _stub_transport(monkeypatch, {"shopware-ucp-catalog-search": SEARCH_OK})
+    rep = _reporter()
+
+    journeys.run_ucp_journey(rep, "sid", STORE, allow_mutations=True, persona=CUSTOMER)
+
+    read = next(r for r in rep.records if r["tool"] == journeys.ORDER_GET)
+    assert read["status"] == "pass"
+    assert all(step.refusal is None for step in journeys.journey_for(CUSTOMER))
+
+
+def test_a_customer_anchors_the_checkout_to_their_own_context_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured, and the whole reason the customer half is not just the guest half
+    with a header: `createCheckout` uses `cartId ?? generate()` as its Shopware
+    context token. Without `cart_id` the checkout gets a fresh anonymous context
+    and the order is placed for a guest registered on the spot, however the
+    caller is logged in — every step still passes, and the order belongs to
+    somebody who does not exist."""
+    seen = _stub_transport(monkeypatch, {"shopware-ucp-catalog-search": SEARCH_OK})
+
+    journeys.run_ucp_journey(_reporter(), "sid", STORE, allow_mutations=True, persona=CUSTOMER)
+
+    create = next(args for tool, args in seen if tool == "shopware-ucp-checkout-create")
+    assert as_object(cast(object, json.loads(str(create["payload"]))))["cart_id"] == CUSTOMER.context_token
+
+
+def test_a_guest_sends_no_cart_id_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """checkout.create takes line items directly and has no cart reference — the
+    opposite of what the tool names suggest, so the guest flow pins it."""
+    seen = _stub_transport(monkeypatch, dict(GUEST_OK))
+
+    journeys.run_ucp_journey(_reporter(), "sid", STORE, allow_mutations=True)
+
+    create = next(args for tool, args in seen if tool == "shopware-ucp-checkout-create")
+    assert "cart_id" not in as_object(cast(object, json.loads(str(create["payload"]))))
+
+
+def test_both_personas_send_the_same_requests_apart_from_the_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Otherwise a difference in outcome is attributable to the suite rather than
+    to the server, which is the one thing the comparison is for."""
+    guest_seen = _stub_transport(monkeypatch, dict(GUEST_OK))
+    journeys.run_ucp_journey(_reporter(), "sid", STORE, allow_mutations=True)
+    guest = [(tool, args) for tool, args in guest_seen]
+
+    customer_seen = _stub_transport(monkeypatch, {"shopware-ucp-catalog-search": SEARCH_OK})
+    journeys.run_ucp_journey(_reporter(), "sid", STORE, allow_mutations=True, persona=CUSTOMER)
+
+    assert [tool for tool, _ in guest] == [tool for tool, _ in customer_seen]
+    differing = [
+        tool
+        for (tool, guest_args), (_, customer_args) in zip(guest, customer_seen, strict=True)
+        if guest_args != customer_args
+    ]
+    assert differing == ["shopware-ucp-checkout-create"]
+
+
+def _ordered_context() -> JsonObject:
+    """A context as the customer journey leaves it: one order already placed."""
+    return {"product_id": "prod-1", "context_token": CUSTOMER.context_token, "order_id": "order-1"}
+
+
+def test_a_second_order_repeats_only_the_checkout_steps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The catalogue and cart tools were proven by the journey; repeating them would
+    add duplicate records and prove nothing new."""
+    seen = _stub_transport(
+        monkeypatch,
+        {"shopware-ucp-checkout-complete": {"success": True, "data": {"order": {"id": "order-2"}}}},
+    )
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, _ordered_context())
+
+    assert [tool for tool, _ in seen] == list(journeys.SECOND_ORDER_STEPS)
+    assert rep.failed == 0
+    assert rep.passed == 1
+
+
+def test_a_second_order_runs_on_the_same_session_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Starting a fresh session would test the workaround instead of the thing that
+    is broken. The point is that the buyer who just ordered can order again."""
+    seen = _stub_transport(
+        monkeypatch,
+        {"shopware-ucp-checkout-complete": {"success": True, "data": {"order": {"id": "order-2"}}}},
+    )
+
+    journeys.run_second_order(_reporter(), "sid", STORE, _ordered_context())
+
+    create = next(args for tool, args in seen if tool == "shopware-ucp-checkout-create")
+    assert as_object(cast(object, json.loads(str(create["payload"]))))["cart_id"] == CUSTOMER.context_token
+
+
+def test_the_refusal_a_returning_buyer_actually_gets_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What the live lane answers today (O12): the checkout id doubles as the context
+    token, a completed id is spent permanently, and a signed-in buyer's token never
+    changes — so the second order is refused."""
+    _stub_transport(
+        monkeypatch,
+        {
+            "shopware-ucp-checkout-update": {
+                "success": False,
+                "error": {
+                    "type": "validation",
+                    "code": "invalid_request",
+                    "severity": "recoverable",
+                    "message": "Completed checkout sessions cannot be updated.",
+                },
+            }
+        },
+    )
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, _ordered_context())
+
+    failure = next(r for r in rep.records if r["status"] == "fail")
+    assert failure["tool"] == "check", "the fault is in the session lifecycle, not in the tool"
+    assert "cannot be updated" in failure.get("error", "")
+
+
+def test_a_replayed_order_id_does_not_count_as_a_second_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same failure wearing a success: completion answered from the first order's
+    record instead of placing a new one, and the ids give it away."""
+    _stub_transport(
+        monkeypatch,
+        {"shopware-ucp-checkout-complete": {"success": True, "data": {"order": {"id": "order-1"}}}},
+    )
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, _ordered_context())
+
+    assert rep.failed == 1
+    assert any("order-1 again" in r.get("error", "") for r in rep.records)
+
+
+def test_a_second_order_is_not_attempted_without_a_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A journey that never reached an order has nothing to repeat, and saying
+    "precondition missing" points at where it actually stopped."""
+    seen = _stub_transport(monkeypatch, {})
+    rep = _reporter()
+
+    journeys.run_second_order(rep, "sid", STORE, {"context_token": CUSTOMER.context_token})
+
+    assert seen == []
+    assert any("precondition missing" in r.get("error", "") for r in rep.records)
+
+
 def test_the_promo_code_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(journeys.PROMO_CODE_ENV, "SAVE15")
-    seen = _stub_transport(monkeypatch, {"shopware-ucp-catalog-search": SEARCH_OK})
+    seen = _stub_transport(monkeypatch, dict(GUEST_OK))
 
     journeys.run_ucp_journey(_reporter(), "sid", STORE, allow_mutations=True)
 

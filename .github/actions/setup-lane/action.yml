@@ -63,6 +63,20 @@ outputs:
   sales_channel_id:
     description: The sales channel that owns app_url, and whose UCP config was set.
     value: ${{ steps.sc.outputs.sales_channel_id }}
+  promo_code:
+    description: >
+      Redeemable promotion code for the UCP buyer journey's discount step. Empty
+      if the promotion could not be created, which makes that step skip rather
+      than fail.
+    value: ${{ steps.sc.outputs.promo_code }}
+  log_file:
+    description: >
+      Basename of the log file this lane seeded a known line into, e.g.
+      `test-2026-08-06.log`. Empty if the seeding could not verify its own write,
+      in which case the two dev-tools log readers fall back to asking the tool
+      what files exist. Passed to the suite as MCP_EVALS_LOG_FILE so it never has
+      to recover the name from an error message.
+    value: ${{ steps.seed.outputs.log_file }}
   store_plugin_ok:
     description: Whether agentic-commerce installed. Gates every Store step downstream.
     value: ${{ steps.plugins.outputs.store_plugin_ok }}
@@ -148,6 +162,50 @@ runs:
 
     # Installs PHP, MySQL, composer, clones shopware/shopware @ SHA into ./shopware,
     # and runs system:install. Org-standard primitive used across Shopware repos.
+    # env: prod, and this is the root cause of the store preflight failure, found
+    # by patching the SDK's exception listener to name the exception it was
+    # swallowing:
+    #
+    #   LogicException: No profile configured on
+    #   Swag\AgenticCommerce\Ucp\Test\StaticAgentProfileFetcher. Call setProfile()
+    #   from the test before issuing a UCP runtime request.
+    #   @ .../SwagAgenticCommerce/src/Ucp/Test/StaticAgentProfileFetcher.php:37
+    #
+    # Under APP_ENV=test the plugin wires a PHPUnit test double in place of the
+    # real HTTP agent-profile fetcher, and that double throws unless a test has
+    # called setProfile() on it. No amount of configuration could have fixed
+    # that: the lane was never going to fetch a profile over HTTP, because in
+    # test env nothing is wired to.
+    #
+    # The evidence was in front of us for a while and read as noise: var/log held
+    # only test-<date>.log, `framework:demodata` had to be invoked with an
+    # explicit APP_ENV=prod below because it REFUSES to run under test, and the
+    # log-seeding step defaulted to test. Each was treated as a quirk to work
+    # around rather than as the lane running in the wrong environment.
+    #
+    # dev rather than prod, and the choice is load-bearing in three ways.
+    # TestAgentProfileFetcherCompilerPass gates the double on the environment
+    # being exactly 'test' — its own docblock says "a no-op outside the `test`
+    # environment, so deployed dev/prod keep the real fetcher" — so dev is enough
+    # to get the real HTTP fetcher back. Beyond that:
+    #
+    #   * `shopware.media.enable_url_validation` is false in dev/test/e2e and
+    #     true in the default config. Under prod the media-upload probe failed
+    #     with 'Provided URL "http://localhost:8000/mcp-evals-probe.png" is not
+    #     allowed' — a localhost URL cannot pass a validator meant for public
+    #     ones, so prod would need a config override to keep that fixture.
+    #   * dev writes var/log/dev-<date>.log. Under prod nothing was written at
+    #     all, which is what made the swallowed exception unreachable for eight
+    #     runs and forced a patch to the SDK to see it.
+    #   * prod additionally hides .env.local behind a dumped .env.local.php,
+    #     which is the likeliest reason the UCP profile-fetching dev-mode flag
+    #     had no effect there ("Plain http is only allowed when profile fetching
+    #     development mode is enabled") despite being present in .env.local.
+    #
+    # Worth being straight about the trade: prod is the more faithful thing to
+    # measure, and dev is chosen here because the lane serves itself over plain
+    # http on localhost — which prod is right to refuse. If this suite ever needs
+    # to measure prod, it needs a publicly-resolvable lane, not a config override.
     - name: Setup Shopware
       uses: shopware/setup-shopware@main
       with:
@@ -156,7 +214,7 @@ runs:
         shopware-github-token: ${{ inputs.github_token }}
         path: shopware
         install: true
-        env: test
+        env: dev
         php-version: '8.3'
 
     # SwagMcpDevTools and SwagMcpMerchantTools track their repo DEFAULT branch:
@@ -213,19 +271,35 @@ runs:
       uses: actions/checkout@v7
       with:
         repository: shopware/agentic-commerce
-        # TEMPORARY PIN — remove when shopware/agentic-commerce#154 merges.
+        # No pin: #154 (in-band tool errors + dryRun) and #155 (checkout-complete
+        # payment, schema-valid discount responses) are both merged to main, so
+        # the default branch is what we want. An empty ref means "the repo default
+        # branch", which also survives a rename.
         #
-        # The default branch has neither in-band tool errors nor dryRun, so CI
-        # sees `-32603 Error while executing tool` with an empty body and
-        # nothing logged, where a lane with #154 gets
-        # `{"success":false,"error":{...,"violations":[...]}}`. That difference
-        # is the entire reason a local run and a CI run disagreed for a whole
-        # afternoon, and without the pin the UCP journey here reports failures
-        # nobody can act on.
-        ref: ${{ github.event.inputs.agentic_commerce_ref || 'fix/mcp-tool-error-visibility-and-catalog-lookup-ids' }}
+        # #155 is what should clear the two remaining functional-store failures —
+        # `checkout.complete.request ($.payment is required)` and
+        # `discount.apply.response ($ must match exactly one allowed schema)` —
+        # and with them the cascading `order-get` skip, since that only skipped
+        # for want of an order_id.
+        ref: ${{ github.event.inputs.agentic_commerce_ref }}
         token: ${{ inputs.plugins_pat }}
         path: shopware/custom/plugins/SwagAgenticCommerce
         fetch-depth: 1
+
+    # The ucp-php-sdk fork checkout that used to sit here is GONE. #107 and #108
+    # are merged and released in 0.0.3 (2026-08-04), so the lane can take the
+    # SDK from Packagist like any other dependency, and CI no longer depends on
+    # a personal fork branch that could move or vanish.
+    #
+    # Kept for the record, because the trick is not obvious: that fork carried a
+    # `version` field of **0.0.2.1** rather than 0.0.2, specifically so a path
+    # repository could satisfy the plugin's `^0.0.2`. That constraint is the
+    # reason the released 0.0.3 cannot simply be picked up — see the composer
+    # patch in the next step.
+    #
+    # `ucp_sdk_ref` stays as a workflow input. It no longer selects a checkout,
+    # it selects the version constraint, which is the useful knob for pinning a
+    # future SDK release or bisecting one.
 
     - name: Wire up MCP bundle + plugin
       id: plugins
@@ -233,6 +307,26 @@ runs:
       working-directory: shopware
       env:
         STORE_CHECKOUT_OK: ${{ steps.agentic_checkout.outcome == 'success' }}
+        # `ucp_sdk_ref` used to name a branch to check out; it now names a
+        # Composer constraint, since the SDK comes from Packagist.
+        #
+        # A RANGE, not a caret, and that is the whole point. Composer's caret pins
+        # the last specified digit on a 0.0.x package, so `^0.0.3` means
+        # `>=0.0.3 <0.0.4` and EXCLUDES 0.0.4 — verified with Composer's own semver.
+        # That is exactly what broke this lane: the plugin now requires
+        # `ucp-php-sdk/symfony-bundle: >=0.0.4 <0.1.0` (agentic-commerce#160), so
+        # requiring `^0.0.3` alongside it is unsatisfiable, `composer require` fails,
+        # and the store plugin never installs.
+        #
+        # This is the FOURTH time this repo family has been bitten by caret-on-0.0.x:
+        # the plugin's own `^0.0.2` (retired by agentic-commerce#157), the SDK
+        # bundle's `^0.0.2` on core (ucp-php-sdk#110), the SDK 0.0.4 floor bump
+        # (ucp-php-sdk#113), and here. Ranges do not have this failure mode.
+        #
+        # The floor tracks the plugin's, which is now 0.0.5
+        # (agentic-commerce#167): a lower constraint here is unsatisfiable
+        # alongside it, so this value is not free to lag behind.
+        UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '>=0.0.5 <0.1.0' }}
       run: |
         set -euo pipefail
 
@@ -261,11 +355,54 @@ runs:
         elif [ "${STORE_CHECKOUT_OK}" != "true" ]; then
           STORE_SKIP_REASON="the \`shopware/agentic-commerce\` checkout failed — \`PLUGINS_PAT\` is most likely not scoped to that repository (the API answers \`Not Found\`). Grant the token access to it."
         else
+          # The composer patch that used to sit here is gone, retired by its own
+          # exit condition. It widened the plugin's `ucp-php-sdk/symfony-bundle:
+          # ^0.0.2` to a range, because Composer's caret on a 0.0.x package means
+          # `>=0.0.2 <0.0.3` and therefore excluded 0.0.3 and every later release
+          # — the lane would have installed 0.0.2 and looked healthy while
+          # measuring an SDK without #107 or #108.
+          #
+          # shopware/agentic-commerce#157 fixed that upstream, so the plugin now
+          # declares `>=0.0.2 <0.1.0` itself and nothing here needs to rewrite it.
+          # The explicit require below is what still decides WHICH allowed version
+          # gets installed.
           composer config repositories.swag-agentic-commerce path custom/plugins/SwagAgenticCommerce
-          if composer require shopware/agentic-commerce:@dev --no-interaction --no-scripts; then
+          # The SDK constraint is required explicitly alongside the plugin, so the
+          # resolver has to satisfy it rather than settling for whatever the
+          # plugin's own floor allows. This is also what `ucp_sdk_ref` now
+          # controls.
+          if composer require shopware/agentic-commerce:@dev \
+            "ucp-php-sdk/symfony-bundle:${UCP_SDK_CONSTRAINT}" \
+            --no-interaction --no-scripts; then
             STORE_PLUGIN_OK=true
           else
             STORE_SKIP_REASON="\`composer require shopware/agentic-commerce\` failed against this Shopware ref — see the step log for the resolver output."
+          fi
+        fi
+
+        # A version nobody checks is a version that regresses without telling
+        # anyone, and the symptom would be CI quietly measuring SDK 0.0.2 again —
+        # which looks identical to measuring 0.0.3, right up until an error comes
+        # back untyped. The plugin's `^0.0.2` makes that the DEFAULT outcome if
+        # the patch above stops matching, so this check is load-bearing rather
+        # than decorative. Assert on a file only #108 added.
+        # Reported through an ANNOTATION either way, not just on failure. The first
+        # version echoed the success case to stdout, and a passing job's log is not
+        # retrievable through the REST API — so "did the pin take?" was unanswerable
+        # from outside, which is the one question it exists to answer. Silence read
+        # as either outcome.
+        if [ "${STORE_PLUGIN_OK}" = "true" ]; then
+          SDK_VERSION=$(composer show ucp-php-sdk/core --no-interaction 2>/dev/null \
+            | sed -n 's/^versions *: *\**//p' | head -1)
+          # The message says what the version RULES OUT, not what it proves. It
+          # used to read "a store failure reported as `internal` is therefore NOT
+          # the profile fetch", which overreached: APP_ENV=test produced
+          # `internal` too, from StaticAgentProfileFetcher, and that inference
+          # invited the wrong conclusion for several runs.
+          if [ -f vendor/ucp-php-sdk/core/src/Exception/AgentProfileException.php ]; then
+            echo "::notice::ucp-php-sdk ${SDK_VERSION:-unknown} installed, AgentProfileException present (#108). A profile-fetch failure will be typed and answered 424 rather than flattened to 500 — but \`internal\` has other causes (APP_ENV=test wires a profile-fetcher test double), so this rules one out, it does not identify the fault."
+          else
+            echo "::warning::ucp-php-sdk ${SDK_VERSION:-unknown} has no AgentProfileException, so #107/#108 are MISSING and a profile-fetch failure will report a bare \`internal\`. Most likely the requested constraint resolved below 0.0.3 — check the \`composer require\` resolver output earlier in this step."
           fi
         fi
 
@@ -289,20 +426,94 @@ runs:
           # Store suite measures nothing.
           #
           # Each one carries a `UCP-Agent: <name> profile="<uri>"` header whose
-          # URI the SDK fetches and validates (UrlSafetyValidator). Plain http
-          # is refused unless BOTH the host is exactly localhost/127.0.0.1/::1
-          # AND this flag is on — a deliberate SSRF guard, since the server is
-          # about to fetch a URL an untrusted caller chose.
+          # URI the SDK fetches and validates (UrlSafetyValidator). Plain http is
+          # refused unless BOTH isLocalHost() accepts the host AND dev mode is on
+          # — a deliberate SSRF guard, since the server is about to fetch a URL an
+          # untrusted caller chose.
           #
-          # APP_URL is http://localhost:8000, so the host half already holds.
-          # Written to .env.local rather than exported because the daemonized
-          # web server is what serves the calls, not this shell.
+          # isLocalHost() accepts `localhost`, `127.0.0.1`, `::1` AND any
+          # `.localhost` subdomain:
           #
-          # This is what makes CI able to run these tools at all and a local
-          # `<shop>.localhost` dev instance not: `.localhost` subdomains are
-          # loopback by RFC 6761 but the SDK's isLocalHost() matches the bare
-          # name only, and no config setting can reach past that check.
+          #   return in_array($host, ['localhost', '127.0.0.1', '::1'], true)
+          #       || str_ends_with($host, '.localhost');
+          #
+          # So a local `<shop>.localhost` lane clears this gate exactly as CI's
+          # `localhost:8000` does. A comment here previously claimed the opposite —
+          # that it matched the bare name only and no config could reach past it —
+          # which was wrong on both counts and is corrected rather than deleted,
+          # because it was cited more than once while debugging.
+          #
+          # This write is NOT sufficient on its own, and that is the other half of
+          # the correction. `.env.local` only reaches a process that reads it, and
+          # the CLI, this shell and the daemonized web server are three different
+          # environments — so the flag is also set as
+          # `ucp_sdk.profile_fetching_development_mode` in config/packages further
+          # down, which is compiled into the container and applies to all of them.
+          # That config key is what actually fixed it.
           echo 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' >> .env.local
+        fi
+
+        # Set profile_fetching_development_mode in the ucp_sdk CONFIG, not only as
+        # an environment variable.
+        #
+        # The plugin's services.php declares it as
+        #   'profile_fetching_development_mode' =>
+        #     env('bool:default:defaults_bool_false:SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE')
+        # so the value depends on that variable reaching the process that serves
+        # the request — and the daemonized server, the CLI and the runner are three
+        # different environments here. Writing the config key instead removes the
+        # question: it is compiled into the container and applies to every process,
+        # whatever their environments hold.
+        #
+        # zzz- prefix so it loads last among config/packages and wins on merge.
+        # Kept alongside the environment variable rather than replacing it, because
+        # which of the two wins depends on whether the plugin's extension() call is
+        # merged before or after app config — and with both set, either order gives
+        # true.
+        # ONLY when the SDK is actually installed. `ucp_sdk` is that bundle's
+        # extension namespace, so writing this key without it makes EVERY later
+        # `bin/console` call die:
+        #
+        #   There is no extension able to load the configuration for "ucp_sdk"
+        #   ... Looked for namespace "ucp_sdk", found "framework", "monolog", …
+        #   Error: Process completed with exit code 255
+        #
+        # Which is how a store-plugin failure took down `debug:mcp` and the whole
+        # static-checks job — directly against this step's own intent, three
+        # paragraphs up, that a store-plugin problem "must not take down the admin
+        # evals, which are the main signal". It was unguarded, so the skip was not a
+        # skip: it was a fatal error two steps later, in a job that has nothing to do
+        # with the store.
+        if [ "${STORE_PLUGIN_OK}" = "true" ]; then
+          mkdir -p config/packages
+          cat > config/packages/zzz-mcp-evals-ucp.yaml <<'YAML'
+        # Written by .github/actions/setup-lane. CI lane only.
+        #
+        # The lane serves its own UCP profile over plain http on localhost, which
+        # the SDK's UrlSafetyValidator refuses unless this is on:
+        #   "Plain http is only allowed when profile fetching development mode is
+        #    enabled."
+        # There is no way around it for a loopback lane — the check exists to stop
+        # a production shop trusting an unencrypted profile, which is correct.
+        ucp_sdk:
+            profile_fetching_development_mode: true
+        YAML
+          echo "Wrote config/packages/zzz-mcp-evals-ucp.yaml (ucp_sdk.profile_fetching_development_mode: true)"
+        else
+          # Belt and braces: a previous run on a cached lane may have left one.
+          rm -f config/packages/zzz-mcp-evals-ucp.yaml
+          echo "Skipped config/packages/zzz-mcp-evals-ucp.yaml — the SDK is not installed, so the ucp_sdk namespace does not exist."
+        fi
+
+        # A dumped .env.local.php SHADOWS .env.local entirely — Symfony reads the
+        # snapshot and never looks at the file. If one was written at install
+        # time, every variable appended above is invisible, which is the likeliest
+        # reason the dev-mode flag had no effect under prod even though the
+        # assertion further down found it in .env.local. Removing it costs
+        # nothing on a throwaway lane and closes a trap that is silent by design.
+        if [ -f .env.local.php ]; then
+          echo "Removing .env.local.php: it would shadow the variables appended to .env.local."
+          rm -f .env.local.php
         fi
 
         # Turn the MCP rate limiter off on this throwaway instance.
@@ -350,6 +561,15 @@ runs:
         # Restart the daemonized symfony web server so PHP-FPM workers reload
         # the freshly compiled container (otherwise opcache serves stale bytecode).
         symfony server:stop 2>/dev/null || true
+        # The UCP dev-mode flag is passed into the server's OWN environment, not
+        # left to .env.local. A real environment variable beats dotenv, and the
+        # daemonized server snapshots its environment when it starts — so the flag
+        # being in .env.local (where `debug:dotenv` and the assertion below both
+        # find it) does not put it in the process that serves UCP requests. That
+        # gap is why the lane kept answering "Plain http is only allowed when
+        # profile fetching development mode is enabled" in both prod and dev while
+        # every file-level check passed.
+        SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1 \
         SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
           symfony server:start
 
@@ -371,6 +591,7 @@ runs:
     # so they actually run. Non-fatal: if seeding fails, those assertions just
     # skip as before — it must never turn the whole eval red.
     - name: Seed demo data
+      id: seed
       shell: bash
       working-directory: shopware
       continue-on-error: true
@@ -440,8 +661,16 @@ runs:
         # The step's own receipt. `continue-on-error` above hides an exit code,
         # so the only way a half-run seeding is visible is if the last thing it
         # does is check its own work.
+        #
+        # It also publishes the filename, which is the point. The suite used to
+        # recover it by calling the log tool with no `file` and parsing the list
+        # out of the resulting *error message* — so a lane that had seeded a log
+        # perfectly still skipped both readers the moment that error text moved,
+        # and reported it as "no log files on this instance". The name is known
+        # right here; there is no reason to make anything guess it.
         if grep -q 'mcp-evals lane probe 4f21a7' "${PROBE_LOG}" 2>/dev/null; then
           echo "Seeded log probe into ${PROBE_LOG}"
+          echo "log_file=${PROBE_LOG#var/log/}" >> "$GITHUB_OUTPUT"
         else
           echo "::warning::log probe not written to ${PROBE_LOG}; the dev-tools log readers will SKIP"
         fi
@@ -578,12 +807,335 @@ runs:
           --agent-allowlist="${UCP_HOST}" \
           --platform-allowlist="${UCP_HOST}"
 
-        # The dev-mode flag is the one gate that is not sales-channel config,
-        # so assert it rather than trusting the earlier step wrote it.
+        # A signing key, which no step has ever created here. This is the
+        # sharpest asymmetry between CI and the lane the suite passes on: that
+        # lane has an active ES256 key (`ucp:signing-keys:list` reports one
+        # created 2026-06-30), and a freshly installed CI lane has none.
+        #
+        # Speculative as a fix, and said plainly: `signaturePolicy=off` above
+        # means INBOUND requests are not verified, so a missing key should not
+        # matter for them — but nothing says outbound response signing or
+        # discovery key publication tolerates its absence, and the failure this
+        # is chasing is a 500 that logs nothing at all. Cheap, additive, and it
+        # cannot affect the Admin lane, which is why it is worth one run to
+        # eliminate.
+        #
+        # Idempotent by kid: re-running with the default kid does not stack keys.
+        bin/console ucp:signing-keys:generate --sales-channel="${SC_ID}" \
+          --no-interaction --no-ansi || echo "::warning::ucp:signing-keys:generate failed; UCP response signing has no key on this lane."
+
+        # Exposure and transports, which `ucp:config:set` cannot write — its
+        # --help lists sales-channel, signature-policy, idempotency, the three
+        # allowlists, embedded origins/frame-ancestors, webhook-url-override and
+        # continue-url-template, and nothing for either of these. The
+        # Administration writes them (Agentic Commerce > Exposure), so on a
+        # freshly installed lane nobody has, and CI's UCP profile came back
+        # advertising zero services and zero capabilities.
+        #
+        #   active            whether UCP answers on this channel at all.
+        #                     `ucp:config:validate` reports it as
+        #                     "[inactive] UCP is off on this sales channel".
+        #   enabledTransports which protocols are served. Defaults WITHOUT
+        #                     'mcp', which is the one this suite speaks.
+        #
+        # Capabilities are deliberately NOT set. `ucp:config:show` on a working
+        # lane reports enabledCapabilities already defaulting to all five
+        # (catalog, cart, discount, checkout, order) on every channel, exposed
+        # or not — so the empty `capabilities` in CI's advertised profile was a
+        # symptom of the channel being unexposed, not a separate thing to
+        # configure. Exposure and the transport are the whole difference.
+        #
+        # --json for both, and it is not cosmetic. Without it the value arrives
+        # as the string "true" / as two stray positional arguments, and
+        # `system:config:set` prints its usage line and exits 0 — a silent
+        # no-op. The verification below is what makes that visible.
+        CAPABILITIES='["catalog","cart","discount","checkout","order"]'
+        TRANSPORTS='["rest","a2a","embedded","mcp"]'
+
+        # Written through the ADMIN API, because system_config is not where a
+        # sales-channel-scoped UCP config lives. UcpConfigService::getConfig():
+        #
+        #   $config = $this->repository->find($salesChannelId);
+        #   if (null !== $config) { return $config; }   // <- returns HERE
+        #   // system_config is only reached as a legacy fallback, and when it is
+        #   // used the values are migrated INTO the repository
+        #
+        # A fresh install writes a repository row holding the defaults, so
+        # find() returns non-null and every `system:config:set` this step used to
+        # make was read by nothing. It wrote real rows — `system:config:get` read
+        # them straight back, which is exactly why they looked like they had
+        # worked — into a table the plugin never consults for this scope. That
+        # single fact accounts for the whole run of contradictory readings:
+        # verification agreed with the writes because both used system_config,
+        # while the server answered from the repository.
+        #
+        # The lane the suite passes on works because it PREDATES that table: its
+        # legacy system_config rows hit the fallback above and were migrated in
+        # on first read. That is why copying its config was never going to be
+        # enough — the copy has to go through the service, not around it.
+        #
+        # PUT is a partial merge (see saveConfig's docblock), so this sets the
+        # Exposure subset the Administration owns and leaves signature policy,
+        # allowlists and signing keys to the ucp:config:set call above.
+        # A redeemable promotion, so the buyer journey's discount step runs instead
+        # of skipping. `shopware-ucp-discount-apply` needs a `promo_code` and
+        # nothing ever produced one: UCP_JOURNEY_PROMO_CODE was read by
+        # functional/journeys.py and set by no step in this repo, so that step has
+        # reported "precondition missing: promo_code" on every run since it was
+        # written. A skip that can never become a pass is not coverage.
+        #
+        # One nested write: the promotion, its cart-scope percentage discount and
+        # its sales-channel assignment. All three are required — a promotion with
+        # no discount redeems to nothing, and one not assigned to the channel is
+        # not found at all.
+        PROMO_CODE="MCPEVALS$(printf '%s' "${SC_ID}" | cut -c1-6 | tr '[:lower:]' '[:upper:]')"
+        promo_status=$(curl -sS -o /tmp/promo.json -w '%{http_code}' -X POST "${APP_URL}/api/promotion" \
+          -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' \
+          -d "{\"name\":\"MCP Evals journey discount\",\"active\":true,\"useCodes\":true,
+               \"useIndividualCodes\":false,\"code\":\"${PROMO_CODE}\",\"priority\":1,
+               \"exclusive\":false,\"useSetGroups\":false,
+               \"preventCombination\":false,\"customerRestriction\":false,
+               \"discounts\":[{\"scope\":\"cart\",\"type\":\"percentage\",\"value\":10,
+                               \"considerAdvancedRules\":false}],
+               \"salesChannels\":[{\"salesChannelId\":\"${SC_ID}\",\"priority\":1}]}" \
+          --max-time 20 || echo "000")
+        if [ "${promo_status}" = "204" ] || [ "${promo_status}" = "200" ]; then
+          echo "Promotion created; code ${PROMO_CODE} is redeemable on this lane."
+          echo "promo_code=${PROMO_CODE}" >> "$GITHUB_OUTPUT"
+        else
+          # Empty output, not a failure: the journey step skips with a named
+          # precondition, which is the honest outcome and does not take the suite
+          # down over a fixture prerequisite.
+          echo "::warning::Could not create the journey promotion (HTTP ${promo_status}), so shopware-ucp-discount-apply will skip on a missing promo_code.%0A$(head -c 400 /tmp/promo.json | tr '\n' ' ')"
+          echo "promo_code=" >> "$GITHUB_OUTPUT"
+        fi
+
+        UCP_CONFIG_URL="${APP_URL}/api/_admin/ucp/sales-channels/${SC_ID}/config"
+        ucp_put=$(curl -sS -X PUT "${UCP_CONFIG_URL}" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H 'Content-Type: application/json' \
+          -d "{\"active\":true,\"enabledTransports\":${TRANSPORTS},\"enabledCapabilities\":${CAPABILITIES}}" \
+          -w '\nHTTP %{http_code}' --max-time 20 2>&1 || true)
+        echo "PUT ${UCP_CONFIG_URL}"
+        printf '%s\n' "${ucp_put}" | head -c 600
+        case "${ucp_put}" in
+          *"HTTP 200"*) : ;;
+          *) echo "::warning::Writing the UCP config through the admin API did not return 200. UCP exposure will not take effect, because a sales-channel-scoped config is read from the plugin's own table and not from system_config.%0A${ucp_put}" ;;
+        esac
+
+        # Global scope only. Here system_config IS the backing store —
+        # getConfig(null) reads the legacy payload directly — so these are not
+        # redundant with the PUT above, they cover the case where the profile
+        # request resolves no sales channel at all.
+        bin/console system:config:set --json SwagAgenticCommerce.config.active true
+        bin/console system:config:set --json \
+          SwagAgenticCommerce.config.enabledTransports "${TRANSPORTS}"
+        bin/console system:config:set --json \
+          SwagAgenticCommerce.config.enabledCapabilities "${CAPABILITIES}"
+
+        # Reads are cached, and `cache:clear` is NOT what fixes it — measured, on
+        # CI, with the annotation below: the writes had landed
+        # (system:config:get reported active=true and all four transports) while
+        # ucp:config:show still reported active=False and [rest], AFTER a
+        # cache:clear --no-warmup.
+        #
+        # `SystemConfigService::set()` registers a *delayed* cache invalidation.
+        # Something has to deliver it, and on a CI lane with no message consumer
+        # running, nothing does — the stale value simply stays. `cache:clear`
+        # empties the application cache directory and never touches that queue,
+        # which is why it looked like the writes were the problem for two runs.
+        # `cache:clear:delayed` reported "Invalidated 4 delayed cache tags" on a
+        # lane that was sitting idle, so this is not hypothetical.
+        #
+        # Both, in this order: flush the pending invalidations, then clear the
+        # pool the config is actually served from. Together they cost under a
+        # second.
+        # The vendor patch that used to sit here is gone. It rewrote the SDK's
+        # ExceptionListener so the 500 body named the exception, and it earned its
+        # keep exactly once — it produced the LogicException that identified
+        # APP_ENV=test as the root cause. Keeping it would mean carrying a
+        # mutation of vendored code for a failure mode that no longer occurs, and
+        # dev now writes var/log/dev.log, so an unexplained 500 is readable
+        # without it. If a future failure is anonymous again, the patch is in this
+        # file's history.
+        bin/console cache:clear:delayed --no-ansi
+        # The profile response is cacheable (the plugin ships a
+        # ProfileCacheHeadersListener) and the HTTP cache lives in its own pool,
+        # so a config change needs this too. Kept as ordinary hygiene after a
+        # write, not as a fix for a diagnosed fault — the empty profile turned out
+        # to be APP_ENV=test, not a stale response.
+        bin/console cache:clear:http --no-ansi || true
+
+        # Restart so the workers pick up the config just written. The server is
+        # started earlier in this action, immediately after a cache:warmup, and
+        # every write in this step lands afterwards.
+        symfony server:stop 2>/dev/null || true
+        SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1 \
+        SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
+          symfony server:start
+        bash "$GITHUB_WORKSPACE/functional/ci/wait_for_http.sh" \
+          http://localhost:8000/api/_info/version 60 2
+
+        # `--no-ansi` on every console read in this step, and it is not cosmetic:
+        # one ANSI-coloured line anywhere in a job makes the WHOLE log
+        # unretrievable through the REST API ("the response contains terminal
+        # escape sequences"), which silently costs the ability to debug the run
+        # at all.
+        #
+        # The `system:config:get` pair that used to be here is gone. It read
+        # system_config, which is NOT where a channel-scoped UCP config lives, so
+        # it faithfully echoed back writes the application never consulted and was
+        # trusted over `ucp:config:show` for several runs.
+        bin/console ucp:config:validate --sales-channel="${SC_ID}" --no-ansi || true
+
+        # Verify from the config the application actually reads, not from the
+        # exit status of the writes above, which is 0 either way.
+        bin/console ucp:config:show --sales-channel="${SC_ID}" --no-ansi > ucp-config.json || true
+        python3 - "$SC_ID" <<'PY'
+        import json, pathlib, sys
+
+        # `ucp:config:show` prints a "UCP config — <id>" heading and an underline
+        # before the JSON, so this decodes from the first brace rather than
+        # feeding the whole thing to json.loads.
+        text = pathlib.Path("ucp-config.json").read_text()
+        config, _ = json.JSONDecoder().raw_decode(text[text.index("{"):])
+        transports = config.get("enabledTransports") or []
+        active = config.get("active")
+        print(f"UCP active={active} enabledTransports={transports} "
+              f"enabledCapabilities={config.get('enabledCapabilities') or []}")
+        # A warning, NOT a failure: this action sets up every lane, and an exit 1
+        # here took down the Admin eval, a suite that does not touch UCP. The
+        # Store preflight is the gate that owns this outcome.
+        #
+        # The verdict comes from `ucp:config:show` because it reads through
+        # UcpConfigService, and therefore through the repository the application
+        # answers from. Do not replace it with a system_config read: that store is
+        # only the legacy fallback for this scope, so it can report values the
+        # application never sees.
+        exposed = bool(active) and "mcp" in transports
+        print(f"UCP exposed over MCP (per ucp:config:show): {exposed}")
+        if not exposed:
+            print(
+                f"::warning::UCP is not exposed over MCP on sales channel {sys.argv[1]}. "
+                f"Effective (ucp:config:show, reads the plugin's own config table): "
+                f"active={active}, enabledTransports={transports}.%0A"
+                f"The admin-API PUT above is what sets these; check its response.%0A"
+                f"The Store suite will fail its preflight; Admin is unaffected."
+            )
+        PY
+
+        # The SERVED profile — what an agent actually receives, as opposed to what
+        # the config commands above say is stored. Keep this check: for several
+        # runs every stored-config reading said the lane was fine while the served
+        # profile was {"services":{},"capabilities":{}}, and only this one
+        # disagreed. It is also the check that confirms a fix rather than
+        # inferring one.
+        #
+        # A scheme/dev-mode probe file used to sit here, asking PHP what it
+        # computed for the request scheme, on the theory that a mismatch with the
+        # registered domain was defeating SalesChannelDomainResolver. PHP reported
+        # plain http, which matched, so the theory was wrong — noted so it does not
+        # get rebuilt.
+        echo "Registered sales-channel domains:"
+        curl -fsS "${APP_URL}/api/sales-channel-domain?limit=100" \
+          -H "Authorization: Bearer ${TOKEN}" -H 'Accept: application/json' \
+          -o domains.json 2>/dev/null || true
+        python3 <<'PY'
+        import json, pathlib
+
+        try:
+            data = json.loads(pathlib.Path("domains.json").read_text())
+        except Exception:  # noqa: BLE001 — a diagnostic must not raise
+            print("  (could not list domains)")
+            raise SystemExit(0)
+        for entry in data.get("data", []):
+            attributes = entry.get("attributes", entry)
+            print("  ", attributes.get("url"), "->", attributes.get("salesChannelId"))
+        PY
+
+        # Cache-Control: no-cache so this reads what the application produces
+        # rather than what a proxy or the HTTP cache kept. A verification served
+        # from the same cache it is meant to detect is worth nothing.
+        curl -sS --max-time 15 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+          "${APP_URL}/.well-known/ucp" -o served-profile.json || true
+        python3 <<'PY'
+        import json, pathlib
+
+        try:
+            profile = json.loads(pathlib.Path("served-profile.json").read_text())
+        except Exception as exc:  # noqa: BLE001 — a diagnostic must not raise
+            print(f"::warning::Could not read the served UCP profile: {exc}")
+            raise SystemExit(0)
+
+        ucp = profile.get("ucp") or {}
+        services = ucp.get("services") or {}
+        capabilities = ucp.get("capabilities") or {}
+        keys = profile.get("signing_keys") or []
+        # ALWAYS annotated, not only on failure. Until now the values were
+        # printed to the log on the happy path, and the log is the one place that
+        # cannot be read back — so a run where exposure was finally correct
+        # looked identical to a run where it was not: no annotation either way.
+        #
+        # The effective config is re-read from ucp-config.json here rather than
+        # reused from the earlier block. The first version of this notice
+        # referenced that block's `active`/`transports`/`config` names, which do
+        # not exist in this heredoc — a NameError that failed the whole lane
+        # setup and took the Admin eval down with it.
+        effective = {}
+        try:
+            raw = pathlib.Path("ucp-config.json").read_text()
+            effective, _ = json.JSONDecoder().raw_decode(raw[raw.index("{"):])
+        except Exception:  # noqa: BLE001 — a diagnostic must not raise
+            pass
+        print(
+            f"::notice::UCP profile served by this lane: capabilities="
+            f"{list(capabilities) or 'NONE'}%0Aservices={list(services) or 'NONE'}%0A"
+            f"signing_keys={len(keys)}%0AEffective config (ucp:config:show): "
+            f"active={effective.get('active')}, "
+            f"enabledTransports={effective.get('enabledTransports') or []}, "
+            f"enabledCapabilities={effective.get('enabledCapabilities') or []}"
+        )
+        print(f"Served profile: services={list(services)} capabilities={list(capabilities)} "
+              f"signing_keys={len(keys)}")
+        if not capabilities:
+            # The domain list travels WITH the symptom rather than sitting in the
+            # log, which cannot be relied on to come back through the API. It is
+            # here because the profile is built from whichever channel
+            # resolveByBaseUri matches on APP_URL, so "which domains exist" is the
+            # first thing worth knowing when it advertises nothing.
+            domains = "?"
+            try:
+                listed = json.loads(pathlib.Path("domains.json").read_text())
+                domains = ", ".join(
+                    str((e.get("attributes", e) or {}).get("url"))
+                    for e in listed.get("data", [])
+                )
+            except Exception:  # noqa: BLE001 — a diagnostic must not raise
+                pass
+            print(
+                f"::warning::The served UCP profile advertises NO capabilities "
+                f"(services={list(services)}, signing_keys={len(keys)}).%0A"
+                f"Registered domains: {domains}%0A"
+                f"Known causes, in the order they have actually occurred: the lane "
+                f"running APP_ENV=test (which swaps in a profile-fetcher test "
+                f"double), and the exposure config never reaching the plugin's own "
+                f"config table."
+            )
+        PY
+
+        # The dev-mode flag, asserted in the file AND at runtime. The file check
+        # alone was worthless: it passed on every run while UCP kept refusing
+        # plain http, because the flag being in .env.local says nothing about the
+        # daemonized server process having it. The probe above reports what the
+        # web process actually sees; this reports what the CLI sees.
         grep -q 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1' .env.local || {
           echo "::error::UCP profile-fetching dev mode is not set in .env.local, so plain-http profile URIs will be refused."
           exit 1
         }
+        echo "Dev-mode flag as the CLI resolves it:"
+        bin/console debug:dotenv --no-ansi 2>/dev/null \
+          | grep 'SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE' \
+          | tr -s ' ' || echo "  (not reported by debug:dotenv)"
 
     # The Store catalogue has never been snapshotted, so everything that
     # derives from one had to be guessed for it: toolclass could not read

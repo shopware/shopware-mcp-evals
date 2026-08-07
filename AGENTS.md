@@ -8,6 +8,52 @@ tool selection accuracy).
 See `README.md` for the full picture and motivation; this file is the short
 brief for coding agents.
 
+## How a run flows
+
+The CI pipeline. `setup-lane` is the composite action every job shares, which is
+why a mistake in it takes down suites that have nothing to do with each other.
+
+```mermaid
+flowchart TD
+    A[setup-lane<br/>install Shopware · plugins · demo data<br/>UCP exposure · signing key · promotion] --> B[Static checks]
+    A --> C[Admin eval]
+    A --> D{Store preflight}
+
+    B --> B1[ruff · basedpyright · pytest]
+    B --> B2[functional: admin + store]
+    B --> B3[tool catalogue snapshot + drift]
+
+    D -->|UCP answers| E[Store eval]
+    D -->|UCP refuses| E2[Store suite skipped<br/>annotation names the gate]
+
+    C --> F[Report]
+    E --> F
+    B --> F
+    F --> F1[eval.compare_runs<br/>primary vs second validator]
+    F --> F2[eval.summary<br/>job summary + PR comment]
+    F --> F3[eval.cost_drift vs nightly baseline]
+```
+
+One fixture, from prompt to verdict. The scoring rule is the part worth
+remembering: **the tool the model called is compared against `expected_tool`, and
+the discovery trail is recorded but not scored.**
+
+```mermaid
+sequenceDiagram
+    participant R as eval.runner
+    participant M as Model
+    participant S as MCP server
+    R->>M: prompt + context + only the discovery tools
+    M->>S: shopware-tool-search / toolsets-list
+    S-->>M: candidate tools (v2: catalogue is not preloaded)
+    M->>S: shopware-toolset-enable
+    M->>S: the tool it settled on
+    S-->>M: result (dryRun for anything mutating)
+    M-->>R: tool calls + final text
+    R->>R: score: called tool == expected_tool?
+    R->>R: record tokens, cost, wall-clock, discovery rounds
+```
+
 ## Conventions
 
 - **Nothing consumes this repo, so there is almost no compatibility surface.**
@@ -37,7 +83,10 @@ brief for coding agents.
   implementing anything. Both trees are shellcheck-linted.
 - **Add unit tests for new logic.** New functional / eval / client behavior gets
   a pytest test under `tests/` — offline, faking the MCP server (see the existing
-  tests). CI runs `ruff` + `pytest` + `shellcheck` on every push, so keep them green.
+  tests). CI gates on `ruff check` + `ruff format --check` + **`basedpyright`** +
+  `pytest --cov` (floor 90%) + `shellcheck` on every push, so keep them green.
+  `basedpyright` runs in `recommended` mode over source **and** tests, at zero
+  errors and zero warnings — a bare `dict` in a new signature will fail it.
 - **Three prompts per tool, differing in kind.** Every tool needs at least three
   fixtures: a canonical phrasing, a paraphrase avoiding the tool's own
   vocabulary, and a boundary case set against a sibling tool. Restating one
@@ -47,7 +96,10 @@ brief for coding agents.
   `tool-history/latest.json`, so a new server-side tool fails the unit tests
   until it has prompts.
 - **Two workflows, and the heavy one is four jobs.** `lint.yml` is the fast gate
-  (ruff + format + pytest + shellcheck) on every PR. `mcp-evals.yml` runs
+  (ruff, ruff format, basedpyright, pytest+cov, then ShellCheck **twice** — once
+  over `functional/**/*.sh` + `scripts/**/*.sh`, once over the shell inside
+  workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
+  runs there, advisory). `mcp-evals.yml` runs
   `static` → (`admin-eval`, `store-eval`) → `report`, each building its own lane
   via `.github/actions/setup-lane`. It installs Shopware at the pinned
   `shopware.sha` and checks the plugin repos out at their **default branch**, so
@@ -112,17 +164,70 @@ brief for coding agents.
   it is blind to the entire Store failure mode — which is exactly what happened
   to 27 admin checks for months.
 
-## UCP: four gates before a tool runs
+## UCP: six gates before a tool runs
 
 All defaults, none visible in any tool description, and each fails the whole
 Store suite. In order of when they fire:
 
 | gate | symptom | fix |
 |---|---|---|
+| **`APP_ENV`** | any UCP call → `internal: The tool call failed unexpectedly.` and REST 500 `Internal server error.` | **must not be `test`.** `TestAgentProfileFetcherCompilerPass` swaps the real HTTP profile fetcher for `StaticAgentProfileFetcher`, which throws `LogicException: No profile configured` unless a PHPUnit test called `setProfile()` on it. No configuration can fix this. |
+| **exposure** | profile serves `{"services":{},"capabilities":{}}` | `active: true` + `mcp` in `enabledTransports`. **Not settable from the console** — see below |
 | `signaturePolicy` | `Missing signature headers` | defaults to `strict`; `ucp:config:set --signature-policy=off` on a throwaway lane |
 | `agentAllowlist` | `Agent profile host is not allowed` | falls back to the sales-channel domains; `--agent-allowlist=<host>` |
 | `platformAllowlist` | `Platform profile host is not allowed` | falls back to the **host of the incoming request**; `--platform-allowlist=<host>` |
-| plain http | `Plain http is only allowed for local development hosts` | needs `SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1` **and** a host `isLocalHost()` accepts — which is `localhost`/`127.0.0.1`/`::1` only, *not* `.localhost` subdomains |
+| plain http | `Plain http is only allowed when profile fetching development mode is enabled` | set `ucp_sdk.profile_fetching_development_mode: true` in `config/packages/`. The `SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE` env var works only if it reaches the process serving the request — the daemonized server, the CLI and the runner are three different environments, so `.env.local` is not enough. `isLocalHost()` accepts `localhost`, `127.0.0.1`, `::1` and `.localhost` subdomains. |
+
+### Exposure lives in the plugin's own table, not `system_config`
+
+`UcpConfigService::getConfig($salesChannelId)` reads `$this->repository->find()`
+and returns immediately when it finds a row. `system_config` is only a *legacy
+fallback*, used when the table has no row and then migrated into it.
+
+So on a fresh install — which always has a row — `system:config:set
+SwagAgenticCommerce.config.active true` writes a row **nothing reads**, and
+`system:config:get` reads it straight back, so the write looks like it worked.
+This cost seven CI runs. A long-lived local instance behaves differently because
+it *predates* the table: its legacy rows hit the fallback and were migrated in.
+
+`ucp:config:set` writes through the service (correct store) but has **no option**
+for `active`, `enabledTransports` or `enabledCapabilities`. The only console-free
+path is the route the Administration uses:
+
+```bash
+curl -X PUT "$APP_URL/api/_admin/ucp/sales-channels/$SC_ID/config" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"active":true,
+       "enabledTransports":["rest","a2a","embedded","mcp"],
+       "enabledCapabilities":["catalog","cart","discount","checkout","order"]}'
+```
+
+`saveConfig` merges partial payloads, so this can set the Exposure subset and
+leave signature policy and allowlists to `ucp:config:set`.
+
+**Verify with `ucp:config:show`** (reads through the service) and by fetching
+`/.well-known/ucp`. Never with `system:config:get` — it can report values the
+application never sees. `debug:config ucp_sdk` is unusable with the plugin
+installed: it dies with *"Adding definition to a compiled container is not
+allowed"*.
+
+### Diagnosing a UCP failure in CI
+
+Hard-won and cheap to forget:
+
+- **A single ANSI-coloured line anywhere in a job makes the whole log
+  unretrievable through the REST API** (`the response contains terminal escape
+  sequences`), and a *passing* job's log is not retrievable at all. Put facts in
+  `::warning::`/`::notice::` annotations, and pass `--no-ansi` to every console
+  command. Six runs were spent on diagnostics that could not be read.
+- **The application log is not under `shopware/var/log` when the server runs under
+  `symfony server:start`** — check `$HOME/.config/symfony-cli/log` too, and note
+  that only `dev` reliably writes `var/log/dev.log`.
+- **Both transports flatten every error.** MCP answers `internal` and REST
+  answers `Internal server error.` with no `code` and no `severity`, so the
+  message is the only signal. When it is anonymous, the fastest route is to patch
+  `ExceptionListener`'s fallback branch to append `$throwable::class` and
+  `getMessage()`; that is what identified `APP_ENV=test`.
 
 Two more things that look like tool bugs and are not:
 
@@ -205,6 +310,10 @@ python -m functional.runner --endpoint store
 # reason, and a test asserts no call escapes the guard.
 python -m functional.runner --endpoint store --allow-mutations
 
+# The customer half of the journey registers mcp-evals-customer@example.invalid on
+# first run and logs it in after. Override with UCP_JOURNEY_CUSTOMER_EMAIL /
+# UCP_JOURNEY_CUSTOMER_PASSWORD to use an account that already exists.
+
 # Gate the eval on what the static layer proved. A fixture whose expected tool
 # failed is skipped WITH THAT REASON rather than graded, so a plugin bug is not
 # charged to the model. An absent file grades everything.
@@ -285,7 +394,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
-| `functional/journeys.py` | The UCP buyer journey. Those tools are one flow, so an isolated call mostly measures how the server words "not found". Commits, behind `--allow-mutations` |
+| `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
+| `functional/customer.py` | Logs the customer half in, registering the account through the Store API on first use. The context token is only in the `sw-context-token` header, and `storefrontUrl` has to come from the sales channel — both cost a debugging round to find |
 | `eval/preflight.py` | One read-only call, no model, ~1s. Fails with a named cause and, on the Store endpoint, probes the UCP profile URI — the one cause the error text can never name |
 | `eval/registry_check.py` | The server's declared ACL privileges against `toolclass`. Two independent sources disagreeing is what catches a tool wrongly filed as READ_ONLY, which would then be executed for real |
 | `.github/actions/setup-lane/` | Everything up to "a live lane with credentials". Values that used to cross step boundaries via `$GITHUB_ENV` are outputs here, because neither survives a job boundary |

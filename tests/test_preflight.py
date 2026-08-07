@@ -49,11 +49,31 @@ def test_the_two_allowlists_are_not_confused_with_each_other() -> None:
 
 
 def test_the_swallowed_internal_error_explains_where_to_actually_look() -> None:
-    """`internal` carries no information at all — the plugin logs nothing — so
-    the diagnosis has to supply the context the error does not."""
+    """`internal_error` names a class, not a cause, so the diagnosis has to supply
+    the context the error text cannot.
+
+    It used to carry nothing at all and go unlogged; agentic-commerce#160 gave it a
+    code, a severity and a log line. The advice still has to point at the causes,
+    because those name the class rather than the fault."""
     advice = preflight.diagnose("internal: The tool call failed unexpectedly.")
 
     assert "container" in advice.lower()
+
+
+def test_the_typed_profile_fetch_failure_is_diagnosed() -> None:
+    """ucp-php-sdk#108 gave this failure a typed exception, so it arrives as a real
+    UCP error naming the URI instead of a bare `internal`. The table has to match the
+    new wording, or the single most common cause reports "No known diagnosis" —
+    which is what it did the first time the typed error reached us.
+    """
+    advice = preflight.diagnose(
+        'ucp: Platform profile at "http://trunk.localhost:8088/.well-known/ucp" could not be '
+        "fetched: Failed to connect to trunk.localhost port 8088 after 0 ms."
+    )
+
+    assert "SERVER could not fetch" in advice
+    assert "UCP_PROFILE_URI" in advice, "it has to say which knob to turn"
+    assert "localhost" in advice, "and that a <shop>.localhost host is rejected outright"
 
 
 def test_an_unknown_error_admits_it_rather_than_guessing() -> None:
@@ -159,23 +179,31 @@ def test_a_profile_this_machine_can_fetch_does_not_clear_the_profile(monkeypatch
 
     assert "This is the cause" not in out, "a 200 from here is not proof either way"
     assert "FROM HERE" in out, "it has to say whose network answered"
-    assert "still the most likely cause" in out
+    # "one known cause", not "the most likely cause". The wording was downgraded
+    # deliberately once APP_ENV=test turned out to produce the same `internal`:
+    # ranking the profile fetch first is what this test exists to prevent.
+    assert "one known cause" in out
     assert "UCP_PROFILE_URI" in out, "and how to point it somewhere the server can reach"
 
 
-def test_the_report_names_the_path_that_does_not_swallow_the_exception(
+def test_the_report_names_both_the_rest_probe_and_the_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The MCP tool catches the throwable and reports `internal` with nothing
-    logged. The REST route for the same operation does not, so the exception
-    reaches the log — which is how this was finally diagnosed."""
+    """Both, and for different reasons — the earlier version of this test asserted
+    only the REST route, on the belief that REST "does not swallow" the exception.
+    It does: REST answers the same call with a bare 'Internal server error.', so it
+    buys an HTTP status (422/424 vs a true 500) and nothing more. The exception
+    itself only ever comes from the log, and under `symfony server:start` that is
+    not only var/log."""
     monkeypatch.setattr(preflight, "probe_profile", const((200, "valid UCP profile")))
     monkeypatch.setattr(preflight.mc, "SW_BASE_URL", "http://shop")
 
     out = preflight.profile_report("internal: The tool call failed unexpectedly.")
 
-    assert "/ucp/v1/catalog/search" in out
-    assert "var/log" in out
+    assert "/ucp/v1/catalog/search" in out, "the REST probe, for an HTTP status"
+    assert "var/log" in out, "and the log, for the exception"
+    assert "symfony-cli" in out, "which is not the only place the log lives"
+    assert "not swallow" not in out, "REST is swallowed too; do not imply otherwise"
 
 
 # ---------------------------------------------------------------------------

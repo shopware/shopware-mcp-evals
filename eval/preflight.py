@@ -57,6 +57,23 @@ STORE_PRODUCT_ROUTE = "/store-api/product"
 # cost at least one debugging round to identify the first time.
 DIAGNOSES = (
     (
+        # ucp-php-sdk#108 gave this failure a typed exception, so it now arrives as
+        # a real UCP error naming the URI instead of a bare `internal`. Matching it
+        # here is what turns "No known diagnosis" into the one thing worth knowing:
+        # the SERVER has to reach that URI, and it does not share this machine's
+        # network. Measured on a proxied lane — the runner fetched the profile fine
+        # while the server got "Failed to connect to trunk.localhost port 8088".
+        "could not be fetched",
+        "The SERVER could not fetch the profile URI. It does that mid-request over "
+        "its own network, so a containerised or proxied instance does not share this "
+        "machine's view: inside a container the shop is usually its own "
+        "http://localhost:<internal-port>, not the published host:port. Point "
+        "UCP_PROFILE_URI at a URL the server can reach — and note the SDK's "
+        "development-mode check accepts only bare localhost/127.0.0.1/::1, so a "
+        "`<shop>.localhost` host is rejected before any fetch is attempted "
+        "(ucp-php-sdk#108 documents that half as unfixed).",
+    ),
+    (
         "ucp-agent header",
         "The client sent no UCP-Agent header. See ucp.agent_header — mcp_client "
         "should be building one for every store endpoint.",
@@ -92,10 +109,44 @@ DIAGNOSES = (
     ),
     (
         "internal",
-        "The plugin swallowed the real exception (UcpMcpToolContext::failure reports "
-        "`internal` and logs nothing). Common cause: the server cannot fetch the "
-        "profile URI from inside its own container — a published host:port is not "
-        "necessarily reachable there. Check with a request from inside the container.",
+        # This advice described the world before agentic-commerce#160 and SDK 0.0.4,
+        # and both halves of it were falsified by them. Kept as a correction rather
+        # than a rewrite, because the OLD text is what a reader will find quoted in
+        # older notes:
+        #
+        #   was: "the MCP error body has no code and no severity"
+        #   now: it carries both, from UcpErrorDescriptor (SDK 0.0.4), the same
+        #        mapping the REST ExceptionListener reads. So the two transports no
+        #        longer describe one exception differently.
+        #
+        #   was: "nothing is logged for the MCP path ... takes no logger"
+        #   now: UcpMcpToolContext takes a LoggerInterface and logs EVERY throwable
+        #        as 'UCP MCP tool call failed.' with the throwable attached, before
+        #        flattening the response.
+        #
+        # `internal` is therefore both rarer and more informative than it was: a
+        # Shopware 4xx now passes its own message through, so a bare `internal` means
+        # a genuinely unexpected throwable rather than "any failure at all".
+        "`internal` now means a genuinely unmodelled exception: since "
+        "agentic-commerce#160 the MCP body carries `code` and `severity` from the "
+        "SDK's UcpErrorDescriptor, and a Shopware 4xx passes its message through, so "
+        "the domain failures that used to land here name themselves. The generic "
+        "message is deliberate (do not leak internals to an unauthenticated client), "
+        "but the throwable IS logged now — 'UCP MCP tool call failed.' with the "
+        "exception attached.\n"
+        "  Causes seen so far, most common first:\n"
+        "  1. The lane is running APP_ENV=test. The plugin then wires "
+        "StaticAgentProfileFetcher, a PHPUnit double that throws "
+        "'No profile configured' unless a test called setProfile(). No configuration "
+        "can fix this — use dev or prod.\n"
+        "  2. The server cannot fetch the profile URI from where it runs — a published "
+        "host:port is not necessarily reachable from inside a container.\n"
+        "  To see the real exception: check var/log (dev writes dev-<date>.log; under "
+        "`symfony server:start` also look in $HOME/.config/symfony-cli/log).\n"
+        "  BUT absence from var/log does not mean it was not logged: core's "
+        "ErrorCodeLogLevelHandler downgrades a long list of error codes to `notice` "
+        "via shopware.logger.error_code_log_levels, which in prod falls below the "
+        "file handler's threshold. CHECKOUT__ORDER_CUSTOMER_NOT_LOGGED_IN is one.",
     ),
 )
 
@@ -153,7 +204,7 @@ def discover_store_query(default: str) -> tuple[str, str]:
     Searching a made-up term is a legitimate empty result, not a failure — but a
     probe that searches a word the shop may not have proves less than one
     grounded in a product it does, and a zero-match code path is a candidate for
-    the swallowed `internal` this suite keeps hitting. The store endpoint already
+    the uninformative `internal` this suite keeps hitting. The store endpoint already
     authenticates with a sales-channel key, so use it to ask the Store API for
     one product name and probe with that.
 
@@ -298,11 +349,13 @@ def probe_profile(uri: str) -> tuple[int | None, str]:
 def profile_report(error: str) -> str:
     """Resolve the one cause the error text can never name.
 
-    `internal` means an exception escaped the tool, and the plugin reports that
-    with no message and logs nothing — so from the outside it is indistinguishable
-    from any other internal failure. Measured against a live lane, it is the
-    profile fetch: a valid profile answers in ~0.16s, a 404 fails in ~0.19s with
-    exactly this error, and CI failed in 0.14s.
+    `internal` means an exception escaped the tool. Since agentic-commerce#160 the
+    response does carry `code` and `severity` and the throwable IS logged, so this
+    is no longer the information-free signal it was — but `internal_error` still
+    names a class rather than a cause, and the profile fetch is the one cause the
+    error text can never point at. Measured against a live lane: a valid profile
+    answers in ~0.16s, a 404 fails in ~0.19s with exactly this error, and CI failed
+    in 0.14s.
 
     The server fetches this URI itself, mid-request, which is why the URI has to
     be one the SERVER can reach and why a published host:port is not automatically
@@ -332,16 +385,23 @@ def profile_report(error: str) -> str:
         #
         # The SDK throws a plain \RuntimeException/TransportException there rather
         # than a UcpException, so the plugin's failure() flattens it to `internal`
-        # with nothing logged (HttpAgentProfileFetcher::fetch, UcpMcpToolContext).
+        # (HttpAgentProfileFetcher::fetch, UcpMcpToolContext).
         lines.append(
             f"  Reachable FROM HERE — which is not the question. The server fetches {uri} "
             "over its own network, and a containerised or proxied instance does not share "
-            "this one. That fetch failing is still the most likely cause of `internal`."
+            "this one. That fetch failing is one known cause of `internal`."
         )
         lines.append(
-            "  To see it, run the same operation over REST — that path is not swallowed, so "
-            f"the exception reaches the log: POST {mc.SW_BASE_URL}/ucp/v1/catalog/search "
-            "with the same sw-access-key and UCP-Agent headers, then read var/log/<env>-<date>.log."
+            # This used to advise going over REST "because that path is not swallowed".
+            # It is: REST answers the same call with a bare 'Internal server error.',
+            # measured. REST is still worth running — it gives an HTTP status, so a 422
+            # or 424 separates a validation or profile fault from a true 500 — but it
+            # will not hand over the exception, and reading the log is what does.
+            "  Next: run the same operation over REST for an HTTP status, which MCP does not "
+            f"give you: POST {mc.SW_BASE_URL}/ucp/v1/catalog/search with the same "
+            "sw-access-key and UCP-Agent headers. Its body is flattened the same way, so for "
+            "the exception itself read var/log/<env>-<date>.log — and under "
+            "`symfony server:start` also $HOME/.config/symfony-cli/log."
         )
         lines.append(
             "  Then point UCP_PROFILE_URI at a URL the SERVER can reach (inside a container "
