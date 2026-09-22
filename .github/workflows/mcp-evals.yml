@@ -1275,13 +1275,36 @@ jobs:
           SW_SHA: ${{ needs.static.outputs.shopware_sha }}
         run: |
           set -euo pipefail
-          # One branch per upstream sha: a second nightly on the same trunk commit
-          # updates the existing PR instead of opening another.
-          BRANCH="chore/reconcile-mcp-drift-${SW_SHA:0:12}"
+          # ONE rolling branch, not one per upstream sha. The per-sha name was
+          # keyed to the thing that changes every night, so "a second nightly on
+          # the same trunk commit updates the existing PR" only ever held on a
+          # day trunk stood still: in practice it opened a new PR every morning
+          # and left the previous one behind. Fourteen accumulated between
+          # 2026-09-03 and 2026-09-22, every one of them saying "No catalogue
+          # drift", and the pin they were all waiting to move sat three weeks
+          # stale — so PR and push runs tested three-week-old Shopware while only
+          # the nightly saw trunk.
+          #
+          # A fixed name makes the newest report the only report. The branch is
+          # recreated from main each night and force-pushed, so it carries one
+          # commit against current main and cannot accumulate or conflict; the
+          # body is always drift-vs-main, which is the question a reviewer has.
+          # The sha stays in the title — it says which trunk commit the PR would
+          # pin you to — it is just rewritten rather than forked.
+          BRANCH="chore/reconcile-mcp-drift"
+
+          # Restricted to OPEN, because the branch outlives any single PR on it:
+          # once a reconciliation merges, or the cleanup below closes one, `gh pr
+          # view "$BRANCH"` still resolves to that finished PR. Editing it would
+          # rewrite a merged PR's body and open nothing, and the drift report
+          # would vanish with no error anywhere.
+          open_pr() {
+            gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty'
+          }
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
+          git checkout -B "$BRANCH"
 
           echo "$SW_SHA" > shopware.sha
           git add shopware.sha tool-history/latest.json
@@ -1293,6 +1316,13 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "Nothing to reconcile after all — no commit, no PR."
+            # With a rolling branch this case has to clean up after itself: a PR
+            # left open from an earlier night would go on claiming drift that no
+            # longer exists, and the next reader would reconcile nothing.
+            if [ -n "$(open_pr)" ]; then
+              gh pr close "$BRANCH" --delete-branch \
+                --comment "Superseded — trunk no longer drifts from the committed baseline."
+            fi
             exit 0
           fi
 
@@ -1302,9 +1332,15 @@ jobs:
 
           {
             echo ""
-            echo "Opened automatically by the nightly eval run against \`trunk\`."
+            echo "Maintained automatically by the nightly eval run against \`trunk\`."
             echo "Bumps \`shopware.sha\` to \`$SW_SHA\` and refreshes the catalogue baseline together,"
             echo "so the next run can attribute its own diff instead of re-reporting this one."
+            echo ""
+            echo "This is a **rolling** PR: one branch, force-pushed every night onto the newest"
+            echo "trunk commit, so what you are reading is always the current drift against"
+            echo "\`main\` rather than one night's delta. Merging it is what un-sticks the pin;"
+            echo "leaving it open costs nothing, but every day it stays open is a day PR and push"
+            echo "runs test older Shopware than the nightly does."
             echo ""
             echo "**Check before merging:** a tool added here needs fixtures, and a tool removed"
             echo "means its fixtures will start skipping. Descriptions changing is the ordinary case."
@@ -1316,9 +1352,14 @@ jobs:
                         -m "Opened by the nightly eval run. See the PR body for what moved."
           git push -f origin "$BRANCH"
 
-          if gh pr view "$BRANCH" --json number --jq .number > /dev/null 2>&1; then
-            gh pr edit "$BRANCH" --body-file /tmp/body.md
-            echo "Updated the existing reconciliation PR for $BRANCH."
+          # --title as well as --body: the title carries the sha, so editing only
+          # the body would leave the PR announcing a trunk commit it no longer
+          # contains.
+          if PR="$(open_pr)" && [ -n "$PR" ]; then
+            gh pr edit "$PR" \
+              --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
+              --body-file /tmp/body.md
+            echo "Refreshed rolling reconciliation PR #${PR} onto ${SW_SHA:0:12}."
           else
             gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
               --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
