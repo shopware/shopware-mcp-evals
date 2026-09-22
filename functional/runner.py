@@ -33,6 +33,7 @@ from typing import cast
 import requests
 
 import lane
+import ucp
 from eval.assertions import inband_error
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
 from functional.checks import (
@@ -65,6 +66,10 @@ from mcp_client import (
     mcp_toolsets_list,
     store_endpoint,
 )
+
+# No extra default-surface tools. A named constant because basedpyright rejects
+# a frozenset() call in a parameter default (reportCallInDefaultInitializer).
+NO_EXTRA_DEFAULT_TOOLS: frozenset[str] = frozenset()
 
 # typeId of the Storefront sales-channel type (used to find a storefront channel).
 STOREFRONT_TYPE_ID = "8a243080f92e4c719546314b577cf82b"
@@ -177,9 +182,23 @@ def assert_tool_error(
 # ---------------------------------------------------------------------------
 # Shared v2 discovery checks (both endpoints)
 # ---------------------------------------------------------------------------
-def verify_default_surface(rep: Reporter, session: str, endpoint: Endpoint) -> None:
-    """A fresh session must advertise ONLY the three discovery meta-tools;
-    every catalogue tool is deferred."""
+def verify_default_surface(
+    rep: Reporter, session: str, endpoint: Endpoint, also_expected: frozenset[str] = NO_EXTRA_DEFAULT_TOOLS
+) -> None:
+    """What a fresh session must advertise: the three meta-tools, plus whatever
+    the endpoint publishes by design.
+
+    On admin that second set is empty — every catalogue tool is deferred. On the
+    Store endpoint it is the thirteen UCP tools, which agentic-commerce 1.3.0
+    (UCP 2026-08-25) moved onto the default surface: a UCP client is specified to
+    find them by name at connect time, so deferring them behind a toolset would
+    have made the endpoint non-conformant.
+
+    The set is passed in rather than read from the endpoint name, so "a deferred
+    tool leaked" and "a tool this endpoint publishes" stay distinguishable. That
+    distinction is the whole value of the check — without it the leak assertion
+    would have to be dropped on the Store endpoint entirely.
+    """
     rep.section("v2: Default advertised surface")
     advertised = _advertised(rep, session, endpoint, "tools/list pagination")
     if advertised is None:
@@ -190,7 +209,14 @@ def verify_default_surface(rep: Reporter, session: str, endpoint: Endpoint) -> N
             rep.check_pass(f"{tool} advertised by default")
         else:
             rep.check_fail(tool, "not in default tools/list")
-    extras = adv - META_TOOLS
+
+    missing = also_expected - adv
+    if also_expected and not missing:
+        rep.check_pass(f"all {len(also_expected)} default-published tools advertised")
+    elif missing:
+        rep.check_fail("default surface", "published tools not advertised: " + " ".join(sorted(missing)))
+
+    extras = adv - META_TOOLS - also_expected
     if not extras:
         rep.check_pass("no deferred tools leak into the default surface")
     else:
@@ -768,49 +794,57 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     provisioned state. They do — which is why the journey provisions it, rather
     than leaving thirteen tools untested and their fixtures graded on the tool
     name alone."""
-    verify_default_surface(rep, session, endpoint)
+    # The thirteen UCP tools are published on the default surface by design since
+    # agentic-commerce 1.3.0, so they are expected here rather than counted as a
+    # leak. ucp.py owns the list.
+    verify_default_surface(rep, session, endpoint, also_expected=ucp.all_classified())
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")
     toolsets = load_toolsets(session, endpoint)
     union: set[str] = set()
-    ucp_toolset = ""
-    ucp_probe = ""
+    deferred_toolset = ""
+    deferred_probe = ""
     for ts in toolsets:
-        union.update(ts.get("tools", []))
-        # The UCP tools are spread over several granular toolsets (cart, checkout,
-        # catalog, ...). Take the first one and probe a tool that actually belongs
-        # to it — a hardcoded probe would break whenever the taxonomy is resliced.
-        ucp_tools = sorted(n for n in ts.get("tools", []) if n.startswith("shopware-ucp-"))
-        if ucp_tools and not ucp_toolset:
-            ucp_toolset = ts["name"]
-            ucp_probe = ucp_tools[0]
-    if len(toolsets) >= 2:
-        rep.check_pass(f"toolsets-list returns {len(toolsets)} toolsets (>= 2)")
+        tools = sorted(ts.get("tools", []))
+        union.update(tools)
+        if tools and not deferred_toolset:
+            deferred_toolset = ts["name"]
+            deferred_probe = tools[0]
+
+    # There used to be several granular UCP toolsets here (cart, checkout,
+    # catalog, ...) and this asserted >= 2. agentic-commerce 1.3.0 published the
+    # UCP tools on the default surface instead and the UCP toolsets went with
+    # them, so `store-api` holding shopware-store-api-context is the only one
+    # left. The floor is 1 rather than a hardcoded name so a resliced taxonomy
+    # still reports rather than crashing.
+    if toolsets:
+        rep.check_pass(f"toolsets-list returns {len(toolsets)} toolset(s): {', '.join(ts['name'] for ts in toolsets)}")
     else:
-        rep.check_fail("toolsets-list", f"only {len(toolsets)}")
-    if ucp_toolset:
-        rep.check_pass(f"found UCP toolset: {ucp_toolset}")
+        rep.check_fail("toolsets-list", "no toolsets at all")
+
+    # The UCP tools are checked on the default surface (above), not here. What is
+    # left to prove about the taxonomy is that something is still deferred behind
+    # it — if this reaches zero, enable/isolation below has nothing to exercise
+    # and the endpoint's discovery layer is untested rather than passing.
+    if union:
+        rep.check_pass(f"toolsets defer {len(union)} tool(s) off the default surface")
     else:
-        rep.check_fail("UCP toolset", "no toolset holds shopware-ucp-* tools")
-    if len(union) >= 13:
-        rep.check_pass(f"toolsets cover {len(union)} deferred store tools")
-    else:
-        rep.check_fail("toolset coverage", f"only {len(union)}")
+        rep.check_fail("toolset coverage", "no toolset defers anything; nothing left to enable")
 
     # --- enable grows the list + listChanged; session isolation ---
     rep.section("v2: Discovery mechanics")
-    if ucp_toolset:
+    if deferred_toolset:
         verify_enable_and_isolation(
             rep,
             endpoint,
-            ucp_toolset,
-            probe_tool=ucp_probe,
-            probe_label=ucp_probe,
+            deferred_toolset,
+            probe_tool=deferred_probe,
+            probe_label=deferred_probe,
             check_default_persists=False,
         )
     else:
-        rep.skip("enable/isolation (no UCP toolset found)")
+        rep.skip("enable/isolation (no toolset defers anything)")
 
     # --- store-api-context: deferred but directly callable ---
     rep.section("Store context & search")
@@ -822,13 +856,19 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     else:
         rep.check_fail("shopware-store-api-context", "missing salesChannelId/token or errored")
 
-    # --- tool-search finds a deferred UCP tool ---
+    # --- tool-search ranks the right UCP tool ---
+    #
+    # No longer "finds a DEFERRED tool" — these are advertised by default now, so
+    # search is not how a client reaches them. It is still worth one check: the
+    # ranking is what a client falls back on when thirteen adjacent tools are all
+    # visible at once, which is the harder problem, not the easier one.
+    cart_tools = {"create_cart", "get_cart", "update_cart", "cancel_cart"}
     search = run_search(session, endpoint, "add items to a shopping cart", 5)
     names = [str(as_object(as_object(r).get("tool")).get("name", "")) for r in as_list(search.get("data"))]
-    if search.get("success") and any(name.startswith("shopware-ucp-cart") for name in names):
-        rep.check_pass("shopware-tool-search finds a deferred UCP cart tool")
+    if search.get("success") and cart_tools.intersection(names):
+        rep.check_pass("shopware-tool-search ranks a UCP cart tool for a cart query")
     else:
-        rep.check_fail("shopware-tool-search", "no UCP cart tool in results")
+        rep.check_fail("shopware-tool-search", f"no UCP cart tool in results: {names}")
 
     # --- the buyer journey ---
     #

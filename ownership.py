@@ -14,8 +14,9 @@ gate, nine core failures still read PASS as long as the plugins are clean —
 which is exactly backwards, since the plugin numbers are the ones we can
 afford to lose.
 
-Attribution is by tool-name prefix, checked longest-first because
-`shopware-ucp-*` is agentic-commerce, not core. This is a convention, so
+Attribution is by exact name first, then by tool-name prefix checked
+longest-first. The name step exists because the UCP tools carry no prefix at
+all since UCP 2026-08-25 (`create_cart`, `search_catalog`). This is a convention, so
 tests/test_ownership.py enforces it against the committed tool snapshot: a
 server-side tool that matches no prefix fails the unit tests rather than being
 silently filed under core.
@@ -31,9 +32,37 @@ what it lost to.
 # only typing, so this costs nothing and cannot cycle.
 from eval.result_schema import FixtureResult, TierBucket
 
+# agentic-commerce 1.3.0 (UCP 2026-08-25) renamed every UCP tool to the spec's
+# canonical names — `create_cart`, `search_catalog`, `get_checkout` — which carry
+# no vendor prefix at all. Prefix matching cannot reach them: they fall past
+# every entry below, including `shopware-`, and land in UNKNOWN. So the names are
+# listed, and consulted before the prefixes.
+#
+# Deliberately duplicated from ucp.py rather than imported. That module is
+# deletable by design — dropping the plugin is deleting one file — and importing
+# it here would make ownership.py fail to import along with it, for tools it
+# would no longer be asked about anyway. tests/test_ownership.py checks this list
+# against the committed Store snapshot, so the two cannot drift apart in silence.
+UCP_TOOLS = frozenset(
+    {
+        "apply_discount",
+        "cancel_cart",
+        "cancel_checkout",
+        "complete_checkout",
+        "create_cart",
+        "create_checkout",
+        "get_cart",
+        "get_checkout",
+        "get_order",
+        "lookup_catalog",
+        "search_catalog",
+        "update_cart",
+        "update_checkout",
+    }
+)
+
 # Ordered: first match wins, so more specific prefixes come first.
 OWNER_PREFIXES = (
-    ("shopware-ucp-", "agentic-commerce"),
     ("shopware-store-api-", "core"),
     ("swag-dev-tools-", "dev-tools"),
     ("merchant-", "merchant-tools"),
@@ -96,7 +125,10 @@ PROMPT_SETS: dict[str, frozenset[str] | None] = {
 
 
 def owner_of(tool: str | None) -> str:
-    """Owning repository for a tool name, or UNKNOWN if no prefix matches.
+    """Owning repository for a tool name, or UNKNOWN if nothing matches.
+
+    Exact names are checked before prefixes because the UCP tools have no
+    prefix to check — see UCP_TOOLS.
 
     Accepts None because negative fixtures have no expected tool — the whole
     point of them is that no tool should be called. They carry `expected_tool`
@@ -108,6 +140,8 @@ def owner_of(tool: str | None) -> str:
     pass had already been paid for. Guarding here rather than at each call site
     is what stops there being a fourth.
     """
+    if tool in UCP_TOOLS:
+        return "agentic-commerce"
     for prefix, owner in OWNER_PREFIXES:
         if (tool or "").startswith(prefix):
             return owner

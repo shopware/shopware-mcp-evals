@@ -374,7 +374,8 @@ jobs:
       # schemas to find dryRun, tests/test_fixtures.py could not validate
       # expected_toolset, and drift detection did not cover it. The Store
       # fixtures ended up declaring toolsets that do not exist ('shopware',
-      # 'store-api'; the real ones are shopware-ucp-cart / -catalog / -checkout)
+      # 'store-api'; the real ones were shopware-ucp-cart / -catalog / -checkout,
+      # and are now no toolset at all — the UCP tools are advertised by default)
       # and nothing could catch it.
       #
       # Uploaded as an artifact rather than committed here: the nightly

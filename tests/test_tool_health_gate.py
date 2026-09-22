@@ -128,8 +128,8 @@ def test_skipped_fixtures_are_rendered_grouped_by_reason() -> None:
     """Rendered next to the rate, because that is the number they change."""
     reports = [
         _skipped_report(
-            SkippedFixture(id="a", expected_tool="shopware-ucp-checkout-complete", reason="static checks failed"),
-            SkippedFixture(id="b", expected_tool="shopware-ucp-checkout-complete", reason="static checks failed"),
+            SkippedFixture(id="a", expected_tool="complete_checkout", reason="static checks failed"),
+            SkippedFixture(id="b", expected_tool="complete_checkout", reason="static checks failed"),
             SkippedFixture(id="c", expected_tool="swag-dev-tools-scaffold", reason="not registered"),
         )
     ]
@@ -137,7 +137,7 @@ def test_skipped_fixtures_are_rendered_grouped_by_reason() -> None:
     out = summary.render_skipped(reports)
 
     assert "Not graded (3 fixtures)" in out
-    assert "shopware-ucp-checkout-complete" in out
+    assert "complete_checkout" in out
     # Most-skipped reason first, so the biggest hole is the first thing read.
     assert out.index("static checks failed") < out.index("not registered")
 

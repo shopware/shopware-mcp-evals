@@ -51,7 +51,8 @@ def main() -> int:
     # read schemas to find dryRun, tests/test_fixtures.py could not check
     # expected_toolset, and drift detection did not cover it at all. The Store
     # fixtures ended up declaring toolsets ('shopware', 'store-api') that do not
-    # exist — the real ones are shopware-ucp-cart, -catalog, -checkout — which
+    # exist — and at the time the real ones were shopware-ucp-cart / -catalog /
+    # -checkout, since replaced by a default-surface catalogue — which
     # nothing could catch.
     parser.add_argument(
         "--endpoint",

@@ -248,14 +248,14 @@ runs:
 
     # The agentic-commerce plugin (composer name shopware/agentic-commerce,
     # plugin class Swag\AgenticCommerce\SwagAgenticCommerce) carries the 14
-    # shopware-ucp-* MCP tools under src/Ucp/Mcp/Tool. It pulls the UCP
+    # UCP MCP tools under src/Ucp/Mcp/Tool (create_cart, search_catalog, ...). It pulls the UCP
     # protocol layer in via ucp-php-sdk/symfony-bundle, which is public on
     # Packagist, so composer resolves it without extra wiring. Tracks its
     # default branch like the other plugins.
 
     # The agentic-commerce plugin (composer name shopware/agentic-commerce,
     # plugin class Swag\AgenticCommerce\SwagAgenticCommerce) carries the 14
-    # shopware-ucp-* MCP tools under src/Ucp/Mcp/Tool. It pulls the UCP
+    # UCP MCP tools under src/Ucp/Mcp/Tool (create_cart, search_catalog, ...). It pulls the UCP
     # protocol layer in via ucp-php-sdk/symfony-bundle, which is public on
     # Packagist, so composer resolves it without extra wiring. Tracks its
     # default branch like the other plugins.
@@ -878,7 +878,7 @@ runs:
         # Exposure subset the Administration owns and leaves signature policy,
         # allowlists and signing keys to the ucp:config:set call above.
         # A redeemable promotion, so the buyer journey's discount step runs instead
-        # of skipping. `shopware-ucp-discount-apply` needs a `promo_code` and
+        # of skipping. `apply_discount` needs a `promo_code` and
         # nothing ever produced one: UCP_JOURNEY_PROMO_CODE was read by
         # functional/journeys.py and set by no step in this repo, so that step has
         # reported "precondition missing: promo_code" on every run since it was
@@ -906,7 +906,7 @@ runs:
           # Empty output, not a failure: the journey step skips with a named
           # precondition, which is the honest outcome and does not take the suite
           # down over a fixture prerequisite.
-          echo "::warning::Could not create the journey promotion (HTTP ${promo_status}), so shopware-ucp-discount-apply will skip on a missing promo_code.%0A$(head -c 400 /tmp/promo.json | tr '\n' ' ')"
+          echo "::warning::Could not create the journey promotion (HTTP ${promo_status}), so apply_discount will skip on a missing promo_code.%0A$(head -c 400 /tmp/promo.json | tr '\n' ' ')"
           echo "promo_code=" >> "$GITHUB_OUTPUT"
         fi
 
@@ -1142,7 +1142,8 @@ runs:
     # schemas to find dryRun, tests/test_fixtures.py could not validate
     # expected_toolset, and drift detection did not cover it. The Store
     # fixtures ended up declaring toolsets that do not exist ('shopware',
-    # 'store-api'; the real ones are shopware-ucp-cart / -catalog / -checkout)
+    # 'store-api'; the real ones were shopware-ucp-cart / -catalog / -checkout,
+    # and are now no toolset at all — the UCP tools are advertised by default)
     # and nothing could catch it.
     #
     # Uploaded as an artifact rather than committed here: the nightly
