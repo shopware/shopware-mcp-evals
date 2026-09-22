@@ -19,6 +19,7 @@ from eval.result_schema import Fixture, Snapshot, as_list, as_object
 
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT = ROOT / "tool-history" / "latest.json"
+STORE_SNAPSHOT = ROOT / "tool-history" / "store.json"
 
 CATEGORIES = {"unambiguous", "disambiguation", "chain", "meta", "discovery", "negative"}
 
@@ -50,6 +51,20 @@ DEFAULT_TOOLS = set(_snapshot.get("default_tools", []))
 TOOLSET_OF = {tool: ts["name"] for ts in _snapshot["toolsets"] for tool in ts["tools"]}
 
 
+def _default_tools(label: str) -> set[str]:
+    """The default-advertised surface of the endpoint a fixture file targets.
+
+    Store falls back to the admin set when its snapshot is absent, which is what
+    `store_snapshot_required` skips on — the two toolset rules below would
+    otherwise fail on a checkout that has never run the Store suite.
+    """
+    if label != "store":
+        return DEFAULT_TOOLS
+    if not STORE_SNAPSHOT.exists():
+        return DEFAULT_TOOLS
+    return set(_read_snapshot(STORE_SNAPSHOT).get("default_tools", []))
+
+
 def _positive(fixtures: list[Fixture]) -> list[Fixture]:
     return [f for f in fixtures if f.get("category") != NEGATIVE]
 
@@ -68,6 +83,46 @@ def _expected(fixture: Fixture) -> str:
 
 def _counts(fixtures: list[Fixture]) -> collections.Counter[str]:
     return collections.Counter(_expected(f) for f in _positive(fixtures))
+
+
+@pytest.mark.parametrize("name", ["fixtures.yaml", "fixtures_store.yaml"])
+def test_no_fixture_declares_the_same_key_twice(name: str) -> None:
+    """A duplicate key is silent data loss, which is how it got committed once.
+
+    `yaml.safe_load` keeps the LAST value for a repeated key and reports
+    nothing, so a fixture that grows a second `notes:` or `expected_tool:`
+    quietly discards the first — and no other test here reads `notes`, so
+    nothing else would notice. Editors flag it; CI did not.
+
+    Scanned off the raw text rather than through a custom yaml loader, because
+    the node API that a loader hook exposes is untyped and basedpyright runs
+    clean on this repo. The fixture files are a flat list of mappings with
+    fixed indentation, so the text scan sees exactly what the parser would.
+    """
+    key = re.compile(r"^ {4}([a-z_]+):")
+    seen: set[str] = set()
+    fixture_id = "(before the first fixture)"
+    for number, line in enumerate((ROOT / "eval" / name).read_text().splitlines(), start=1):
+        if line.startswith("  - "):
+            seen = set()
+            fixture_id = line.removeprefix("  - id:").strip() or fixture_id
+        if match := key.match(line):
+            found = match.group(1)
+            assert found not in seen, f"{name}: {fixture_id} declares {found!r} twice, on line {number}"
+            seen.add(found)
+
+
+@pytest.mark.parametrize("label,fixtures", ALL_FILES)
+def test_notes_survive_loading_where_they_are_written(label: str, fixtures: list[Fixture]) -> None:
+    """Cheap companion to the duplicate-key check, from the other direction.
+
+    The fixtures that carry a rationale are the ones a later reader relies on
+    to know why an expectation is what it is. A non-empty `notes:` in the file
+    that arrives empty in the parsed fixture means something ate it.
+    """
+    for fixture in fixtures:
+        if "notes" in fixture:
+            assert str(fixture["notes"]).strip(), f"{label}: {fixture['id']} has an empty notes field"
 
 
 @pytest.mark.parametrize("label,fixtures", ALL_FILES)
@@ -135,17 +190,28 @@ def test_prompts_are_unique(label: str, fixtures: list[Fixture]) -> None:
 
 
 @pytest.mark.parametrize("label,fixtures", ALL_FILES)
-def test_toolset_is_declared_for_non_meta_fixtures(label: str, fixtures: list[Fixture]) -> None:
-    """Discovery mode grades toolset-enable, so every non-meta fixture needs a target."""
-    missing = [f["id"] for f in _positive(fixtures) if f.get("category") != "meta" and not f.get("expected_toolset")]
-    assert not missing, f"{label}: non-meta fixtures without expected_toolset: {missing}"
+def test_toolset_is_declared_for_deferred_fixtures(label: str, fixtures: list[Fixture]) -> None:
+    """Discovery mode grades toolset-enable, so a DEFERRED tool needs a target.
+
+    The rule used to be "non-meta implies a toolset", which held only while the
+    meta-tools were the sole thing on the default surface. agentic-commerce 1.3.0
+    put the thirteen UCP tools there too, and they are not meta — so the test was
+    demanding a toolset for tools that are in none, and the honest fixtures
+    failed it. The invariant is about deferral, not about being a meta-tool; it
+    always was, and "meta" was standing in for it.
+    """
+    default = _default_tools(label)
+    missing = [f["id"] for f in _positive(fixtures) if _expected(f) not in default and not f.get("expected_toolset")]
+    assert not missing, f"{label}: deferred fixtures without expected_toolset: {missing}"
 
 
 @pytest.mark.parametrize("label,fixtures", ALL_FILES)
-def test_meta_fixtures_declare_no_toolset(label: str, fixtures: list[Fixture]) -> None:
-    """Meta-tools are on the default surface — enabling a toolset to reach them is wrong."""
-    stray = [f["id"] for f in fixtures if f.get("category") == "meta" and f.get("expected_toolset")]
-    assert not stray, f"{label}: meta fixtures must not set expected_toolset: {stray}"
+def test_default_surface_fixtures_declare_no_toolset(label: str, fixtures: list[Fixture]) -> None:
+    """The mirror: a tool advertised without enabling anything must not claim a
+    toolset. Enabling one to reach it would grade a step the client never takes."""
+    default = _default_tools(label)
+    stray = [f["id"] for f in _positive(fixtures) if _expected(f) in default and f.get("expected_toolset")]
+    assert not stray, f"{label}: default-surface fixtures must not set expected_toolset: {stray}"
 
 
 @pytest.mark.parametrize("label,fixtures", ALL_FILES)
@@ -250,7 +316,6 @@ def test_only_meta_fixtures_name_a_toolset_as_a_toolset(label: str, fixtures: li
 #
 # The moment the snapshot lands these turn on and fail until the fixtures are
 # corrected against it.
-STORE_SNAPSHOT = ROOT / "tool-history" / "store.json"
 store_snapshot_required = pytest.mark.skipif(
     not STORE_SNAPSHOT.exists(),
     reason="tool-history/store.json not committed yet — the nightly reconciliation PR adds it",
@@ -272,9 +337,19 @@ def test_store_fixtures_reference_known_tools() -> None:
 
 @store_snapshot_required
 def test_store_fixtures_declare_a_toolset_that_exists() -> None:
-    """The check that would have caught `expected_toolset: shopware` on day one."""
+    """The check that would have caught `expected_toolset: shopware` on day one.
+
+    Only fixtures that declare one are checked. Absent is a valid answer now that
+    the UCP tools are on the default surface and belong to no toolset — whether
+    absence is *correct* for a given fixture is
+    test_toolset_is_declared_for_deferred_fixtures' job, not this one's.
+    """
     known = {ts["name"] for ts in _store_snapshot()["toolsets"]}
-    wrong = {f["id"]: f.get("expected_toolset") for f in _positive(STORE) if f.get("expected_toolset") not in known}
+    wrong = {
+        f["id"]: declared
+        for f in _positive(STORE)
+        if (declared := f.get("expected_toolset")) is not None and declared not in known
+    }
 
     assert not wrong, f"toolsets that do not exist on the Store endpoint: {wrong}"
 

@@ -233,36 +233,31 @@ ADMIN_TOOLSETS: list[Toolset] = [
     },
 ]
 
+# The Store endpoint since agentic-commerce 1.3.0 (UCP 2026-08-25): the thirteen
+# UCP tools are advertised on a fresh session, and `store-api` is the only
+# toolset left. It used to be the opposite — UCP spread across granular cart /
+# checkout / catalog toolsets and nothing on the default surface — so these
+# fixtures are not a simplification, they are the other shape.
 STORE_TOOLSETS: list[Toolset] = [
     {
-        "name": "buyer-journey",
-        "title": "Buyer Journey",
-        "description": "cart/checkout",
+        "name": "store-api",
+        "title": "Store API",
+        "description": "store api context",
         "enabled": False,
-        "tools": [f"shopware-ucp-cart-{x}" for x in ("create", "add", "remove", "get", "update")]
-        + [f"shopware-ucp-checkout-{x}" for x in ("start", "confirm")]
-        + [f"shopware-ucp-catalog-{x}" for x in ("search", "read")],
-    },
-    {
-        "name": "context",
-        "title": "Context",
-        "description": "context",
-        "enabled": False,
-        "tools": [
-            "shopware-store-api-context",
-            "shopware-store-config-read",
-            "shopware-store-nav-read",
-            "shopware-store-page-read",
-            "shopware-store-seo-read",
-            "shopware-store-currency-list",
-        ],
+        "tools": ["shopware-store-api-context", "shopware-store-config-read"],
     },
 ]
 
 
+NO_EXTRA: frozenset[str] = frozenset()
+
+
 class FakeServer:
-    def __init__(self, toolsets: list[Toolset]) -> None:
+    def __init__(self, toolsets: list[Toolset], default_extra: frozenset[str] = NO_EXTRA) -> None:
         self.toolsets: list[Toolset] = toolsets
+        # Tools this endpoint publishes without anything being enabled, beyond
+        # the meta-tools. Empty on admin; the UCP set on store.
+        self.default_extra: frozenset[str] = default_extra
         self.names: set[str] = {t["name"] for t in toolsets}
         self.n: int = 0
         self.enabled: dict[str, set[str]] = {}
@@ -286,7 +281,7 @@ class FakeServer:
 
     def tools_list(self, session: str, endpoint: Endpoint | None = None) -> list[ToolDef]:
         assert endpoint is None or endpoint in (ADMIN, STORE)
-        names = set(R.META_TOOLS)
+        names = set(R.META_TOOLS) | self.default_extra
         for ts in self.toolsets:
             if ts["name"] in self.enabled.get(session, set()):
                 names.update(ts["tools"])
@@ -308,7 +303,7 @@ class FakeServer:
             # would let the schema-conformance check pass against a fake that is
             # laxer than any real server.
             if "cart" in query or "shopping" in query:
-                data = [{"tool": search_tool("shopware-ucp-cart-add"), "score": 0.9, "matchedIn": "desc"}]
+                data = [{"tool": search_tool("update_cart"), "score": 0.9, "matchedIn": "desc"}]
             elif "image" in query or "upload" in query:
                 data = [{"tool": search_tool("shopware-media-upload"), "score": 0.9, "matchedIn": "desc"}]
             else:
@@ -347,7 +342,9 @@ def _wire(monkeypatch: pytest.MonkeyPatch, fake: FakeServer) -> None:
 
 
 def test_run_store_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeServer(STORE_TOOLSETS)
+    import ucp
+
+    fake = FakeServer(STORE_TOOLSETS, default_extra=ucp.all_classified())
     _wire(monkeypatch, fake)
     rep = Reporter("store", color=False)
     session, _ = fake.init()
@@ -356,54 +353,26 @@ def test_run_store_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rep.passed >= 10
 
 
-def test_run_store_flow_with_granular_ucp_toolsets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Trunk splits UCP across several granular toolsets (cart, checkout, catalog).
-    The enable-probe must come from the selected toolset — a hardcoded probe tool
-    fails whenever the picked toolset does not happen to contain it."""
-    granular: list[Toolset] = [
-        {
-            "name": "shopware-ucp-cart",
-            "title": "Cart",
-            "description": "cart",
-            "enabled": False,
-            "tools": [
-                "shopware-ucp-cart-create",
-                "shopware-ucp-cart-add",
-                "shopware-ucp-cart-get",
-                "shopware-ucp-cart-remove",
-                "shopware-ucp-cart-update",
-            ],
-        },
-        {
-            "name": "shopware-ucp-checkout",
-            "title": "Checkout",
-            "description": "checkout",
-            "enabled": False,
-            "tools": ["shopware-ucp-checkout-start", "shopware-ucp-checkout-confirm"],
-        },
-        {
-            "name": "shopware-ucp-catalog",
-            "title": "Catalog",
-            "description": "catalog",
-            "enabled": False,
-            "tools": ["shopware-ucp-catalog-search", "shopware-ucp-catalog-read"],
-        },
-        {
-            "name": "context",
-            "title": "Context",
-            "description": "context",
-            "enabled": False,
-            "tools": ["shopware-store-api-context", "shopware-store-config-read"],
-        },
-        {
-            "name": "misc",
-            "title": "Misc",
-            "description": "misc",
-            "enabled": False,
-            "tools": ["shopware-store-nav-read", "shopware-store-seo-read", "shopware-store-currency-list"],
-        },
-    ]
-    fake = FakeServer(granular)
+def test_run_store_flow_when_ucp_is_on_the_default_surface(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replaces test_run_store_flow_with_granular_ucp_toolsets, whose premise —
+    "trunk splits UCP across several granular toolsets" — stopped being true in
+    agentic-commerce 1.3.0. The probe for enable/isolation now has to come from
+    whichever toolset still defers something, because the UCP ones are gone and
+    a probe hardcoded to a UCP tool would never be deferred again."""
+    import ucp
+
+    fake = FakeServer(
+        [
+            {
+                "name": "store-api",
+                "title": "Store API",
+                "description": "context",
+                "enabled": False,
+                "tools": ["shopware-store-api-context", "shopware-store-config-read"],
+            }
+        ],
+        default_extra=ucp.all_classified(),
+    )
     _wire(monkeypatch, fake)
     rep = Reporter("store", color=False)
     session, _ = fake.init()

@@ -5,9 +5,9 @@ UCP is an optional plugin — `shopware/agentic-commerce`, checked out only when
 the Store suite runs — and it may not be here forever. Keeping its specifics
 scattered through mcp_client, toolclass and the runner would make removing it an
 archaeology exercise, so it lives here instead. To drop UCP entirely: delete
-this module, the `ucp.*` imports in `toolclass.py` and `mcp_client.py`, and the
-`shopware-ucp-*` fixtures in `eval/fixtures_store.yaml`. Nothing else knows
-about it.
+this module, the `ucp.*` imports in `toolclass.py` and `mcp_client.py`, the UCP
+fixtures in `eval/fixtures_store.yaml`, and the `UCP_TOOLS` entry in
+`ownership.py`. Nothing else knows about it.
 
 What is deliberately NOT here: `shopware-store-api-context`. Despite riding the
 same endpoint, that tool is Shopware core (see the `shopware-store-api-` prefix
@@ -24,18 +24,30 @@ The two things this module carries are the ones a caller cannot guess:
 import os
 import uuid
 
-# Tools this plugin owns. `shopware-store-api-` is excluded on purpose — see the
-# module docstring.
-TOOL_PREFIX = "shopware-ucp-"
+# There is no prefix to match on any more. agentic-commerce 1.3.0 (UCP
+# 2026-08-25) renamed every tool to the spec's canonical verb_noun names:
+#
+#   shopware-ucp-cart-create     ->  create_cart
+#   shopware-ucp-catalog-search  ->  search_catalog
+#   shopware-ucp-checkout-get    ->  get_checkout
+#
+# A UCP client discovers these by name, so they are the plugin's interop
+# surface rather than Shopware's namespace, and nothing marks them as
+# Shopware's. Membership is therefore the explicit set below — `all_classified()`
+# — and a new tool that is not listed is simply not treated as UCP, which is the
+# safe direction: it gets no Idempotency-Key and no execution class, so the
+# functional runner refuses to call it rather than calling it blind.
+#
+# `shopware-store-api-context` is excluded on purpose — see the module docstring.
 
 # Reads. Safe to call for real.
 READ_ONLY: frozenset[str] = frozenset(
     {
-        "shopware-ucp-cart-get",
-        "shopware-ucp-catalog-lookup",
-        "shopware-ucp-catalog-search",
-        "shopware-ucp-checkout-get",
-        "shopware-ucp-order-get",
+        "get_cart",
+        "get_checkout",
+        "get_order",
+        "lookup_catalog",
+        "search_catalog",
     }
 )
 
@@ -43,18 +55,18 @@ READ_ONLY: frozenset[str] = frozenset(
 # safely. These were guessed UNSAFE while the Store endpoint had no snapshot to
 # read schemas from; the list below is taken from the live catalogue.
 #
-# `checkout-complete` is the one that can take money, and it is only callable at
+# `complete_checkout` is the one that can take money, and it is only callable at
 # all because the server offers the safe path.
 DRY_RUNNABLE: frozenset[str] = frozenset(
     {
-        "shopware-ucp-cart-cancel",
-        "shopware-ucp-cart-create",
-        "shopware-ucp-cart-update",
-        "shopware-ucp-checkout-cancel",
-        "shopware-ucp-checkout-complete",
-        "shopware-ucp-checkout-create",
-        "shopware-ucp-checkout-update",
-        "shopware-ucp-discount-apply",
+        "apply_discount",
+        "cancel_cart",
+        "cancel_checkout",
+        "complete_checkout",
+        "create_cart",
+        "create_checkout",
+        "update_cart",
+        "update_checkout",
     }
 )
 
@@ -103,7 +115,12 @@ AGENT_NAME = os.environ.get("UCP_AGENT_NAME", "shopware-mcp-evals")
 
 
 def is_ucp_tool(name: str) -> bool:
-    return name.startswith(TOOL_PREFIX)
+    """Membership by name, because the catalogue no longer carries a prefix.
+
+    Unknown names are not UCP. See the comment above READ_ONLY for why that is
+    the safe default rather than a gap.
+    """
+    return name in all_classified()
 
 
 def agent_header(base_url: str, profile_uri: str | None = None) -> str:

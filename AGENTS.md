@@ -428,8 +428,11 @@ Admin endpoint (`--endpoint admin`, the default): the 3 discovery meta-tools, al
 `swag-dev-tools-*`. Example bundle tools (McpHelloWorld) are excluded.
 
 Store API endpoint (`--endpoint store`): the meta-tools, `shopware-store-api-context`
-and the `shopware-ucp-*` buyer-journey tools. The functional suite verifies
-discovery mechanics only — it does not execute cart/checkout, which needs
+and the thirteen UCP buyer-journey tools (`create_cart`, `search_catalog`,
+`complete_checkout`, …). Since agentic-commerce 1.3.0 those are advertised on
+the **default surface** rather than deferred behind toolsets, so `store-api` —
+holding `shopware-store-api-context` — is the only toolset on that endpoint.
+The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
 provisioned state; tool *selection* for those is covered by the LLM eval.
 
 Where the tools come from:
@@ -439,7 +442,7 @@ Where the tools come from:
 | meta-tools, `shopware-entity-*`, `shopware-system-config-*`, `shopware-order-state`, `shopware-media-upload`, `shopware-theme-config`, `shopware-store-api-context` | Shopware core (`trunk`) |
 | `merchant-*` | `shopware/SwagMcpMerchantTools` |
 | `swag-dev-tools-*` | `shopware/SwagMcpDevTools` |
-| `shopware-ucp-*` | `shopware/agentic-commerce` (`src/Ucp/Mcp/Tool`) |
+| the UCP tools, named by the spec (`create_cart`, `get_order`, …) — no vendor prefix, so `ownership.py` lists them by name | `shopware/agentic-commerce` (`src/Ucp/Mcp/Tool`) |
 
 ## Improving tool descriptions / groups
 

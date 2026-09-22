@@ -67,21 +67,53 @@ def test_every_fixture_target_has_an_owner(tool: str) -> None:
         ("shopware-store-api-context", "core"),
         ("swag-dev-tools-log-search", "dev-tools"),
         ("merchant-order-summary", "merchant-tools"),
-        ("shopware-ucp-cart-create", "agentic-commerce"),
+        ("create_cart", "agentic-commerce"),
     ],
 )
 def test_known_tools_map_to_their_repository(tool: str, owner: str) -> None:
     assert OWN.owner_of(tool) == owner
 
 
-def test_ucp_beats_the_core_prefix() -> None:
-    """shopware-ucp-* is agentic-commerce, not core — longest prefix must win.
+def test_ucp_names_are_matched_before_any_prefix() -> None:
+    """UCP tools have no prefix to match, so the name list has to be consulted first.
 
-    Order-dependent: move the bare 'shopware-' entry up in OWNER_PREFIXES and
-    every UCP tool silently becomes core.
+    This used to be a longest-prefix question — `shopware-ucp-` before the bare
+    `shopware-`. UCP 2026-08-25 renamed them to `create_cart`, `complete_checkout`
+    and friends, which match no prefix at all and would land in UNKNOWN, not in
+    core. Drop the UCP_TOOLS lookup from owner_of and every one of them becomes
+    unattributed, which is a silent zero in the by-owner table rather than a
+    failure.
     """
-    assert OWN.owner_of("shopware-ucp-checkout-complete") == "agentic-commerce"
+    assert OWN.owner_of("complete_checkout") == "agentic-commerce"
     assert OWN.owner_of("shopware-store-api-context") == "core"
+    # The prefix table still has to be order-sensitive for the tools that do
+    # carry one: move the bare 'shopware-' entry up and store-api-context
+    # becomes core by luck rather than by rule.
+    assert OWN.owner_of("shopware-entity-read") == "core"
+
+
+def test_every_ucp_tool_in_the_store_snapshot_is_attributed() -> None:
+    """ownership.py duplicates ucp.py's names on purpose (ucp.py is deletable).
+
+    This is what stops the copy drifting: a UCP tool the plugin adds or renames
+    shows up in the committed Store snapshot, and lands here as `unattributed`
+    until ownership.py learns about it. Without this, the rename that prompted
+    all of it would have been invisible on the ownership side.
+    """
+    import json
+    from pathlib import Path
+    from typing import cast
+
+    from eval.result_schema import Snapshot, as_object
+
+    snapshot = Path(__file__).resolve().parents[1] / "tool-history" / "store.json"
+    if not snapshot.exists():
+        pytest.skip("tool-history/store.json not committed yet")
+
+    parsed = cast(Snapshot, cast(object, as_object(cast(object, json.loads(snapshot.read_text())))))
+    names = {t["name"] for t in parsed["tools"]}
+    unattributed = sorted(n for n in names if OWN.owner_of(n) == OWN.UNKNOWN)
+    assert not unattributed, f"Store tools no owner prefix or name list reaches: {unattributed}"
 
 
 def test_unknown_prefix_is_flagged_not_guessed() -> None:
@@ -159,7 +191,7 @@ def test_core_rate_includes_discovery_and_excludes_plugins() -> None:
 def test_core_rate_is_vacuously_one_when_no_core_fixtures_ran() -> None:
     """The store suite is almost entirely UCP; it must not fail a core gate it
     has no fixtures for."""
-    assert OWN.core_rate(graded(("u", "shopware-ucp-cart-get", False))) == (0, 0, 1.0)
+    assert OWN.core_rate(graded(("u", "get_cart", False))) == (0, 0, 1.0)
 
 
 def test_core_rate_handles_empty() -> None:

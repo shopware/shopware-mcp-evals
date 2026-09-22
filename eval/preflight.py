@@ -36,7 +36,7 @@ from eval.result_schema import JsonObject, McpResponse, as_list, as_object
 # discovered from the Store API (see discover_store_query), so the probe searches
 # something the shop actually has rather than an invented word.
 PROBES: dict[str, tuple[str, JsonObject]] = {
-    "store": ("shopware-ucp-catalog-search", {"query": "test"}),
+    "store": ("search_catalog", {"query": "test"}),
     "admin": ("shopware-entity-search", {"entity": "product", "limit": 1}),
 }
 
@@ -47,7 +47,7 @@ PROBES: dict[str, tuple[str, JsonObject]] = {
 # fixing. The id comes from search's own result, not the Store API, because UCP
 # may namespace product ids differently — this mirrors functional/journeys.py,
 # where `ids` is a single string, not an array.
-STORE_LOOKUP_TOOL = "shopware-ucp-catalog-lookup"
+STORE_LOOKUP_TOOL = "lookup_catalog"
 
 # The Store API product-listing route, called with the sales-channel access key
 # the store endpoint already uses.

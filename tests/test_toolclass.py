@@ -53,8 +53,20 @@ def test_the_dry_runnable_set_matches_what_the_schemas_declare() -> None:
     # Admin-scoped: the Store tools are in DRY_RUNNABLE too, and the admin
     # snapshot knows nothing about them. test_store_tools_that_declare_dry_run_
     # are_not_guessed_unsafe covers those once store.json lands.
-    admin = sorted(t for t in TC.DRY_RUNNABLE if not t.startswith(("shopware-ucp-", "shopware-store-api-")))
+    admin = sorted(t for t in TC.DRY_RUNNABLE if t not in _store_owned())
     assert admin == SCHEMA_DRY_RUN
+
+
+def _store_owned() -> frozenset[str]:
+    """Tools that live on the Store endpoint, so the admin snapshot cannot see them.
+
+    Was a prefix tuple until UCP 2026-08-25 renamed the plugin's tools to
+    unprefixed spec names. shopware-store-api-context is core but Store-only, so
+    it belongs here for the same reason and for a different one.
+    """
+    import ucp
+
+    return ucp.all_classified() | frozenset({"shopware-store-api-context"})
 
 
 def test_no_tool_is_in_two_classes() -> None:
@@ -66,14 +78,12 @@ def test_no_tool_is_in_two_classes() -> None:
 def test_the_admin_catalogue_is_fully_covered_with_no_stale_entries() -> None:
     """Every admin tool classified, and nothing classified that admin dropped.
 
-    Not equality: the Store endpoint has no committed snapshot, so its
-    `shopware-ucp-*` tools are classified here without one to check against.
-    They are asserted separately below.
+    Not equality: the Store tools are classified here too and the admin
+    snapshot knows nothing about them. They are asserted separately below.
     """
     classified = TC.all_classified()
     assert not set(SNAPSHOT_TOOLS) - classified, "admin tools with no class"
-    store_prefixes = ("shopware-ucp-", "shopware-store-api-")
-    stale = {t for t in classified - set(SNAPSHOT_TOOLS) if not t.startswith(store_prefixes)}
+    stale = {t for t in classified - set(SNAPSHOT_TOOLS) if t not in _store_owned()}
     assert not stale, f"classified but no longer in the admin catalogue: {sorted(stale)}"
 
 
@@ -95,7 +105,7 @@ def test_store_mutations_are_dry_runnable_now_that_the_plugin_declares_it() -> N
     plugin added dryRun to exactly its mutating tools, so they are executable
     again — checkout-complete is the one that can take money, and it is only
     callable at all because the server offers a safe path."""
-    for tool in ("shopware-ucp-checkout-complete", "shopware-ucp-cart-create"):
+    for tool in ("complete_checkout", "create_cart"):
         assert TC.classify(tool) == "dry_runnable"
         args, forced = TC.prepare_call(tool, {})
         assert args["dryRun"] is True and forced is True
@@ -184,14 +194,15 @@ def test_an_unclassified_tool_is_not_given_a_dry_run() -> None:
 # ---------------------------------------------------------------------------
 # Store classification, once the Store catalogue has been snapshotted
 # ---------------------------------------------------------------------------
-# Every shopware-ucp-* tool is currently classified by hand from its name,
-# because there has never been a Store snapshot to read a `dryRun` property out
-# of. Anything that might mutate was therefore called unsafe, which is why the
-# whole Store suite is graded on selection alone.
+# The UCP tools were once classified by hand from their names, because there was
+# no Store snapshot to read a `dryRun` property out of, and anything that might
+# mutate was called unsafe. The snapshot is committed now, so these checks are
+# live: they fail for any Store tool whose schema disagrees with its class —
+# including one that grows a dryRun and should move to DRY_RUNNABLE and start
+# being executed for real.
 #
-# This is inert until the snapshot lands, then it fails for any Store tool whose
-# schema disagrees with the guess — including any that turn out to have a dryRun
-# and should move to DRY_RUNNABLE and start being executed for real.
+# The skip below is what keeps a checkout that has never run the Store suite
+# from failing on a file it was never going to have.
 STORE_SNAPSHOT = ROOT / "tool-history" / "store.json"
 store_snapshot_required = pytest.mark.skipif(
     not STORE_SNAPSHOT.exists(),
@@ -231,17 +242,34 @@ def test_ucp_tools_are_classified_in_their_own_module() -> None:
 
     assert ucp.all_classified(), "ucp.py must own the plugin's classification"
     assert ucp.all_classified() <= TC.all_classified(), "and toolclass must merge it in"
-    assert all(t.startswith("shopware-ucp-") for t in ucp.all_classified())
+    # Not a prefix check any more: UCP 2026-08-25 renamed these to the spec's
+    # canonical names (create_cart, search_catalog, ...), which carry no vendor
+    # namespace. What is still assertable is that toolclass itself declares none
+    # of them — the test below — and that ucp.py's set is exactly what the Store
+    # catalogue advertises, which test_store_tools_are_exactly_what_ucp_owns does
+    # once the snapshot is committed.
 
 
 def test_toolclass_carries_no_ucp_entries_of_its_own() -> None:
     """The regression this split prevents: a UCP tool added straight into
-    toolclass would survive deleting ucp.py and quietly keep being executed."""
+    toolclass would survive deleting ucp.py and quietly keep being executed.
+
+    Checked against toolclass's OWN literals rather than the merged sets. The
+    merged ones contain ucp.py's entries by construction, so asking whether they
+    overlap answers yes and proves nothing — which is exactly what this test
+    degenerated into when the `shopware-ucp-` prefix it used to filter on stopped
+    existing.
+    """
     import ucp
 
-    for name, own in (("READ_ONLY", TC.READ_ONLY), ("DRY_RUNNABLE", TC.DRY_RUNNABLE), ("UNSAFE", TC.UNSAFE)):
-        strays = {t for t in own if t.startswith("shopware-ucp-")} - ucp.all_classified()
-        assert not strays, f"{name} has UCP tools that ucp.py does not own: {sorted(strays)}"
+    owned = ucp.all_classified()
+    for name, own in (
+        ("CORE_READ_ONLY", TC.CORE_READ_ONLY),
+        ("CORE_DRY_RUNNABLE", TC.CORE_DRY_RUNNABLE),
+        ("CORE_UNSAFE", TC.CORE_UNSAFE),
+    ):
+        strays = own & owned
+        assert not strays, f"{name} declares UCP tools that belong in ucp.py: {sorted(strays)}"
 
 
 def test_store_api_context_is_core_and_stays_behind() -> None:
@@ -297,5 +325,5 @@ def test_each_call_gets_a_fresh_key() -> None:
     one would serve the previous fixture's answer to the next."""
     import ucp
 
-    keys = {ucp.call_headers("shopware-ucp-cart-create")["Idempotency-Key"] for _ in range(20)}
+    keys = {ucp.call_headers("create_cart")["Idempotency-Key"] for _ in range(20)}
     assert len(keys) == 20

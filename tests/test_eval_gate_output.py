@@ -86,7 +86,7 @@ def test_gate_block_reports_the_core_gate_separately(capsys: pytest.CaptureFixtu
 
 def test_gate_block_omits_the_core_line_when_no_core_fixtures_ran(capsys: pytest.CaptureFixture[str]) -> None:
     """The store suite is almost all UCP and has no core denominator."""
-    E.print_gate(verdict([r("u", tool="shopware-ucp-cart-get")], min_pass_rate=0.0), args(min_pass_rate=0.0))
+    E.print_gate(verdict([r("u", tool="get_cart")], min_pass_rate=0.0), args(min_pass_rate=0.0))
 
     assert "Core gate" not in plain(capsys)
 

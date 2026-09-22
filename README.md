@@ -328,7 +328,7 @@ is the half that has been broken:
 
 ```
 FAIL a signed-in buyer can place a second order:
-     shopware-ucp-checkout-update: validation: Completed checkout sessions cannot be updated.
+     update_checkout: validation: Completed checkout sessions cannot be updated.
 ```
 
 That failure is real and currently expected — tracked as O12. The checkout id doubles
@@ -584,10 +584,12 @@ failures are not worth the same:
 | `core` | `shopware-*` | `shopware/shopware` | core gate + suite rate |
 | `dev-tools` | `swag-dev-tools-*` | `SwagMcpDevTools` (bundle) | suite rate |
 | `merchant-tools` | `merchant-*` | `SwagMcpMerchantTools` (plugin) | suite rate |
-| `agentic-commerce` | `shopware-ucp-*` | `shopware/agentic-commerce` | advisory |
+| `agentic-commerce` | the UCP tools, by name | `shopware/agentic-commerce` | advisory |
 
-Attribution is by tool-name prefix (`ownership.py`), longest match first —
-`shopware-ucp-*` is agentic-commerce, not core. A fixture is attributed by its
+Attribution is by exact name first, then by tool-name prefix (`ownership.py`),
+longest match first. The name step exists because UCP 2026-08-25 renamed the
+plugin's tools to unprefixed spec names (`create_cart`, `search_catalog`), which
+no prefix reaches — they would be `unattributed`, not core. A fixture is attributed by its
 `expected_tool`: the description that should have won is the one under test, so
 a cross-boundary miss counts against the tool that lost. Because prefixes are a
 convention, `tests/test_ownership.py` fails when a tool in the snapshot matches
@@ -812,9 +814,11 @@ Example / demo tools (`SwagMcpExampleBundle`) and the `SwagMcpAdminUsers` plugin
 are not installed in CI, so they are outside the tested catalogue.
 
 The **Store API MCP endpoint** (`/store-api/_mcp`) is covered experimentally: the
-UCP buyer-journey tools (`shopware-ucp-*`) and `shopware-store-api-context` come
-from the `shopware/agentic-commerce` plugin. It uses the same discovery mechanics as
-admin but authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`) plus
+UCP buyer-journey tools (`create_cart`, `search_catalog`, …) and
+`shopware-store-api-context` come from the `shopware/agentic-commerce` plugin.
+Unlike admin, the UCP tools are advertised on the default surface rather than
+deferred — a UCP client is specified to find them by name at connect time — so
+only `shopware-store-api-context` sits behind a toolset. It authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`) plus
 a context token. Run it with:
 
 ```bash
@@ -822,7 +826,7 @@ python -m functional.runner --endpoint store               # Layer 1 (discovery 
 python -m eval.runner --endpoint store   # Layer 2 (UCP tool selection)
 ```
 
-The `shopware-ucp-*` tools come from the **`shopware/agentic-commerce`** plugin
+The UCP tools come from the **`shopware/agentic-commerce`** plugin
 (`src/Ucp/Mcp/Tool`, plugin class `Swag\AgenticCommerce\SwagAgenticCommerce`),
 which pulls the UCP protocol layer in via `ucp-php-sdk/symfony-bundle` — public
 on Packagist, so composer resolves it with no extra wiring.

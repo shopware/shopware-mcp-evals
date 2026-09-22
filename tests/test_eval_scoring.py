@@ -204,7 +204,7 @@ def test_min_core_can_be_raised_above_the_overall_threshold() -> None:
 
 def test_a_suite_with_no_core_fixtures_does_not_fail_the_core_gate() -> None:
     """The store suite is almost entirely UCP; it has no core fixtures to fail."""
-    v = verdict([r("u", tool="shopware-ucp-cart-get", passed=False)], min_pass_rate=0.0)
+    v = verdict([r("u", tool="get_cart", passed=False)], min_pass_rate=0.0)
 
     assert v["core_total"] == 0
     assert v["core_rate"] == 1.0 and v["core_ok"] is True

@@ -214,7 +214,7 @@ GUEST = Persona("guest")
 # retry can fix.
 GUEST_ORDER_REFUSAL = Refusal("not_found", "unrecoverable")
 
-ORDER_GET = "shopware-ucp-order-get"
+ORDER_GET = "get_order"
 
 
 @dataclass(frozen=True)
@@ -297,7 +297,7 @@ def _fulfillment(ctx: Context) -> JsonObject:
     }
 
 
-def _checkout_create_payload(ctx: Context) -> str:
+def _checkout_create_payload(ctx: Context) -> JsonObject:
     """checkout.create's payload, anchored to the buyer's session when there is one.
 
     `cart_id` is what carries an authenticated customer into the checkout: the
@@ -314,7 +314,7 @@ def _checkout_create_payload(ctx: Context) -> str:
     if token := str(ctx.get("context_token", "")):
         payload["cart_id"] = token
 
-    return json.dumps(payload)
+    return payload
 
 
 def _first(payload: JsonObject, key: str) -> JsonObject:
@@ -329,7 +329,7 @@ def _first(payload: JsonObject, key: str) -> JsonObject:
 
 UCP_JOURNEY: tuple[JourneyStep, ...] = (
     JourneyStep(
-        tool="shopware-ucp-catalog-search",
+        tool="search_catalog",
         detail="find a product to buy",
         args=lambda ctx: {"query": ctx.get("query", ""), "limit": 5},
         capture=lambda payload, ctx: ctx.update(
@@ -338,7 +338,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         ),
     ),
     JourneyStep(
-        tool="shopware-ucp-catalog-lookup",
+        tool="lookup_catalog",
         detail="look the product up by id",
         # `ids` is a string, not an array — the one parameter shape an agent gets
         # wrong most often, so the journey pins the accepted form.
@@ -346,44 +346,45 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         needs=("product_id",),
     ),
     JourneyStep(
-        tool="shopware-ucp-cart-create",
+        tool="create_cart",
         detail="open a cart with that product",
-        args=lambda ctx: {"payload": json.dumps({"line_items": _line_items(ctx)}), "dryRun": False},
+        args=lambda ctx: {"payload": {"line_items": _line_items(ctx)}, "dryRun": False},
         capture=lambda payload, ctx: ctx.update(cart_id=str(payload.get("id", ""))),
         needs=("product_id",),
         commits=True,
     ),
     JourneyStep(
-        tool="shopware-ucp-cart-update",
+        tool="update_cart",
         detail="change the quantity",
-        # `id` goes in the payload as well as the tool argument. The tool takes
-        # `id` as a required parameter and then rejects the request for `$.id is
-        # required` — the same value, needed twice, in two places.
+        # `id` used to go in the payload as well as the tool argument: the tool
+        # took it as a required parameter and then rejected the request for
+        # `$.id is required` anyway — the same value, needed twice, in two
+        # places. UCP 2026-08-25 fixed that, and its description now says the
+        # opposite in as many words ("the cart id travels as the id parameter and
+        # is not repeated in the payload"), so sending it twice is the error now.
         args=lambda ctx: {
             "id": ctx["cart_id"],
-            "payload": json.dumps(
-                {"id": ctx["cart_id"], "line_items": [{"item": {"id": ctx["product_id"]}, "quantity": 2}]}
-            ),
+            "payload": {"line_items": [{"item": {"id": ctx["product_id"]}, "quantity": 2}]},
             "dryRun": False,
         },
         needs=("cart_id", "product_id"),
         commits=True,
     ),
     JourneyStep(
-        tool="shopware-ucp-cart-get",
+        tool="get_cart",
         detail="read the cart back",
         args=lambda ctx: {"id": ctx["cart_id"]},
         needs=("cart_id",),
     ),
     JourneyStep(
-        tool="shopware-ucp-discount-apply",
+        tool="apply_discount",
         detail="apply a promotion code",
         args=lambda ctx: {"cartId": ctx["cart_id"], "code": ctx["promo_code"], "dryRun": False},
         needs=("cart_id", "promo_code"),
         commits=True,
     ),
     JourneyStep(
-        tool="shopware-ucp-checkout-create",
+        tool="create_checkout",
         detail="start a checkout",
         args=lambda ctx: {"payload": _checkout_create_payload(ctx), "dryRun": False},
         # The line-item ids come back here and nowhere else the journey looks, and
@@ -396,7 +397,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         commits=True,
     ),
     JourneyStep(
-        tool="shopware-ucp-checkout-update",
+        tool="update_checkout",
         detail="add buyer, address and payment",
         # line_items again: update is PUT, not PATCH. `payment` is required for
         # the checkout to reach ready_for_complete, and is where it has to be set
@@ -404,14 +405,12 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         # is the last chance to attach the shipping destination.
         args=lambda ctx: {
             "id": ctx["checkout_id"],
-            "payload": json.dumps(
-                {
-                    "line_items": _line_items(ctx),
-                    "buyer": BUYER,
-                    "fulfillment": _fulfillment(ctx),
-                    "payment": PAYMENT,
-                }
-            ),
+            "payload": {
+                "line_items": _line_items(ctx),
+                "buyer": BUYER,
+                "fulfillment": _fulfillment(ctx),
+                "payment": PAYMENT,
+            },
             "dryRun": False,
         },
         # line_item_ids is a precondition, not an optional extra: without it the
@@ -422,7 +421,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         commits=True,
     ),
     JourneyStep(
-        tool="shopware-ucp-checkout-complete",
+        tool="complete_checkout",
         detail="place the order",
         args=lambda ctx: {"id": ctx["checkout_id"], "dryRun": False},
         capture=lambda payload, ctx: ctx.update(
@@ -438,7 +437,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         needs=("order_id",),
     ),
     JourneyStep(
-        tool="shopware-ucp-cart-cancel",
+        tool="cancel_cart",
         detail="cancel the cart",
         args=lambda ctx: {"id": ctx["cart_id"], "dryRun": False},
         needs=("cart_id",),
@@ -450,9 +449,9 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
 # The steps a returning buyer repeats. Not the whole journey: the catalogue and the
 # cart tools were already proven, and repeating them would only add duplicate records.
 SECOND_ORDER_STEPS = (
-    "shopware-ucp-checkout-create",
-    "shopware-ucp-checkout-update",
-    "shopware-ucp-checkout-complete",
+    "create_checkout",
+    "update_checkout",
+    "complete_checkout",
 )
 
 SECOND_ORDER_CHECK = "a signed-in buyer can place a second order"
