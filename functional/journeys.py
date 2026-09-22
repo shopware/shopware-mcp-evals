@@ -297,7 +297,7 @@ def _fulfillment(ctx: Context) -> JsonObject:
     }
 
 
-def _checkout_create_payload(ctx: Context) -> str:
+def _checkout_create_payload(ctx: Context) -> JsonObject:
     """checkout.create's payload, anchored to the buyer's session when there is one.
 
     `cart_id` is what carries an authenticated customer into the checkout: the
@@ -314,7 +314,7 @@ def _checkout_create_payload(ctx: Context) -> str:
     if token := str(ctx.get("context_token", "")):
         payload["cart_id"] = token
 
-    return json.dumps(payload)
+    return payload
 
 
 def _first(payload: JsonObject, key: str) -> JsonObject:
@@ -348,7 +348,7 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
     JourneyStep(
         tool="create_cart",
         detail="open a cart with that product",
-        args=lambda ctx: {"payload": json.dumps({"line_items": _line_items(ctx)}), "dryRun": False},
+        args=lambda ctx: {"payload": {"line_items": _line_items(ctx)}, "dryRun": False},
         capture=lambda payload, ctx: ctx.update(cart_id=str(payload.get("id", ""))),
         needs=("product_id",),
         commits=True,
@@ -356,14 +356,15 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
     JourneyStep(
         tool="update_cart",
         detail="change the quantity",
-        # `id` goes in the payload as well as the tool argument. The tool takes
-        # `id` as a required parameter and then rejects the request for `$.id is
-        # required` — the same value, needed twice, in two places.
+        # `id` used to go in the payload as well as the tool argument: the tool
+        # took it as a required parameter and then rejected the request for
+        # `$.id is required` anyway — the same value, needed twice, in two
+        # places. UCP 2026-08-25 fixed that, and its description now says the
+        # opposite in as many words ("the cart id travels as the id parameter and
+        # is not repeated in the payload"), so sending it twice is the error now.
         args=lambda ctx: {
             "id": ctx["cart_id"],
-            "payload": json.dumps(
-                {"id": ctx["cart_id"], "line_items": [{"item": {"id": ctx["product_id"]}, "quantity": 2}]}
-            ),
+            "payload": {"line_items": [{"item": {"id": ctx["product_id"]}, "quantity": 2}]},
             "dryRun": False,
         },
         needs=("cart_id", "product_id"),
@@ -404,14 +405,12 @@ UCP_JOURNEY: tuple[JourneyStep, ...] = (
         # is the last chance to attach the shipping destination.
         args=lambda ctx: {
             "id": ctx["checkout_id"],
-            "payload": json.dumps(
-                {
-                    "line_items": _line_items(ctx),
-                    "buyer": BUYER,
-                    "fulfillment": _fulfillment(ctx),
-                    "payment": PAYMENT,
-                }
-            ),
+            "payload": {
+                "line_items": _line_items(ctx),
+                "buyer": BUYER,
+                "fulfillment": _fulfillment(ctx),
+                "payment": PAYMENT,
+            },
             "dryRun": False,
         },
         # line_item_ids is a precondition, not an optional extra: without it the

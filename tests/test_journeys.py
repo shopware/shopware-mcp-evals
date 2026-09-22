@@ -111,7 +111,7 @@ def test_checkout_update_resends_the_whole_line_items_array() -> None:
     demonstrate the working shape."""
     step = next(s for s in journeys.UCP_JOURNEY if s.tool == "update_checkout")
     ctx: JsonObject = {"checkout_id": "c", "product_id": "p", "line_item_ids": ["li-1"]}
-    payload = as_object(cast(object, json.loads(str(step.args(ctx)["payload"]))))
+    payload = as_object(step.args(ctx)["payload"])
 
     assert payload["line_items"], "update dropped line_items"
     assert "buyer" in payload
@@ -136,14 +136,75 @@ def test_checkout_update_resends_the_whole_line_items_array() -> None:
     assert method["selected_destination_id"] == destination["id"]
 
 
-def test_cart_update_repeats_the_id_inside_the_payload() -> None:
-    """The tool takes `id` as a required parameter and then rejects the request
-    for `$.id is required` — the same value, needed twice, in two places."""
+def test_cart_update_does_not_repeat_the_id_inside_the_payload() -> None:
+    """This test used to assert the opposite, and pinned a real quirk: the tool
+    took `id` as a required parameter and then rejected the request for `$.id is
+    required` anyway, so the journey sent it twice.
+
+    UCP 2026-08-25 fixed it and the description now forbids what the fix allowed
+    to stop being necessary — "the cart id travels as the id parameter and is not
+    repeated in the payload". Inverted rather than deleted, because the duplicate
+    is the shape someone reading the old journey would copy.
+    """
     step = next(s for s in journeys.UCP_JOURNEY if s.tool == "update_cart")
     args = step.args({"cart_id": "cart-1", "product_id": "p"})
 
     assert args["id"] == "cart-1"
-    assert as_object(cast(object, json.loads(str(args["payload"]))))["id"] == "cart-1"
+    assert "id" not in as_object(args["payload"])
+
+
+# ---------------------------------------------------------------------------
+# The journey's arguments against the committed schemas
+# ---------------------------------------------------------------------------
+# What nothing here checked before: the journey builds arguments by hand, and the
+# only thing that ever proved them right was a live Store run. So when UCP
+# 2026-08-25 changed `payload` from a JSON *string* to an object, every builder
+# kept passing json.dumps() and every unit test stayed green — the failure was a
+# rejected first cart mutation in CI, with the rest of both journeys skipping
+# behind it. This reads the types straight off the snapshot instead.
+SCHEMA_TYPES: dict[str, type | tuple[type, ...]] = {
+    "object": dict,
+    "string": str,
+    "boolean": bool,
+    "array": list,
+    "integer": int,
+    "number": (int, float),
+}
+
+# Enough context to build every step's arguments. line_item_ids is a list because
+# the fulfillment block indexes it; the rest only need to be present.
+FULL_CTX: JsonObject = {
+    **dict.fromkeys(("product_id", "cart_id", "checkout_id", "order_id", "promo_code", "context_token"), "x"),
+    "line_item_ids": ["li-1"],
+}
+
+
+def _store_schemas() -> dict[str, JsonObject]:
+    import json as _json
+    from pathlib import Path as _Path
+
+    snapshot = _Path(__file__).resolve().parents[1] / "tool-history" / "store.json"
+    if not snapshot.exists():
+        pytest.skip("tool-history/store.json not committed yet")
+    tools = as_list(as_object(cast(object, _json.loads(snapshot.read_text()))).get("tools"))
+    return {str(as_object(t).get("name")): as_object(as_object(t).get("inputSchema")) for t in tools}
+
+
+@pytest.mark.parametrize("step", journeys.UCP_JOURNEY, ids=[s.tool for s in journeys.UCP_JOURNEY])
+def test_every_journey_argument_matches_the_committed_schema(step: journeys.JourneyStep) -> None:
+    schemas = _store_schemas()
+    assert step.tool in schemas, f"{step.tool} is not in the Store catalogue"
+    properties = as_object(schemas[step.tool].get("properties"))
+
+    for name, value in step.args(FULL_CTX).items():
+        assert name in properties, f"{step.tool} sends {name!r}, which its schema does not declare"
+        declared = str(as_object(properties[name]).get("type", ""))
+        expected = SCHEMA_TYPES.get(declared)
+        if expected is None:
+            continue
+        assert isinstance(value, expected), (
+            f"{step.tool}.{name} is declared {declared} but the journey sends {type(value).__name__}"
+        )
 
 
 def test_mutating_steps_are_explicit_about_committing() -> None:
@@ -340,7 +401,7 @@ def test_a_customer_anchors_the_checkout_to_their_own_context_token(monkeypatch:
     journeys.run_ucp_journey(_reporter(), "sid", STORE, allow_mutations=True, persona=CUSTOMER)
 
     create = next(args for tool, args in seen if tool == "create_checkout")
-    assert as_object(cast(object, json.loads(str(create["payload"]))))["cart_id"] == CUSTOMER.context_token
+    assert as_object(create["payload"])["cart_id"] == CUSTOMER.context_token
 
 
 def test_a_guest_sends_no_cart_id_at_all(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,7 +412,7 @@ def test_a_guest_sends_no_cart_id_at_all(monkeypatch: pytest.MonkeyPatch) -> Non
     journeys.run_ucp_journey(_reporter(), "sid", STORE, allow_mutations=True)
 
     create = next(args for tool, args in seen if tool == "create_checkout")
-    assert "cart_id" not in as_object(cast(object, json.loads(str(create["payload"]))))
+    assert "cart_id" not in as_object(create["payload"])
 
 
 def test_both_personas_send_the_same_requests_apart_from_the_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -405,7 +466,7 @@ def test_a_second_order_runs_on_the_same_session_token(monkeypatch: pytest.Monke
     journeys.run_second_order(_reporter(), "sid", STORE, _ordered_context())
 
     create = next(args for tool, args in seen if tool == "create_checkout")
-    assert as_object(cast(object, json.loads(str(create["payload"]))))["cart_id"] == CUSTOMER.context_token
+    assert as_object(create["payload"])["cart_id"] == CUSTOMER.context_token
 
 
 def test_the_refusal_a_returning_buyer_actually_gets_is_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
