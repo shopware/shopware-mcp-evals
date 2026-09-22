@@ -214,3 +214,58 @@ def test_the_heading_can_be_set_for_the_job_summary(
     run(monkeypatch, a, b, "--heading", "Nightly drift vs trunk")
 
     assert "## Nightly drift vs trunk" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The collapse guard
+# ---------------------------------------------------------------------------
+def _snap(count: int) -> Snapshot:
+    """A snapshot of `count` tools and nothing else — collapse only counts tools."""
+    return snap(tools=[ToolDef(name=f"tool-{i}") for i in range(count)])
+
+
+def test_a_catalogue_that_lost_almost_everything_is_refused() -> None:
+    """The case this exists for: the lane authenticates but its principal can
+    reach nothing, so tools/list returns the 3 meta-tools and the bot would
+    otherwise commit that as the new baseline."""
+    reason = D.collapsed(_snap(30), _snap(3))
+
+    assert "30 tools to 3" in reason
+    assert "allowlist" in reason, "the message has to name the thing to go and check"
+
+
+def test_ordinary_removals_are_not_a_collapse() -> None:
+    """A deprecation is drift and must still reconcile normally."""
+    assert D.collapsed(_snap(30), _snap(29)) == ""
+    assert D.collapsed(_snap(30), _snap(21)) == "", "a third gone is still plausible upstream churn"
+
+
+def test_growth_and_an_empty_baseline_are_never_a_collapse() -> None:
+    assert D.collapsed(_snap(30), _snap(31)) == ""
+    assert D.collapsed(_snap(0), _snap(0)) == "", "no baseline to compare against, so nothing to refuse"
+
+
+def test_the_cli_refuses_with_exit_code_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 2 is what the workflow branches on: 0 no drift, 1 drift, 2 broken lane."""
+    old = write(tmp_path, "old.json", _snap(30))
+    new = write(tmp_path, "new.json", _snap(2))
+
+    rc = run(monkeypatch, old, new, "--refuse-collapse")
+
+    assert rc == 2
+    assert "Refused to reconcile" in capsys.readouterr().out
+
+
+def test_the_cli_reconciles_normally_without_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Opt-in: eval/summary.py and local use still want the report, not a refusal."""
+    old = write(tmp_path, "old.json", _snap(30))
+    new = write(tmp_path, "new.json", _snap(2))
+
+    rc = run(monkeypatch, old, new)
+
+    assert rc == 0
+    assert "Refused to reconcile" not in capsys.readouterr().out

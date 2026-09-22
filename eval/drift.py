@@ -30,6 +30,42 @@ def load(path: str) -> Snapshot:
     return cast(Snapshot, json.loads(Path(path).read_text()))
 
 
+# A snapshot that lost this share of the catalogue is not drift, it is a broken
+# lane. Two thirds, because the real failure mode is not subtle: when the admin
+# principal lost its MCP allowlist the catalogue went from 30 tools to the 3
+# discovery meta-tools, a 90% loss. A deprecation that retires a third of the
+# surface in one night would be remarkable and is worth a human look anyway.
+COLLAPSE_RATIO = 2 / 3
+
+
+def collapsed(old: Snapshot, new: Snapshot) -> str:
+    """Why this snapshot must not become the baseline, or '' if it may.
+
+    The reconciliation bot commits whatever the nightly measured. That is right
+    for drift and wrong for an outage: a lane that authenticated but could reach
+    nothing produces a valid, tiny, entirely wrong catalogue, and committing it
+    would make tests/test_fixtures.py and tests/test_ownership.py pass against
+    almost nothing — the suite would go quiet rather than red, which is the worst
+    available outcome.
+
+    Returns a reason rather than a bool so the caller can put it in an
+    annotation; a bare `True` here would be reported as "drift check failed".
+    """
+    before = len(old.get("tools", []))
+    after = len(new.get("tools", []))
+    if before == 0 or after >= before:
+        return ""
+    lost = (before - after) / before
+    if lost < COLLAPSE_RATIO:
+        return ""
+    return (
+        f"the catalogue went from {before} tools to {after} ({lost:.0%} gone). "
+        "That is a lane that could not reach the server, not upstream drift - "
+        "check the MCP allowlist of the principal the lane authenticates as, and "
+        "whether tools/list returned only the discovery meta-tools."
+    )
+
+
 def summarise(old: Snapshot, new: Snapshot) -> DriftSummary:
     """Structured diff of two snapshots. Pure, so the rendering can be tested."""
     o = {t["name"]: t for t in old.get("tools", [])}
@@ -138,14 +174,25 @@ def main() -> int:
         action="store_true",
         help="exit 1 when anything drifted, for use as a shell condition",
     )
+    parser.add_argument(
+        "--refuse-collapse",
+        action="store_true",
+        help="exit 2 when the new snapshot lost most of the catalogue (a broken lane, not drift)",
+    )
     args = parser.parse_args()
     old_path = cast(str, args.old)
     new_path = cast(str, args.new)
     heading = cast(str, args.heading)
     use_exit_code = cast(bool, args.exit_code)
+    refuse_collapse = cast(bool, args.refuse_collapse)
 
     try:
-        summary = summarise(load(old_path), load(new_path))
+        old, new = load(old_path), load(new_path)
+        if refuse_collapse and (reason := collapsed(old, new)):
+            print(f"::error::Refusing to reconcile: {reason}", file=sys.stderr)
+            print(f"**Refused to reconcile.** {reason}\n")
+            return 2
+        summary = summarise(old, new)
     except (OSError, json.JSONDecodeError) as exc:
         # A missing or unreadable baseline is itself drift, but it must not crash
         # the workflow step that called this.

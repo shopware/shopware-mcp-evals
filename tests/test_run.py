@@ -475,3 +475,107 @@ def test_run_admin_respects_skip_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     labels = " ".join(r["label"] for r in rep.records)
     assert "shopware-media-upload" not in labels
     assert "swag-dev-tools" not in labels
+
+
+# ---------------------------------------------------------------------------
+# Allowlist enforcement: the check that covers what moving to an admin user lost
+# ---------------------------------------------------------------------------
+# The suite authenticates as an administrator user now, which #20600 leaves
+# unrestricted. That is the whole point, and it is also why nothing else here
+# would notice if the server went back to fail-OPEN: an unrestricted principal
+# sees the same catalogue either way. These drive functional.runner's probe with
+# a fake blocked integration.
+BLOCKED_ENV = {"MCP_BLOCKED_ACCESS_KEY": "SWIAFAKE", "MCP_BLOCKED_SECRET_KEY": "secret"}
+
+
+def _wire_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+    advertised: list[str],
+    call_result: McpResponse,
+    init_raises: bool = False,
+) -> Reporter:
+    """Run verify_allowlist_is_enforced against a fake blocked integration."""
+    for key, value in BLOCKED_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    def endpoint_for(_access_key: str = "", _secret_key: str = "") -> Endpoint:
+        return ADMIN
+
+    monkeypatch.setattr(R, "admin_endpoint", endpoint_for)
+
+    def init(endpoint: Endpoint | None = None) -> tuple[str, str]:
+        assert endpoint is ADMIN
+        if init_raises:
+            raise RuntimeError("invalid credentials")
+        return "blocked-session", ""
+
+    monkeypatch.setattr(R, "mcp_init", init)
+
+    def tools_list(_session: str, endpoint: Endpoint | None = None) -> list[ToolDef]:
+        assert endpoint is ADMIN
+        return [ToolDef(name=n, inputSchema={"type": "object", "properties": {}}) for n in advertised]
+
+    def call(_session: str, _tool: str, _args: JsonObject, endpoint: Endpoint | None = None) -> McpResponse:
+        assert endpoint is ADMIN
+        return call_result
+
+    monkeypatch.setattr(R, "mcp_tools_list_all", tools_list)
+    monkeypatch.setattr(R, "mcp_call", call)
+
+    rep = Reporter("admin", color=False)
+    R.verify_allowlist_is_enforced(rep)
+    return rep
+
+
+REFUSED = call_resp({"success": False, "message": "Tool is not enabled in your MCP allowlist."})
+
+
+def test_allowlist_probe_passes_when_the_server_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = _wire_blocked(monkeypatch, sorted(R.META_TOOLS), REFUSED)
+
+    assert rep.failed == 0
+    assert rep.passed == 2, "both the advertised surface and the direct call have to be asserted"
+
+
+def test_allowlist_probe_fails_when_a_blocked_integration_sees_the_catalogue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The regression this exists for: #20600 reverted, or an allowlist that
+    stops being applied. Every other check in the suite would stay green."""
+    rep = _wire_blocked(monkeypatch, [*R.META_TOOLS, "shopware-entity-search"], REFUSED)
+
+    assert rep.failed == 1
+    assert any("shopware-entity-search" in str(r.get("error", "")) for r in rep.records)
+
+
+def test_allowlist_probe_fails_when_a_blocked_integration_can_run_a_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advertising nothing is not the same as refusing the call. A client that
+    already knows the tool name does not need it advertised, so the invocation
+    path is asserted separately."""
+    rep = _wire_blocked(monkeypatch, sorted(R.META_TOOLS), call_resp({"data": [{"id": "p-1"}]}))
+
+    assert rep.failed == 1
+
+
+def test_allowlist_probe_accepts_a_refusal_at_the_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Being refused a session is stricter than being refused per tool, so it
+    satisfies the same invariant rather than erroring the run."""
+    rep = _wire_blocked(monkeypatch, [], REFUSED, init_raises=True)
+
+    assert rep.failed == 0
+    assert rep.passed == 1
+
+
+def test_allowlist_probe_skips_when_the_lane_provided_no_blocked_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A developer running this against their own shop has no such credential and
+    must not be told their server is broken."""
+    monkeypatch.delenv("MCP_BLOCKED_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("MCP_BLOCKED_SECRET_KEY", raising=False)
+    rep = Reporter("admin", color=False)
+    R.verify_allowlist_is_enforced(rep)
+
+    assert (rep.failed, rep.passed, rep.skipped) == (0, 0, 1)
