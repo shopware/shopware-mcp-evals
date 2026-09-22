@@ -740,15 +740,23 @@ runs:
           -H 'Content-Type: application/json' \
           -d '{"filter":[{"type":"equals","field":"username","value":"admin"}],"limit":1}')
 
-        USER_ID=$(echo "$USER_JSON" | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print(d[0]["id"] if d else "")')
-        IS_ADMIN=$(echo "$USER_JSON" | python3 -c 'import sys,json;d=json.load(sys.stdin)["data"];print("1" if d and d[0].get("admin") else "0")')
+        # `.get("attributes", entry)` because the Admin API answers in JSON:API
+        # when it feels like it, and there the entity's fields live under
+        # `attributes` while `id` stays top-level. The sales-channel parsing
+        # further down this file has used the same idiom all along; reading
+        # `admin` off the top level instead made the flag read as false on every
+        # lane, so this guard would have aborted setup for all three jobs rather
+        # than guarding anything.
+        USER_ID=$(echo "$USER_JSON" | python3 -c "import sys,json; rows=json.load(sys.stdin).get('data') or []; print(rows[0].get('id','') if rows else '')")
+        IS_ADMIN=$(echo "$USER_JSON" | python3 -c "import sys,json; rows=json.load(sys.stdin).get('data') or []; row=rows[0] if rows else {}; print('1' if row.get('attributes',row).get('admin') else '0')")
 
         if [ -z "$USER_ID" ]; then
           echo "::error::No user named 'admin' on this instance, so the lane has no unrestricted MCP principal."
           exit 1
         fi
         if [ "$IS_ADMIN" != "1" ]; then
-          echo "::error::The 'admin' user is not flagged as an administrator. Under shopware/shopware#20600 it resolves to an empty MCP allowlist, and every fixture would fail as a wrong-tool pick."
+          echo "::error::The 'admin' user is not flagged as an administrator (or the API did not return the flag). Under shopware/shopware#20600 that resolves to an EMPTY MCP allowlist, and every fixture would fail as a wrong-tool pick rather than as an auth problem. Response follows."
+          echo "$USER_JSON" | head -c 600
           exit 1
         fi
 
