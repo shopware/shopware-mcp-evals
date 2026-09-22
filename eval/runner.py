@@ -963,7 +963,11 @@ PROVIDERS: dict[str, Provider] = {
     # functions, and its pricing.yaml row — without touching the loop.
     "anthropic": Provider(
         name="anthropic",
-        default_model="claude-sonnet-4-6",
+        # claude-sonnet-5 is the current Sonnet; this said claude-sonnet-4-6,
+        # which is a generation behind. Nothing exercises this arm today (see
+        # above — no ANTHROPIC_API_KEY is provisioned), so the pin's only job
+        # is to be accurate for whoever first runs `--provider anthropic`.
+        default_model="claude-sonnet-5",
         credential_env="ANTHROPIC_API_KEY",
         system_as_param=True,
         tools_attr="tools_for_anthropic",

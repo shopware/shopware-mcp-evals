@@ -712,13 +712,19 @@ def render_catalogue_lint(snapshot: Snapshot | None) -> str:
 
     toollint is pure — it reads a committed snapshot, needs no server and no
     model — so running it again in this job costs nothing and is what lets one
-    page carry the whole picture. It stays a gate-free advisory: the findings are
-    judgements about prose, and a build that goes red over word choice is one
-    people learn to bypass.
+    page carry the whole picture. The prose findings stay a gate-free advisory:
+    they are judgements about word choice, and a build that goes red over those
+    is one people learn to bypass.
+
+    The budgeted parameter counts DO gate, but in lint.yml rather than here —
+    this render is a report either way. The committed ceiling is passed anyway
+    so the number carries its bound on both pages; without it this section
+    would claim the counts are unratcheted, which is only true of the argument
+    it was called with.
     """
     if not snapshot:
         return ""
-    body = toollint.render(toollint.lint(snapshot))
+    body = toollint.render(toollint.lint(snapshot), toollint.load_budget(toollint.DEFAULT_BUDGET))
     # Its own H2 would compete with this page's; the section is nested here.
     body = body.replace("## Tool catalogue lint\n", "").strip()
     return details("Tool catalogue lint — static description findings", body)

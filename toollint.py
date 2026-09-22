@@ -17,6 +17,17 @@ facts, where they are informative instead of noise. This server documents its
 parameters in prose inside the tool description, which is a defensible choice —
 the lint's job is to say so once, not to relitigate it thirty times.
 
+Uniform is not the same as harmless, though, and the eval measured the
+difference: `shopware-entity-aggregate.aggregations` is a `{"type": "string"}`
+with no description, no examples and no pattern, and the contract it omits ("a
+JSON array of aggregation definitions") is the one the server rejects calls
+for. Three core fixtures on run 33598354019 picked that tool correctly and
+still failed, because the argument could not be formed from what the schema
+says. So the two counts are *budgeted* rather than gated: a committed ceiling
+they may fall below freely and may not rise above. That keeps one fact in the
+report instead of thirty findings, while stopping the thirty-first undescribed
+parameter from arriving unnoticed.
+
 Description similarity is deliberately NOT a standalone finding. Measured
 against the collisions the per-tool scorecard actually confirmed, it ranks 5 of
 6 inside the top 15% of pairs — better than chance, but the *top* of the list is
@@ -42,6 +53,7 @@ from typing import cast
 
 from eval.result_schema import (
     CatalogueFacts,
+    LintBudget,
     LintReport,
     SimilarPair,
     Snapshot,
@@ -171,7 +183,95 @@ def similar_pairs(tools: list[ToolDef], limit: int = 10) -> list[SimilarPair]:
     return sorted(scored, key=lambda s: -s["similarity"])[:limit]
 
 
-def render(report: LintReport) -> str:
+BUDGETED = ("params_undocumented", "string_params_unconstrained")
+
+# Next to the snapshot it bounds, and read by both this module's CLI and
+# eval/summary.py — which renders the same lint inside the eval job summary.
+# One constant so the two cannot end up reporting against different ceilings.
+DEFAULT_BUDGET = "tool-history/lint-budget.json"
+
+
+def load_budget(path: str | Path) -> LintBudget | None:
+    """The committed ceiling, or None when there isn't a usable one.
+
+    None rather than a raise: an absent budget means the counts are not
+    ratcheted, which is a thing to report loudly, not to crash over.
+    """
+    try:
+        return cast(LintBudget, json.loads(Path(path).read_text()))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def budget_from(facts: CatalogueFacts) -> LintBudget:
+    """The budget a snapshot would set if it were the new ceiling."""
+    return LintBudget(
+        params_undocumented=facts["params_undocumented"],
+        string_params_unconstrained=facts["string_params_unconstrained"],
+    )
+
+
+def tightened(facts: CatalogueFacts, budget: LintBudget) -> LintBudget:
+    """The budget re-stamped DOWNWARD only: `min(committed, measured)` per count.
+
+    This is what the nightly reconciliation uses, and the asymmetry is the whole
+    point. `--update-budget` re-stamps whatever it measures, which is right for a
+    human deliberately accepting a number and wrong for a bot: a count that ROSE
+    would be written back as the new ceiling, laundering a regression into the
+    baseline and leaving nothing to go red about. Tightening can only ever make
+    the gate stricter, so it is safe to run unattended.
+
+    A count that rose is therefore left alone, `budget_breaches` still fires on
+    it, and a human decides whether to document the parameter or accept the
+    higher ceiling.
+    """
+    return LintBudget(
+        params_undocumented=min(budget["params_undocumented"], facts["params_undocumented"]),
+        string_params_unconstrained=min(budget["string_params_unconstrained"], facts["string_params_unconstrained"]),
+    )
+
+
+def budget_slack(facts: CatalogueFacts, budget: LintBudget) -> list[str]:
+    """Counts whose ceiling sits ABOVE the catalogue, worst first, empty when tight.
+
+    Slack is not a breach — nothing is currently wrong — but it is permission for
+    the next regression, granted by accident. It happens whenever upstream
+    documents a parameter and the committed ceiling is not re-stamped, which is
+    exactly what the nightly reconciliation now does automatically.
+    """
+    return [
+        f"`{key}` has a ceiling of {budget[key]} but the catalogue is at {facts[key]}, "
+        f"so {budget[key] - facts[key]} undocumented parameter(s) could be added without "
+        f"the gate noticing. Re-stamp with `--tighten-budget`."
+        for key in BUDGETED
+        if budget[key] > facts[key]
+    ]
+
+
+def budget_breaches(facts: CatalogueFacts, budget: LintBudget) -> list[str]:
+    """Counts that rose above their ceiling, worst first, empty when clean.
+
+    Returns the rendered message rather than the key so the caller does not
+    have to re-derive the numbers to say what happened; there are two of these,
+    and a structured result nobody destructures is just a longer string.
+    """
+    # Biggest overage first, ties broken by BUDGETED order rather than by the
+    # key's spelling — both counts move together when an undescribed string
+    # parameter lands, and "+1 and +1" sorted alphabetically would lead with
+    # the narrower of the two for no reason a reader could infer.
+    breaches = sorted(
+        ((facts[key] - budget[key], rank, key) for rank, key in enumerate(BUDGETED) if facts[key] > budget[key]),
+        key=lambda b: (-b[0], b[1]),
+    )
+    return [
+        f"`{key}` rose to {facts[key]}, above the committed ceiling of {budget[key]} "
+        f"(+{over}). Document the new parameter, or lower the ceiling deliberately "
+        f"with `--update-budget` and say why in the commit."
+        for over, _rank, key in breaches
+    ]
+
+
+def render(report: LintReport, budget: LintBudget | None = None) -> str:
     facts = report["facts"]
     flagged = {n: t for n, t in report["tools"].items() if t["findings"]}
 
@@ -192,15 +292,32 @@ def render(report: LintReport) -> str:
     else:
         lines += ["No per-tool findings.", ""]
 
+    def ceiling(key: str) -> str:
+        return "" if budget is None else f" (ceiling {budget[key]})"
+
     lines += [
         "**Catalogue-wide.** Reported once because they are uniform, not per tool:",
         "",
         f"- {facts['params_undocumented']}/{facts['params']} parameters carry no schema-level "
-        "`description`; this server documents parameters in prose inside the tool description.",
+        f"`description`{ceiling('params_undocumented')}; this server documents parameters in prose "
+        "inside the tool description.",
         f"- {facts['string_params_unconstrained']}/{facts['string_params']} string parameters have no "
-        "`enum`, `format` or `pattern`.",
+        f"`enum`, `format` or `pattern`{ceiling('string_params_unconstrained')}.",
         "",
     ]
+
+    if budget is None:
+        lines += [
+            "> No committed budget, so neither count is ratcheted. Create one with "
+            "`python -m toollint --update-budget`.",
+            "",
+        ]
+    else:
+        breaches = budget_breaches(facts, budget)
+        for message in breaches:
+            lines += [f"❌ {message}", ""]
+        if not breaches:
+            lines += ["Both counts are at or below their committed ceiling.", ""]
 
     if report["similar_pairs"]:
         lines += [
@@ -219,20 +336,65 @@ def render(report: LintReport) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--snapshot", default="tool-history/latest.json", help="Catalogue snapshot to lint")
+    parser.add_argument(
+        "--budget",
+        default=DEFAULT_BUDGET,
+        help="Committed ceiling for the budgeted parameter counts (default tool-history/lint-budget.json)",
+    )
+    parser.add_argument(
+        "--update-budget",
+        action="store_true",
+        help="Re-stamp the budget from this snapshot instead of checking against it",
+    )
+    parser.add_argument(
+        "--tighten-budget",
+        action="store_true",
+        help="Re-stamp DOWNWARD only (min of committed and measured). Safe to run unattended.",
+    )
     args = parser.parse_args()
 
     snapshot_path = cast(str, args.snapshot)
+    budget_path = Path(cast(str, args.budget))
     try:
         snapshot = cast(Snapshot, json.loads(Path(snapshot_path).read_text()))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"::error::Could not read {snapshot_path}: {exc}", file=sys.stderr)
         return 1
 
-    markdown = render(lint(snapshot))
-    print(markdown)
-    # Advisory: this reports, it does not gate. The findings are style
-    # judgements about prose, and a build that goes red over word choice is one
-    # people learn to bypass.
+    report = lint(snapshot)
+
+    if cast(bool, args.update_budget) or cast(bool, args.tighten_budget):
+        measured = budget_from(report["facts"])
+        if cast(bool, args.tighten_budget):
+            committed = load_budget(budget_path)
+            # No committed budget yet: the measured one IS the tightest, so
+            # stamping it is tightening. Only an existing ceiling can constrain.
+            measured = tightened(report["facts"], committed) if committed else measured
+        budget_path.parent.mkdir(parents=True, exist_ok=True)
+        budget_path.write_text(json.dumps(measured, indent=2) + "\n")
+        print(f"Wrote {budget_path}: {json.dumps(measured)}")
+        return 0
+
+    # A missing budget warns rather than fails. It is the same call the drift
+    # step makes for a missing snapshot baseline, and for the same reason: a
+    # lint that goes red because a data file is absent — on a workflow that
+    # runs on every push — is one people learn to bypass. The warning is loud
+    # in the job summary, which is where an unratcheted count belongs.
+    budget = load_budget(budget_path)
+    if budget is None:
+        print(f"::warning::No usable lint budget at {budget_path}; counts are not ratcheted.", file=sys.stderr)
+
+    print(render(report, budget))
+
+    # The prose findings stay advisory: they are style judgements about word
+    # choice, and a build that goes red over those is one people learn to
+    # bypass. The two budgeted counts are not word choice — they are a
+    # parameter contract the eval has already caught the absence of — so they
+    # are the only thing here that gates.
+    if budget is not None and budget_breaches(report["facts"], budget):
+        for message in budget_breaches(report["facts"], budget):
+            print(f"::error::toollint: {message}", file=sys.stderr)
+        return 1
     return 0
 
 

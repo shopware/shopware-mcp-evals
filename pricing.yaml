@@ -38,6 +38,19 @@ models:
     cached_input: 0.075
 
   # PROVIDER_DEFAULTS["anthropic"].
+  #
+  # Checked 2026-09-02 against Anthropic's published per-model rates: $3.00 in,
+  # $15.00 out. The launch promotion ($2.00/$10.00) ran to 2026-08-31 and has
+  # expired, so the standard rate is the right one to carry. cached_input is
+  # the 0.1x cache-read rate.
+  claude-sonnet-5:
+    input: 3.00
+    output: 15.00
+    cached_input: 0.30
+
+  # The previous default, kept because `--model claude-sonnet-4-6` still
+  # resolves and an unpriced model renders "unpriced" rather than failing.
+  # Same rates as its successor.
   claude-sonnet-4-6:
     input: 3.00
     output: 15.00

@@ -783,6 +783,24 @@ class SimilarPair(TypedDict):
     similarity: float
 
 
+class LintBudget(TypedDict):
+    """The committed ceiling for the two catalogue-wide parameter counts.
+
+    A ceiling rather than an expected value, because the point is direction:
+    these may fall freely and may not rise. Stored as data next to the snapshot
+    so lowering it is a visible diff on a real number rather than an edit to a
+    constant nobody reviews.
+
+    Only the two counts that measure a documentation gap are budgeted. The
+    denominators (`params`, `string_params`) are deliberately absent: a tool
+    that adds a documented parameter raises them, and a ratchet that fired on
+    that would punish exactly the change it exists to encourage.
+    """
+
+    params_undocumented: int
+    string_params_unconstrained: int
+
+
 class LintReport(TypedDict):
     """What toollint produces for a whole snapshot."""
 
