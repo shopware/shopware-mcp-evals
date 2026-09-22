@@ -110,17 +110,25 @@ class Endpoint:
         path: str,
         auth_headers: dict[str, str],
         base_url: str | None = None,
-        toolsets: Sequence[str] | None = None,
+        toolsets: str | Sequence[str] | None = None,
     ):
         self.name: str = name
         self.path: str = path
         self.base_url: str = (base_url or SW_BASE_URL).rstrip("/")
-        self.toolsets: tuple[str, ...] = tuple(toolsets or ())
+        # A bare string is one name, not a sequence of one-character names.
+        # `str` satisfies `Sequence[str]`, so `toolsets=ALL_TOOLSETS` — the most
+        # natural way to ask for the whole catalogue — type-checks and then
+        # tuple()s into ('a', 'l', 'l'). The URL comes out as `?toolsets=a,l,l`,
+        # every name is unknown, unknown names are ignored by design, and the
+        # caller silently gets the bare default surface it was trying to widen.
+        self.toolsets: tuple[str, ...] = (toolsets,) if isinstance(toolsets, str) else tuple(toolsets or ())
         # quote() rather than manual interpolation: a toolset name is server
         # data, and one containing a `&` would otherwise forge a second
         # parameter. The server splits on a literal comma, so the separator
         # stays unencoded and only the names are quoted.
-        query = f"?{QUERY_PARAMETER}=" + ",".join(quote(name, safe="") for name in self.toolsets) if toolsets else ""
+        query = (
+            f"?{QUERY_PARAMETER}=" + ",".join(quote(name, safe="") for name in self.toolsets) if self.toolsets else ""
+        )
         self.url: str = f"{self.base_url}{path}{query}"
         self.auth_headers: dict[str, str] = {"Content-Type": "application/json", **auth_headers}
 
@@ -141,7 +149,7 @@ def admin_endpoint(
     access_key: str | None = None,
     secret_access_key: str | None = None,
     base_url: str | None = None,
-    toolsets: Sequence[str] | None = None,
+    toolsets: str | Sequence[str] | None = None,
 ) -> Endpoint:
     """Build an admin endpoint, defaulting to the process configuration."""
     return Endpoint(
@@ -161,7 +169,7 @@ def store_endpoint(
     context_token: str | None = None,
     base_url: str | None = None,
     profile_uri: str | None = None,
-    toolsets: Sequence[str] | None = None,
+    toolsets: str | Sequence[str] | None = None,
 ) -> Endpoint:
     """Build a Store API endpoint, defaulting to the process configuration.
 
