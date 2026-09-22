@@ -961,7 +961,17 @@ the drift in its workflow summary. To adopt the new descriptions, open a PR
    `eval/fixtures.yaml` updates in a single PR to `shopware/shopware-mcp-evals`.
    Once it lands, drift goes back to zero and PR/main runs hard-gate again.
 
-This is the **only** way the pinned SHA changes. Never auto-bump from CI.
+The nightly does steps 1–4 for you. When it finds drift it maintains a single
+rolling PR on `chore/reconcile-mcp-drift`, force-pushed each night onto the
+newest trunk commit, carrying the bumped `shopware.sha` and the refreshed
+snapshots. The six steps above are what you do when you want a specific ref
+rather than trunk HEAD, or when a fixture has to move with the description —
+step 5 is the part no bot can do.
+
+Merging that PR is still a human act, and it is the **only** way the pinned SHA
+changes: CI proposes, it never pushes to `main`. Leaving it open is not free,
+though — until it merges, PR and push runs keep testing whatever Shopware the
+pin names while the nightly tests trunk, and the two drift apart silently.
 
 ### Tool description history
 
