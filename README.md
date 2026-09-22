@@ -3,7 +3,8 @@
 [![MCP Evals](https://github.com/shopware/shopware-mcp-evals/actions/workflows/mcp-evals.yml/badge.svg)](https://github.com/shopware/shopware-mcp-evals/actions/workflows/mcp-evals.yml)
 
 Two-layer test suite for the Shopware MCP server. Runs against a live Shopware
-instance over HTTP using integration access keys.
+instance over HTTP using Shopware access keys (the suite uses an
+administrator user's key — see Auth in `AGENTS.md` for why that matters).
 
 ## Why this exists
 

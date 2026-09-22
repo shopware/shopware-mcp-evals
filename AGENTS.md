@@ -105,7 +105,8 @@ sequenceDiagram
   via `.github/actions/setup-lane`. It installs Shopware at the pinned
   `shopware.sha` and checks the plugin repos out at their **default branch**, so
   plugin churn can turn a run red without a change here — except
-  `agentic-commerce`, temporarily pinned to the #154 branch.
+  `agentic-commerce`, which also tracks its default branch (the #154 pin this
+  line used to describe was removed once the fix landed upstream).
   The lane cannot be shared between jobs: it is a live MySQL plus a daemonised
   server. Each job pays ~140s for its own, in parallel. What that buys is a
   failure you can locate — one job failing no longer skips the rest, which used
@@ -159,6 +160,14 @@ sequenceDiagram
   `shopware-tool-search`, `shopware-toolsets-list`, `shopware-toolset-enable`.
 - `shopware-toolset-enable` persists per `Mcp-Session-Id`. Discovery-mode eval
   therefore opens a **fresh session per fixture** so enablement can't leak.
+- **`?toolsets=` pins toolsets before the first `tools/list`** — `/api/_mcp?toolsets=order,media`,
+  or `?toolsets=all` (spelled out, not `*`). shopware/shopware#20509, and the only
+  mechanism that works for a client like claude.ai, which reads `tools/list` once
+  per connection and never again — `toolset-enable` always arrives too late for
+  it. Both endpoints honour it. Unknown names are ignored rather than fatal, and
+  it is **visibility only**: the allowlist and per-tool ACL still apply.
+  `Endpoint.with_toolsets()` builds a pinned clone that keeps the credentials,
+  which matters on store where rebuilding would mint a different cart token.
 - **A tool can fail while the transport succeeds.** UCP reports every failure as
   HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
   asserting on a tool call must go through `eval/assertions.py:inband_error`, or
@@ -383,8 +392,23 @@ turned an 89% run into a reported 53%.
 
 ## Auth
 
-The MCP server at `SW_BASE_URL/api/_mcp` uses integration access keys — NOT OAuth.
-Headers: `sw-access-key` + `sw-secret-access-key`.
+The MCP server at `SW_BASE_URL/api/_mcp` takes **access keys, NOT OAuth**:
+`sw-access-key` + `sw-secret-access-key`. `McpAuthenticationListener` accepts two
+origins on those headers, and which one you use decides what you can see:
+
+| key | principal | MCP allowlist |
+|---|---|---|
+| `SWUA…` | the user it belongs to | unrestricted **iff** that user is an administrator |
+| `SWIA…` | the integration | whatever `integration.mcp_allowlist` lists — and an unset one grants **nothing** |
+
+shopware/shopware#20600 made an unset allowlist grant nothing rather than
+everything, and an integration never bypasses it — not even one flagged `admin`,
+which only waives ACL. So **the lane authenticates as an administrator user**
+(`setup-lane` mints a `SWUA…` key for `admin`), and a second integration with no
+allowlist is minted purely so `verify_allowlist_is_enforced` can assert the
+server still refuses it. A suite whose own principal is unrestricted cannot
+otherwise tell that enforcement is working.
+
 The session must be initialized with `method: initialize` before any other call;
 the `Mcp-Session-Id` response header scopes toolset enablement.
 

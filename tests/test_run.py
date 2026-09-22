@@ -4,7 +4,7 @@ admin/store flows driven through a stateful fake MCP server."""
 import argparse
 import json
 from types import SimpleNamespace
-from typing import cast
+from typing import cast, override
 
 import pytest
 import requests
@@ -261,13 +261,20 @@ class FakeServer:
         self.names: set[str] = {t["name"] for t in toolsets}
         self.n: int = 0
         self.enabled: dict[str, set[str]] = {}
+        self.pinned: dict[str, tuple[str, ...]] = {}
         self.cart_items: list[JsonObject] = []
 
     def init(self, endpoint: Endpoint | None = None) -> tuple[str, str]:
-        assert endpoint is None or endpoint in (ADMIN, STORE)
+        # Identity, not `in (ADMIN, STORE)`: `?toolsets=` clones the endpoint, so
+        # a pinned connect arrives as a different object against the same path.
+        assert endpoint is None or endpoint.path in (ADMIN.path, STORE.path)
         self.n += 1
         sid = f"s{self.n}"
         self.enabled[sid] = set()
+        # What the client pinned on the URL. Recorded per session because that is
+        # how the server sees it: fixed for the life of the connection, and read
+        # on every tools/list rather than only the first.
+        self.pinned[sid] = tuple(endpoint.toolsets) if endpoint else ()
         return sid, ""
 
     def list_toolsets(self, session: str, endpoint: Endpoint | None = None) -> list[Toolset]:
@@ -280,10 +287,13 @@ class FakeServer:
         return call_resp({"success": True, "_meta": {"listChanged": True}})
 
     def tools_list(self, session: str, endpoint: Endpoint | None = None) -> list[ToolDef]:
-        assert endpoint is None or endpoint in (ADMIN, STORE)
+        assert endpoint is None or endpoint.path in (ADMIN.path, STORE.path)
         names = set(R.META_TOOLS) | self.default_extra
+        pinned = self.pinned.get(session, ())
+        everything = R.ALL_TOOLSETS in pinned
         for ts in self.toolsets:
-            if ts["name"] in self.enabled.get(session, set()):
+            visible = ts["name"] in self.enabled.get(session, set()) or everything or ts["name"] in pinned
+            if visible:
                 names.update(ts["tools"])
         return [ToolDef(name=n, inputSchema={"type": "object", "properties": {}}) for n in sorted(names)]
 
@@ -577,5 +587,82 @@ def test_allowlist_probe_skips_when_the_lane_provided_no_blocked_credential(
     monkeypatch.delenv("MCP_BLOCKED_SECRET_KEY", raising=False)
     rep = Reporter("admin", color=False)
     R.verify_allowlist_is_enforced(rep)
+
+    assert (rep.failed, rep.passed, rep.skipped) == (0, 0, 1)
+
+
+# ---------------------------------------------------------------------------
+# Connect-time toolset selection (?toolsets=)
+# ---------------------------------------------------------------------------
+# The mechanism exists because a client like claude.ai reads tools/list once per
+# connection, so shopware-toolset-enable always arrives too late for it. What the
+# check has to prove is therefore not "enabling works" but "the catalogue is
+# already right on the FIRST enumeration" — which is why the fake resolves pinned
+# toolsets per session and none of these call toolset-enable.
+CONNECT_TOOLSETS: list[Toolset] = [
+    {"name": "order", "title": "Order", "description": "o", "enabled": False, "tools": ["o-1", "o-2"]},
+    {"name": "media", "title": "Media", "description": "m", "enabled": False, "tools": ["m-1"]},
+    {"name": "theme", "title": "Theme", "description": "t", "enabled": False, "tools": ["t-1"]},
+]
+
+
+def _connect_report(monkeypatch: pytest.MonkeyPatch, fake: FakeServer) -> Reporter:
+    _wire(monkeypatch, fake)
+    rep = Reporter("admin", color=False)
+    R.verify_connect_time_toolsets(rep, ADMIN)
+    return rep
+
+
+def test_connect_time_toolsets_pass_against_a_server_that_honours_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = _connect_report(monkeypatch, FakeServer(CONNECT_TOOLSETS))
+
+    assert rep.failed == 0, [r for r in rep.records if r["status"] == "fail"]
+    # one toolset, the union, all, the unknown name, and the plain connect
+    assert rep.passed == 5
+
+
+def test_a_server_that_ignores_the_parameter_fails_the_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The regression worth catching. Before #20509 the parameter was simply not
+    read, and the symptom is silent: a client pins its toolsets, gets the bare
+    default surface, and concludes the tools do not exist."""
+
+    class Deaf(FakeServer):
+        @override
+        def init(self, endpoint: Endpoint | None = None) -> tuple[str, str]:
+            sid, instructions = super().init(endpoint)
+            self.pinned[sid] = ()  # parameter accepted and discarded
+            return sid, instructions
+
+    rep = _connect_report(monkeypatch, Deaf(CONNECT_TOOLSETS))
+
+    # Everything except the plain connect, which is correct either way.
+    assert rep.failed == 4
+    assert rep.passed == 1
+
+
+def test_an_unknown_toolset_must_not_cost_the_client_the_known_ones(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A shop without a plugin is the ordinary case for this: a client pinning
+    `order,merchant-catalog` against a shop lacking the merchant plugin has to
+    keep `order`, not lose the connection's whole catalogue."""
+
+    class Strict(FakeServer):
+        @override
+        def init(self, endpoint: Endpoint | None = None) -> tuple[str, str]:
+            sid, instructions = super().init(endpoint)
+            known = {ts["name"] for ts in self.toolsets} | {R.ALL_TOOLSETS}
+            if any(name not in known for name in self.pinned[sid]):
+                self.pinned[sid] = ()  # one bad name discards the lot
+            return sid, instructions
+
+    rep = _connect_report(monkeypatch, Strict(CONNECT_TOOLSETS))
+
+    failures = [r["label"] for r in rep.records if r["status"] == "fail"]
+    assert failures == ["?toolsets with an unknown name"], failures
+
+
+def test_the_check_skips_where_nothing_is_deferred(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An endpoint that advertises everything by default has no toolset to pin,
+    so there is nothing to assert — and saying so beats a vacuous pass."""
+    rep = _connect_report(monkeypatch, FakeServer([]))
 
     assert (rep.failed, rep.passed, rep.skipped) == (0, 0, 1)

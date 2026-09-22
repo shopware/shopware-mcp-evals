@@ -24,9 +24,10 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.parse import quote
 
 import requests
 
@@ -41,6 +42,13 @@ THROTTLE_MAX_RETRIES = 5
 THROTTLE_MAX_WAIT_S = 20.0
 
 BASE = Path(__file__).resolve().parent
+
+# Connect-time toolset selection (shopware/shopware#20509). The query parameter
+# name and the "all" keyword mirror McpRequestedToolsetResolver::QUERY_PARAMETER
+# and McpToolsetRegistry::ALL_TOOLSETS; upstream spells the wildcard out rather
+# than using "*" so it survives clients that escape wildcards.
+QUERY_PARAMETER = "toolsets"
+ALL_TOOLSETS = "all"
 
 # Meta-tools of the v2 discovery layer. Always advertised on both endpoints.
 META_TOOLS = {
@@ -83,16 +91,57 @@ class Endpoint:
     SW_BASE_URL so an endpoint can be built for a server this process was not
     configured for — a test against a local fake, or two instances in one run.
     It defaults to the configured value, which is what every real caller wants.
+
+    `toolsets` pins toolsets at CONNECT time (shopware/shopware#20509):
+    `/api/_mcp?toolsets=order,media`, or `ALL_TOOLSETS` for the whole catalogue.
+    It belongs on the URL rather than on a call because that is the only place
+    it can work — a client reads `tools/list` once per connection and never
+    again, so `shopware-toolset-enable` always arrives too late for it. Both
+    endpoints honour it: `McpRequestedToolsetResolver` is injected into the
+    admin and the store_api list-request handlers alike.
+
+    Visibility only. The per-principal allowlist and per-tool ACL still apply,
+    so a pinned toolset cannot widen what a caller may reach.
     """
 
-    def __init__(self, name: str, path: str, auth_headers: dict[str, str], base_url: str | None = None):
+    def __init__(
+        self,
+        name: str,
+        path: str,
+        auth_headers: dict[str, str],
+        base_url: str | None = None,
+        toolsets: Sequence[str] | None = None,
+    ):
         self.name: str = name
-        self.url: str = f"{(base_url or SW_BASE_URL).rstrip('/')}{path}"
+        self.path: str = path
+        self.base_url: str = (base_url or SW_BASE_URL).rstrip("/")
+        self.toolsets: tuple[str, ...] = tuple(toolsets or ())
+        # quote() rather than manual interpolation: a toolset name is server
+        # data, and one containing a `&` would otherwise forge a second
+        # parameter. The server splits on a literal comma, so the separator
+        # stays unencoded and only the names are quoted.
+        query = f"?{QUERY_PARAMETER}=" + ",".join(quote(name, safe="") for name in self.toolsets) if toolsets else ""
+        self.url: str = f"{self.base_url}{path}{query}"
         self.auth_headers: dict[str, str] = {"Content-Type": "application/json", **auth_headers}
+
+    def with_toolsets(self, *names: str) -> "Endpoint":
+        """The same endpoint and credentials, with these toolsets pinned on the URL.
+
+        Carries the headers over verbatim rather than rebuilding them, which
+        matters on the Store endpoint: `store_endpoint()` mints a fresh
+        `sw-context-token` per call, so rebuilding would hand back an endpoint
+        pointing at a different cart.
+        """
+        clone = Endpoint(self.name, self.path, {}, self.base_url, names)
+        clone.auth_headers = dict(self.auth_headers)
+        return clone
 
 
 def admin_endpoint(
-    access_key: str | None = None, secret_access_key: str | None = None, base_url: str | None = None
+    access_key: str | None = None,
+    secret_access_key: str | None = None,
+    base_url: str | None = None,
+    toolsets: Sequence[str] | None = None,
 ) -> Endpoint:
     """Build an admin endpoint, defaulting to the process configuration."""
     return Endpoint(
@@ -103,6 +152,7 @@ def admin_endpoint(
             "sw-secret-access-key": secret_access_key if secret_access_key is not None else SW_SECRET_ACCESS_KEY,
         },
         base_url,
+        toolsets,
     )
 
 
@@ -111,6 +161,7 @@ def store_endpoint(
     context_token: str | None = None,
     base_url: str | None = None,
     profile_uri: str | None = None,
+    toolsets: Sequence[str] | None = None,
 ) -> Endpoint:
     """Build a Store API endpoint, defaulting to the process configuration.
 
@@ -130,6 +181,7 @@ def store_endpoint(
             "UCP-Agent": ucp.agent_header(base_url or SW_BASE_URL, profile_uri),
         },
         base_url,
+        toolsets,
     )
 
 
