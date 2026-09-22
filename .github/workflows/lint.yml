@@ -61,16 +61,29 @@ jobs:
 
       # Static description checks over the committed catalogue snapshot. No
       # server, no model, no tokens — so unlike the eval workflow this runs on
-      # every push. Advisory by construction: toollint exits 0 whatever it
-      # finds, because the findings are judgements about prose and a build that
-      # goes red over word choice is one people learn to bypass.
+      # every push.
+      #
+      # The prose findings are advisory: toollint exits 0 whatever it finds
+      # about word choice, because a build that goes red over that is one
+      # people learn to bypass. Two counts are not word choice and do gate —
+      # `params_undocumented` and `string_params_unconstrained`, against the
+      # ceiling in tool-history/lint-budget.json. They may fall freely and may
+      # not rise. The eval measured why: `entity-aggregate.aggregations` is an
+      # undescribed `{"type": "string"}` whose omitted contract is the one the
+      # server rejects calls for, and three core fixtures on run 33598354019
+      # selected that tool correctly and still failed because the argument
+      # could not be formed from what the schema says.
+      #
+      # Lowering the ceiling is `python -m toollint --update-budget`, which is
+      # a deliberate commit with a real number in the diff rather than an edit
+      # to a constant nobody reviews.
       #
       # To the log, NOT to this job's summary. eval/summary.py runs the same lint
       # and renders it inside the one consolidated summary, so having it here too
       # meant the same table twice on a labelled PR — and on the run page it sat
       # under "Lint & unit tests", nowhere near the eval numbers it explains.
       # toollint is pure, so running it in both places costs nothing.
-      - name: Tool catalogue lint (advisory)
+      - name: Tool catalogue lint (prose advisory, parameter counts ratcheted)
         run: python -m toollint --snapshot tool-history/latest.json
 
       - name: ShellCheck (shell lint)

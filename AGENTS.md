@@ -99,7 +99,8 @@ sequenceDiagram
   (ruff, ruff format, basedpyright, pytest+cov, then ShellCheck **twice** — once
   over `functional/**/*.sh` + `scripts/**/*.sh`, once over the shell inside
   workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
-  runs there, advisory). `mcp-evals.yml` runs
+  runs there — its prose findings advisory, its two parameter counts ratcheted
+  against `tool-history/lint-budget.json`). `mcp-evals.yml` runs
   `static` → (`admin-eval`, `store-eval`) → `report`, each building its own lane
   via `.github/actions/setup-lane`. It installs Shopware at the pinned
   `shopware.sha` and checks the plugin repos out at their **default branch**, so
@@ -406,7 +407,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `eval/scoring.py` | Results → counts, rates and the gate verdict. Pure, and what the gate is decided by |
 | `toolclass.py` | **Read before touching execution.** May a tool be called, and how to make it safe (read-only / dry-runnable / unsafe / unclassified) |
 | `ucp.py` | Everything specific to the optional `agentic-commerce` plugin — its tool classification and the `UCP-Agent` header. Isolated so the plugin can be dropped by deleting this file; `toolclass.py` merges it in. `shopware-store-api-context` is core and deliberately stays out of it |
-| `toollint.py` | Layer 0 static description checks; advisory, runs in lint.yml |
+| `toollint.py` | Layer 0 static description checks; runs in lint.yml. Prose findings advisory; `params_undocumented` and `string_params_unconstrained` ratcheted against `tool-history/lint-budget.json` |
 | `eval/assertions.py` | `expect_result` tiers, and the line between a call the server rejected and one that returned nothing |
 | `eval/tool_scorecard.py` | Per-tool recall, **precision**, F1, confusion pairs. The half a pass rate cannot show |
 | `eval/cost.py` / `eval/cost_drift.py` | What a run costs, and whether that moved |
@@ -417,6 +418,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |
+| `tool-history/lint-budget.json` | Committed ceiling for toollint's two parameter counts; may fall, may not rise |
 | `.env` | Local credentials (not committed) |
 | `results/` | JSON reports from each run (not committed) |
 

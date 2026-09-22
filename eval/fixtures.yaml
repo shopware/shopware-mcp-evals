@@ -188,8 +188,24 @@ fixtures:
     category: unambiguous
     prompt: "Load order {order_id} including its lineItems association."
     expected_tool: shopware-entity-read
+    acceptable_tools: [merchant-order-summary]
     expected_toolset: entity
-    notes: Read-by-ID with an association — checks the description covers associations, not just plain reads.
+    notes: >
+      Read-by-ID with an association — checks the description covers
+      associations, not just plain reads.
+
+      merchant-order-summary counts too, because the prompt is genuinely
+      multi-valid: an order named by UUID wanting its lineItems is the literal
+      advertised contract of that tool ("Provide either orderNumber or orderId
+      (UUID)", returns "customer, lineItems, transactions, deliveries"). It
+      graded as wrong_tool for gpt-4o-mini on run 33598354019 while the primary
+      passed, and the weaker model was not the thing that was wrong: for a real
+      caller the merchant tool is the better answer here. Kept as an
+      entity-read fixture because the generic reader IS the expected path when
+      the merchant plugin is absent — the association-loading behaviour under
+      test is core's — but a run that reaches the same data through the
+      installed specialist has not found a description defect, and grading it
+      as one attributes a fixture's ontology problem to the catalogue.
 
   - id: system_config_read
     category: unambiguous

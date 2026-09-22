@@ -152,16 +152,130 @@ def test_render_says_so_when_nothing_is_flagged() -> None:
     assert "No per-tool findings." in T.render(T.lint(catalogue(tool("clean"))))
 
 
-def test_main_is_advisory_and_never_fails_the_build(
+def budgeted(tmp_path: Path, undocumented: int, unconstrained: int) -> Path:
+    path = tmp_path / "budget.json"
+    path.write_text(json.dumps({"params_undocumented": undocumented, "string_params_unconstrained": unconstrained}))
+    return path
+
+
+# The budgeted counts — a ceiling that may fall, never rise.
+
+
+def test_a_count_at_its_ceiling_is_not_a_breach() -> None:
+    """The boundary is the whole contract: equal is allowed, one more is not."""
+    schema: JsonObject = {"properties": {"a": {"type": "string"}}}
+    facts = T.lint(catalogue(tool("t", schema=schema)))["facts"]
+
+    assert T.budget_breaches(facts, T.budget_from(facts)) == []
+    assert T.budget_breaches(facts, {"params_undocumented": 0, "string_params_unconstrained": 1})
+
+
+def test_counts_falling_below_the_ceiling_are_never_a_breach() -> None:
+    """Improving the catalogue must not need the budget lowered in the same commit."""
+    documented: JsonObject = {"properties": {"a": {"type": "string", "enum": ["x"], "description": "what a is"}}}
+    facts = T.lint(catalogue(tool("t", schema=documented)))["facts"]
+
+    assert T.budget_breaches(facts, {"params_undocumented": 99, "string_params_unconstrained": 74}) == []
+
+
+def test_a_breach_names_the_count_the_numbers_and_the_way_out() -> None:
+    schema: JsonObject = {"properties": {"criteria": {"type": "string"}}}
+    facts = T.lint(catalogue(tool("t", schema=schema)))["facts"]
+
+    (worst, *_) = T.budget_breaches(facts, {"params_undocumented": 0, "string_params_unconstrained": 0})
+
+    assert "params_undocumented" in worst
+    assert "rose to 1" in worst and "ceiling of 0" in worst
+    assert "--update-budget" in worst
+
+
+def test_the_denominators_are_not_budgeted() -> None:
+    """A tool that adds a *documented* parameter raises `params` and must pass.
+
+    Budgeting the denominator would fire on exactly the change the ratchet
+    exists to encourage, which is why LintBudget carries only the two gaps.
+    """
+    documented: JsonObject = {"properties": {"a": {"type": "string", "pattern": "^x", "description": "what a is"}}}
+    facts = T.lint(catalogue(tool("t", schema=documented)))["facts"]
+
+    assert facts["params"] == 1
+    assert set(T.budget_from(facts)) == set(T.BUDGETED)
+    assert T.budget_breaches(facts, {"params_undocumented": 0, "string_params_unconstrained": 0}) == []
+
+
+def test_main_still_ignores_prose_findings_but_fails_on_a_breach(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A build that goes red over prose style is one people learn to bypass."""
-    snap = tmp_path / "snap.json"
-    snap.write_text(json.dumps({"tools": [tool("a", "Too terse.")]}))
-    monkeypatch.setattr("sys.argv", ["toollint", "--snapshot", str(snap)])
+    """The split this module gates on.
 
+    A build that goes red over prose style is one people learn to bypass, so
+    `short_description` still exits 0. An undescribed parameter is not prose —
+    it is the contract three core fixtures failed to form a call from — so it
+    exits 1.
+    """
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"tools": [tool("a", "Too terse.", {"properties": {"criteria": {"type": "string"}}})]}))
+
+    monkeypatch.setattr("sys.argv", ["toollint", "--snapshot", str(snap), "--budget", str(budgeted(tmp_path, 1, 1))])
     assert T.main() == 0
     assert "short_description" in capsys.readouterr().out
+
+    monkeypatch.setattr("sys.argv", ["toollint", "--snapshot", str(snap), "--budget", str(budgeted(tmp_path, 0, 0))])
+    assert T.main() == 1
+    assert "::error::toollint:" in capsys.readouterr().err
+
+
+def test_a_missing_budget_warns_rather_than_failing_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Same call the drift step makes for a missing snapshot baseline.
+
+    A lint that goes red because a data file is absent, on a workflow that runs
+    on every push, is one people learn to bypass — so the unratcheted state is
+    loud in the summary instead.
+    """
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"tools": [tool("a", schema={"properties": {"criteria": {"type": "string"}}})]}))
+    monkeypatch.setattr("sys.argv", ["toollint", "--snapshot", str(snap), "--budget", str(tmp_path / "absent.json")])
+
+    assert T.main() == 0
+    captured = capsys.readouterr()
+    assert "::warning::No usable lint budget" in captured.err
+    assert "neither count is ratcheted" in captured.out
+
+
+def test_update_budget_restamps_from_the_snapshot_and_checks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"tools": [tool("a", schema={"properties": {"criteria": {"type": "string"}}})]}))
+    budget = tmp_path / "nested" / "budget.json"
+    monkeypatch.setattr("sys.argv", ["toollint", "--snapshot", str(snap), "--budget", str(budget), "--update-budget"])
+
+    assert T.main() == 0
+    assert json.loads(budget.read_text()) == {"params_undocumented": 1, "string_params_unconstrained": 1}
+
+
+def test_render_shows_the_ceiling_next_to_the_number_it_bounds() -> None:
+    schema: JsonObject = {"properties": {"criteria": {"type": "string"}}}
+    report = T.lint(catalogue(tool("t", schema=schema)))
+
+    assert "(ceiling 5)" in T.render(report, {"params_undocumented": 5, "string_params_unconstrained": 5})
+    assert "ceiling" not in T.render(report)
+
+
+def test_the_committed_budget_matches_the_committed_catalogue() -> None:
+    """The ratchet is only meaningful if its baseline is the real catalogue.
+
+    A budget stamped from a stale snapshot would sit above the live numbers and
+    silently permit the next regression, which is the failure this whole check
+    exists to prevent.
+    """
+    root = Path(__file__).resolve().parents[1]
+    snapshot = cast(Snapshot, cast(object, json.loads((root / "tool-history" / "latest.json").read_text())))
+    budget = cast(JsonObject, json.loads((root / "tool-history" / "lint-budget.json").read_text()))
+
+    assert budget == cast(JsonObject, cast(object, T.budget_from(T.lint(snapshot)["facts"])))
 
 
 def test_main_reports_an_unreadable_snapshot_as_an_error(
