@@ -607,3 +607,55 @@ def test_load_env_is_a_no_op_without_an_env_file(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(C, "BASE", tmp_path)
 
     C.load_env()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Connect-time toolset selection (?toolsets=)
+# ---------------------------------------------------------------------------
+def test_a_bare_toolset_name_is_one_name_not_a_sequence_of_letters() -> None:
+    """`str` satisfies `Sequence[str]`, which makes the most natural call wrong.
+
+    `admin_endpoint(toolsets=ALL_TOOLSETS)` type-checks, and without normalizing
+    it tuple()s into ('a', 'l', 'l') and asks for `?toolsets=a,l,l`. Every name
+    is then unknown, unknown names are ignored by design, and the caller silently
+    receives the bare default surface it was trying to widen — no error anywhere.
+    """
+    assert C.admin_endpoint(base_url="http://x", toolsets=C.ALL_TOOLSETS).url.endswith("?toolsets=all")
+    assert C.admin_endpoint(base_url="http://x", toolsets="order").toolsets == ("order",)
+    assert C.store_endpoint(base_url="http://x", toolsets=C.ALL_TOOLSETS).url.endswith("?toolsets=all")
+
+
+@pytest.mark.parametrize(
+    "given,expected",
+    [
+        (None, ()),
+        ([], ()),
+        ("order", ("order",)),
+        (["order"], ("order",)),
+        (("order", "media"), ("order", "media")),
+    ],
+)
+def test_toolsets_normalize_to_a_tuple_of_names(given: object, expected: tuple[str, ...]) -> None:
+    endpoint = C.admin_endpoint(base_url="http://x", toolsets=cast(str | list[str] | None, given))
+
+    assert endpoint.toolsets == expected
+    assert ("?" in endpoint.url) is bool(expected), "a query string appears only when names were asked for"
+
+
+def test_a_toolset_name_cannot_forge_a_second_query_parameter() -> None:
+    """Toolset names are server data. One containing `&` must not become its own
+    parameter; the comma separator stays literal because the server splits on it."""
+    url = C.admin_endpoint(base_url="http://x", toolsets=["a&b=c", "ok"]).url
+
+    assert url.endswith("?toolsets=a%26b%3Dc,ok")
+
+
+def test_with_toolsets_keeps_the_credentials_and_the_store_context_token() -> None:
+    """Rebuilding through store_endpoint() would mint a fresh sw-context-token,
+    handing back an endpoint pointing at a different cart."""
+    original = C.store_endpoint(base_url="http://x")
+    pinned = original.with_toolsets(C.ALL_TOOLSETS)
+
+    assert pinned.auth_headers == original.auth_headers
+    assert pinned.url.endswith("?toolsets=all")
+    assert pinned.path == original.path and pinned.name == original.name

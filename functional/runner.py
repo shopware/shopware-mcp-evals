@@ -49,6 +49,7 @@ from functional.customer import CustomerUnavailable, provision
 from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
 from functional.reporting import Reporter
 from mcp_client import (
+    ALL_TOOLSETS,
     BASE,
     META_TOOLS,
     SW_ACCESS_KEY,
@@ -226,6 +227,102 @@ def verify_default_surface(
 
 def load_toolsets(session: str, endpoint: Endpoint) -> list[Toolset]:
     return mcp_toolsets_list(session, endpoint=endpoint)
+
+
+def verify_connect_time_toolsets(
+    rep: Reporter, endpoint: Endpoint, also_expected: frozenset[str] = NO_EXTRA_DEFAULT_TOOLS
+) -> None:
+    """`?toolsets=` pins toolsets before the first tools/list (shopware#20509).
+
+    This is the only mechanism that can work for a client like claude.ai, which
+    reads tools/list once per connection and never again — `toolset-enable`
+    always arrives too late for it. So what is under test is not "does enabling
+    work" but "is the catalogue already correct on the FIRST enumeration", and
+    every case below therefore opens a fresh session and never calls
+    toolset-enable at all.
+
+    Toolset names are read off the live server rather than hardcoded: the
+    taxonomy is regrouped upstream from time to time, and a hardcoded name would
+    turn that into a failure here rather than a finding.
+    """
+    rep.section("v2: Connect-time toolset selection (?toolsets=)")
+
+    probe, _ = mcp_init(endpoint=endpoint)
+    toolsets = load_toolsets(probe, endpoint)
+    named = {ts["name"]: set(ts.get("tools", [])) for ts in toolsets if ts.get("tools")}
+    if not named:
+        rep.skip("connect-time toolsets (this endpoint defers nothing)")
+        return
+
+    # Everything a fresh session already sees, so each case asserts only what the
+    # parameter ADDED. On store that is the meta-tools plus the UCP tools.
+    floor = set(META_TOOLS) | set(also_expected)
+
+    def advertised_with(*names: str) -> set[str] | None:
+        pinned = endpoint.with_toolsets(*names)
+        try:
+            session, _ = mcp_init(endpoint=pinned)
+        except (RuntimeError, requests.exceptions.RequestException) as exc:
+            rep.check_fail(f"?toolsets={','.join(names)}", f"could not open a session: {exc}")
+            return None
+        got = _advertised(rep, session, pinned, f"?toolsets={','.join(names)} tools/list")
+        return set(got) if got is not None else None
+
+    # One toolset: exactly its tools, and nothing from any sibling.
+    first = sorted(named)[0]
+    if (got := advertised_with(first)) is not None:
+        expected = floor | named[first]
+        if got == expected:
+            rep.check_pass(f"?toolsets={first} advertises exactly that toolset ({len(named[first])} tools)")
+        else:
+            rep.check_fail(
+                f"?toolsets={first}",
+                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
+            )
+
+    # Several: the union, which is the case a real client actually sends.
+    several = sorted(named)[:4]
+    if len(several) > 1 and (got := advertised_with(*several)) is not None:
+        expected = floor | {tool for n in several for tool in named[n]}
+        if got == expected:
+            rep.check_pass(f"?toolsets={','.join(several)} advertises the union ({len(expected)} tools)")
+        else:
+            rep.check_fail(
+                f"?toolsets={','.join(several)}",
+                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
+            )
+
+    # `all`, spelled out upstream rather than "*" so it survives clients that
+    # escape wildcards.
+    if (got := advertised_with(ALL_TOOLSETS)) is not None:
+        expected = floor | {tool for tools in named.values() for tool in tools}
+        if got == expected:
+            rep.check_pass(f"?toolsets={ALL_TOOLSETS} advertises the whole catalogue ({len(expected)} tools)")
+        else:
+            rep.check_fail(
+                f"?toolsets={ALL_TOOLSETS}",
+                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
+            )
+
+    # An unknown name must be ignored, not fatal. A client that pins a toolset
+    # the shop does not have — a plugin it lacks — has to keep the rest.
+    if (got := advertised_with("no-such-toolset", first)) is not None:
+        expected = floor | named[first]
+        if got == expected:
+            rep.check_pass(f"?toolsets=no-such-toolset,{first} ignores the unknown name")
+        else:
+            rep.check_fail(
+                "?toolsets with an unknown name",
+                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
+            )
+
+    # And a plain connect is unchanged, asserted last so a regression in the
+    # parameter cannot be mistaken for one in the default surface.
+    if (got := advertised_with()) is not None:
+        if got == floor:
+            rep.check_pass("a plain connect is unaffected by the feature")
+        else:
+            rep.check_fail("plain connect", f"default surface moved: {sorted(got ^ floor)}")
 
 
 def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None:
@@ -834,6 +931,7 @@ def verify_allowlist_is_enforced(rep: Reporter) -> None:
 def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, session: str) -> None:
     verify_allowlist_is_enforced(rep)
     verify_default_surface(rep, session, endpoint)
+    verify_connect_time_toolsets(rep, endpoint)
     entity_toolset, toolsets = verify_admin_toolsets(rep, session, endpoint)
     verify_admin_discovery(rep, endpoint, entity_toolset, toolsets)
     schema_session, _ = mcp_init(endpoint=endpoint)
@@ -855,6 +953,7 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     # agentic-commerce 1.3.0, so they are expected here rather than counted as a
     # leak. ucp.py owns the list.
     verify_default_surface(rep, session, endpoint, also_expected=ucp.all_classified())
+    verify_connect_time_toolsets(rep, endpoint, also_expected=ucp.all_classified())
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")
