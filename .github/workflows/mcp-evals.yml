@@ -1267,12 +1267,17 @@ jobs:
           path: baseline
           key: eval-cost-baseline-${{ github.run_id }}
 
-      - name: Open a reconciliation PR (nightly only)
-        if: ${{ github.event_name == 'schedule' && (needs.static.outputs.drift == 'true' || needs.static.outputs.snapshot_changed == 'true') }}
+      # Deliberately NOT gated on drift. The drift check moved into the script,
+      # because the cleanup path needs to run in the one case a drift gate
+      # excludes — see the comment on it below.
+      - name: Reconciliation PR (nightly only)
+        if: ${{ github.event_name == 'schedule' }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SW_SHA: ${{ needs.static.outputs.shopware_sha }}
+          DRIFT: ${{ needs.static.outputs.drift }}
+          SNAPSHOT_CHANGED: ${{ needs.static.outputs.snapshot_changed }}
         run: |
           set -euo pipefail
           # ONE rolling branch, not one per upstream sha. The per-sha name was
@@ -1302,6 +1307,30 @@ jobs:
             gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty'
           }
 
+          # Closed by number, for the same reason open_pr filters on state: a
+          # branch name resolves to any PR that ever used it.
+          close_stale_pr() {
+            local pr
+            pr="$(open_pr)"
+            if [ -n "$pr" ]; then
+              gh pr close "$pr" --delete-branch \
+                --comment "Superseded — trunk no longer drifts from the committed baseline."
+              echo "Closed #${pr}: nothing left to reconcile."
+            fi
+          }
+
+          # The drift check lives here rather than in the step's `if:`, and this
+          # is the case that forces it. "Upstream went back to the committed
+          # catalogue" sets both outputs false — so a drift-gated step is skipped
+          # in precisely the situation the cleanup exists for, and a PR opened on
+          # an earlier night stays open indefinitely asserting movement that is
+          # gone. Gating the step would have made this block unreachable.
+          if [ "$DRIFT" != "true" ] && [ "$SNAPSHOT_CHANGED" != "true" ]; then
+            close_stale_pr
+            echo "No drift and no snapshot change — nothing to reconcile."
+            exit 0
+          fi
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
@@ -1315,14 +1344,11 @@ jobs:
           if [ -f tool-history/store.json ]; then git add tool-history/store.json; fi
 
           if git diff --cached --quiet; then
+            # Reachable when a snapshot changed in a way that leaves the staged
+            # files identical to main — the drift signal fired, the commit would
+            # be empty. Same cleanup as the no-drift path above.
             echo "Nothing to reconcile after all — no commit, no PR."
-            # With a rolling branch this case has to clean up after itself: a PR
-            # left open from an earlier night would go on claiming drift that no
-            # longer exists, and the next reader would reconcile nothing.
-            if [ -n "$(open_pr)" ]; then
-              gh pr close "$BRANCH" --delete-branch \
-                --comment "Superseded — trunk no longer drifts from the committed baseline."
-            fi
+            close_stale_pr
             exit 0
           fi
 
@@ -1344,6 +1370,12 @@ jobs:
             echo ""
             echo "**Check before merging:** a tool added here needs fixtures, and a tool removed"
             echo "means its fixtures will start skipping. Descriptions changing is the ordinary case."
+            echo ""
+            echo "**What the report above covers:** \`tool-history/latest.json\` — the ADMIN"
+            echo "catalogue — and nothing else. A Store/UCP change appears only in this PR's"
+            echo "\`tool-history/store.json\` diff, never in the summary. That is how #47 merged"
+            echo "under the headline \"No catalogue drift\" while renaming every UCP tool and"
+            echo "turning main red. Read the file list, not just this section."
             echo ""
             echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } >> /tmp/body.md
