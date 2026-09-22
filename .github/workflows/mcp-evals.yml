@@ -1358,36 +1358,51 @@ jobs:
             exit 0
           fi
 
+          # Both catalogues get the same treatment, reported into one body and
+          # guarded by the same collapse check.
+          #
+          # Reporting both is what #47 needed: eval/drift.py had only ever been
+          # pointed at latest.json, so the summary described the admin endpoint,
+          # said "No catalogue drift", and the reviewer had no reason to read the
+          # file list — while the diff renamed every UCP tool and turned main red.
+          #
+          # --refuse-collapse on both for the same reason. This bot commits
+          # whatever the nightly measured, which is right for drift and wrong for
+          # an outage: a lane that authenticated but could reach nothing produces
+          # a valid, tiny, entirely wrong catalogue, and committing it would leave
+          # tests/test_fixtures.py and tests/test_ownership.py passing against
+          # almost nothing — the suite goes quiet instead of red. Exit 2 means
+          # "not drift, a broken lane".
+          #
+          # Guarding only latest.json would have protected the one snapshot #47
+          # did not involve. The Store endpoint collapses independently: it has
+          # its own principal, its own plugin, and its own ways of losing a
+          # catalogue while still answering.
+          REFUSED=0
+          report_drift() {  # baseline, new, heading
+            local rc
+            set +e
+            python -m eval.drift --old "$1" --new "$2" --heading "$3" --refuse-collapse >> /tmp/body.md
+            rc=$?
+            set -e
+            if [ "$rc" = "2" ]; then REFUSED=1; fi
+          }
+
+          : > /tmp/body.md
+
           git show "origin/${GITHUB_REF_NAME}:tool-history/latest.json" > /tmp/baseline.json 2>/dev/null || true
+          report_drift /tmp/baseline.json tool-history/latest.json "What moved upstream"
 
-          # --refuse-collapse, because this bot commits whatever the nightly
-          # measured and that is only right for drift. A lane that authenticated
-          # but could reach nothing produces a valid, tiny, entirely wrong
-          # catalogue; committing it would leave tests/test_fixtures.py and
-          # tests/test_ownership.py passing against almost nothing, so the suite
-          # would go quiet instead of red. Exit 2 means "not drift, a broken
-          # lane" — no commit, no PR, and an error annotation naming the cause.
-          set +e
-          python -m eval.drift --old /tmp/baseline.json --new tool-history/latest.json \
-            --heading "What moved upstream" --refuse-collapse > /tmp/body.md
-          DRIFT_RC=$?
-          set -e
-          if [ "$DRIFT_RC" = "2" ]; then
-            cat /tmp/body.md
-            echo "No commit and no PR: that snapshot is a broken lane, not upstream drift."
-            exit 0
-          fi
-
-          # The Store catalogue, in the same body. Leaving it out is what let #47
-          # merge under the headline "No catalogue drift" while renaming every UCP
-          # tool: eval/drift.py had only ever been pointed at latest.json, so the
-          # summary described the admin endpoint and the reviewer had no reason to
-          # read the file list. Both snapshots are committed by this PR; both
-          # belong in the report that justifies it.
           git show "origin/${GITHUB_REF_NAME}:tool-history/store.json" > /tmp/baseline-store.json 2>/dev/null || true
           if [ -f tool-history/store.json ] && [ -s /tmp/baseline-store.json ]; then
-            python -m eval.drift --old /tmp/baseline-store.json --new tool-history/store.json \
-              --heading "What moved on the Store endpoint (/store-api/_mcp)" >> /tmp/body.md
+            report_drift /tmp/baseline-store.json tool-history/store.json \
+              "What moved on the Store endpoint (/store-api/_mcp)"
+          fi
+
+          if [ "$REFUSED" = "1" ]; then
+            cat /tmp/body.md
+            echo "No commit and no PR: at least one snapshot is a broken lane, not upstream drift."
+            exit 0
           fi
 
           {

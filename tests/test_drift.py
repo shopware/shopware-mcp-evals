@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 from eval import drift as D
-from eval.result_schema import JsonObject, Snapshot, ToolDef, Toolset
+from eval.result_schema import JsonObject, Snapshot, ToolDef, Toolset, as_list, as_object
 
 
 def snap(
@@ -269,3 +270,33 @@ def test_the_cli_reconciles_normally_without_the_flag(
 
     assert rc == 0
     assert "Refused to reconcile" not in capsys.readouterr().out
+
+
+def test_the_nightly_guards_both_catalogues_not_just_the_admin_one() -> None:
+    """The guard is only worth having where it is actually invoked.
+
+    It was added for the #47 incident — a Store catalogue that renamed every
+    tool under a "No catalogue drift" headline — and then wired onto the ADMIN
+    comparison alone, protecting the one snapshot that incident did not involve.
+    The two endpoints collapse independently: different principal, different
+    plugin, different ways of losing a catalogue while still answering.
+
+    Read out of the parsed workflow rather than the file text, because a YAML
+    block scalar is not the string it looks like in an editor.
+    """
+    raw = (Path(__file__).resolve().parents[1] / ".github/workflows/mcp-evals.yml").read_text()
+    workflow = as_object(cast(object, yaml.safe_load(raw)))
+    report = as_object(as_object(workflow.get("jobs")).get("report"))
+    steps = [as_object(s) for s in as_list(report.get("steps"))]
+    step = next(s for s in steps if "reconcil" in str(s.get("name", "")).lower() and "run" in s)
+    body = str(step["run"])
+
+    snapshots = [line for line in body.split("\n") if "report_drift " in line and "()" not in line]
+    assert len(snapshots) == 2, f"expected both catalogues to be reported, got: {snapshots}"
+    assert any("latest.json" in line for line in snapshots), "the admin catalogue is not reported"
+    assert any("store.json" in line for line in snapshots), "the Store catalogue is not reported"
+
+    invocations = [line for line in body.split("\n") if "eval.drift" in line]
+    assert invocations, "no drift invocation found in the reconciliation step"
+    unguarded = [line.strip() for line in invocations if "--refuse-collapse" not in line]
+    assert not unguarded, f"drift invocations without --refuse-collapse: {unguarded}"
