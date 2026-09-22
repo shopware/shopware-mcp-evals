@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 from eval import drift as D
-from eval.result_schema import JsonObject, Snapshot, ToolDef, Toolset
+from eval.result_schema import JsonObject, Snapshot, ToolDef, Toolset, as_list, as_object
 
 
 def snap(
@@ -214,3 +215,88 @@ def test_the_heading_can_be_set_for_the_job_summary(
     run(monkeypatch, a, b, "--heading", "Nightly drift vs trunk")
 
     assert "## Nightly drift vs trunk" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The collapse guard
+# ---------------------------------------------------------------------------
+def _snap(count: int) -> Snapshot:
+    """A snapshot of `count` tools and nothing else — collapse only counts tools."""
+    return snap(tools=[ToolDef(name=f"tool-{i}") for i in range(count)])
+
+
+def test_a_catalogue_that_lost_almost_everything_is_refused() -> None:
+    """The case this exists for: the lane authenticates but its principal can
+    reach nothing, so tools/list returns the 3 meta-tools and the bot would
+    otherwise commit that as the new baseline."""
+    reason = D.collapsed(_snap(30), _snap(3))
+
+    assert "30 tools to 3" in reason
+    assert "allowlist" in reason, "the message has to name the thing to go and check"
+
+
+def test_ordinary_removals_are_not_a_collapse() -> None:
+    """A deprecation is drift and must still reconcile normally."""
+    assert D.collapsed(_snap(30), _snap(29)) == ""
+    assert D.collapsed(_snap(30), _snap(21)) == "", "a third gone is still plausible upstream churn"
+
+
+def test_growth_and_an_empty_baseline_are_never_a_collapse() -> None:
+    assert D.collapsed(_snap(30), _snap(31)) == ""
+    assert D.collapsed(_snap(0), _snap(0)) == "", "no baseline to compare against, so nothing to refuse"
+
+
+def test_the_cli_refuses_with_exit_code_two(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exit 2 is what the workflow branches on: 0 no drift, 1 drift, 2 broken lane."""
+    old = write(tmp_path, "old.json", _snap(30))
+    new = write(tmp_path, "new.json", _snap(2))
+
+    rc = run(monkeypatch, old, new, "--refuse-collapse")
+
+    assert rc == 2
+    assert "Refused to reconcile" in capsys.readouterr().out
+
+
+def test_the_cli_reconciles_normally_without_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Opt-in: eval/summary.py and local use still want the report, not a refusal."""
+    old = write(tmp_path, "old.json", _snap(30))
+    new = write(tmp_path, "new.json", _snap(2))
+
+    rc = run(monkeypatch, old, new)
+
+    assert rc == 0
+    assert "Refused to reconcile" not in capsys.readouterr().out
+
+
+def test_the_nightly_guards_both_catalogues_not_just_the_admin_one() -> None:
+    """The guard is only worth having where it is actually invoked.
+
+    It was added for the #47 incident — a Store catalogue that renamed every
+    tool under a "No catalogue drift" headline — and then wired onto the ADMIN
+    comparison alone, protecting the one snapshot that incident did not involve.
+    The two endpoints collapse independently: different principal, different
+    plugin, different ways of losing a catalogue while still answering.
+
+    Read out of the parsed workflow rather than the file text, because a YAML
+    block scalar is not the string it looks like in an editor.
+    """
+    raw = (Path(__file__).resolve().parents[1] / ".github/workflows/mcp-evals.yml").read_text()
+    workflow = as_object(cast(object, yaml.safe_load(raw)))
+    report = as_object(as_object(workflow.get("jobs")).get("report"))
+    steps = [as_object(s) for s in as_list(report.get("steps"))]
+    step = next(s for s in steps if "reconcil" in str(s.get("name", "")).lower() and "run" in s)
+    body = str(step["run"])
+
+    snapshots = [line for line in body.split("\n") if "report_drift " in line and "()" not in line]
+    assert len(snapshots) == 2, f"expected both catalogues to be reported, got: {snapshots}"
+    assert any("latest.json" in line for line in snapshots), "the admin catalogue is not reported"
+    assert any("store.json" in line for line in snapshots), "the Store catalogue is not reported"
+
+    invocations = [line for line in body.split("\n") if "eval.drift" in line]
+    assert invocations, "no drift invocation found in the reconciliation step"
+    unguarded = [line.strip() for line in invocations if "--refuse-collapse" not in line]
+    assert not unguarded, f"drift invocations without --refuse-collapse: {unguarded}"

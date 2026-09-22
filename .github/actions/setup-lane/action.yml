@@ -52,11 +52,17 @@ outputs:
   # These crossed step boundaries via $GITHUB_ENV and step outputs when this was
   # one job. Neither survives a job boundary, so they are declared here instead.
   sw_access_key:
-    description: Integration access key for the admin endpoint.
+    description: Admin-USER access key (SWUA…) for the admin endpoint. Not an integration — see the step that mints it.
     value: ${{ steps.integration.outputs.access_key }}
   sw_secret_key:
-    description: Integration secret for the admin endpoint.
+    description: Secret for the admin-user access key.
     value: ${{ steps.integration.outputs.secret_key }}
+  blocked_access_key:
+    description: An integration with no mcp_allowlist, which the server must refuse. Drives the fail-closed check.
+    value: ${{ steps.blocked_integration.outputs.access_key }}
+  blocked_secret_key:
+    description: Secret for the no-allowlist integration.
+    value: ${{ steps.blocked_integration.outputs.secret_key }}
   sc_access_key:
     description: Sales-channel access key for the Store endpoint.
     value: ${{ steps.sc.outputs.sc_access_key }}
@@ -690,9 +696,91 @@ runs:
           echo "::warning::the media-upload probe is not being served; shopware-media-upload will SKIP"
         fi
 
-    - name: Create integration
+    # The suite authenticates as the ADMINISTRATOR USER, not as an integration.
+    #
+    # shopware/shopware#20600 made an unset `mcp_allowlist` grant nothing, and an
+    # integration never bypasses that — not even one flagged `admin`, which only
+    # waives ACL (McpAllowlistProvider::forAccessKey says so in as many words).
+    # An integration with no allowlist now sees the three discovery meta-tools
+    # and has every tools/call rejected, which would have read here as the whole
+    # catalogue disappearing overnight.
+    #
+    # A verified administrator *user* is the one principal that still resolves to
+    # McpAllowlist::unrestricted(). The cheap way to become one is a USER access
+    # key (SWUA…) rather than a bearer token: McpAuthenticationListener accepts
+    # both `integration` and `user` origins on the same sw-access-key /
+    # sw-secret-access-key headers, so mcp_client.py does not change at all —
+    # only the four characters the key starts with.
+    #
+    # The alternative, an explicit allowlist on the integration, was rejected for
+    # now: McpAllowlist has no wildcard, so it would mean writing every tool name
+    # into the lane and keeping that list in step with the catalogue forever.
+    - name: Create the admin-user access key
       shell: bash
       id: integration
+      env:
+        APP_URL: ${{ inputs.app_url }}
+      run: |
+        set -euo pipefail
+
+        ACCESS_KEY="SWUA$(openssl rand -hex 12 | tr 'a-f' 'A-F')"
+        SECRET_KEY="$(openssl rand -hex 32)"
+
+        TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \
+          -H 'Content-Type: application/json' \
+          -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
+          | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+        # Both the id and the `admin` flag, because the flag is the entire reason
+        # this principal works. A non-administrator user with no allowlist is as
+        # blocked as the integration was, and it would fail as "every fixture
+        # picked the wrong tool" rather than as an auth problem.
+        USER_JSON=$(curl -fsS -X POST "${APP_URL}/api/search/user" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H 'Content-Type: application/json' \
+          -d '{"filter":[{"type":"equals","field":"username","value":"admin"}],"limit":1}')
+
+        # `.get("attributes", entry)` because the Admin API answers in JSON:API
+        # when it feels like it, and there the entity's fields live under
+        # `attributes` while `id` stays top-level. The sales-channel parsing
+        # further down this file has used the same idiom all along; reading
+        # `admin` off the top level instead made the flag read as false on every
+        # lane, so this guard would have aborted setup for all three jobs rather
+        # than guarding anything.
+        USER_ID=$(echo "$USER_JSON" | python3 -c "import sys,json; rows=json.load(sys.stdin).get('data') or []; print(rows[0].get('id','') if rows else '')")
+        IS_ADMIN=$(echo "$USER_JSON" | python3 -c "import sys,json; rows=json.load(sys.stdin).get('data') or []; row=rows[0] if rows else {}; print('1' if row.get('attributes',row).get('admin') else '0')")
+
+        if [ -z "$USER_ID" ]; then
+          echo "::error::No user named 'admin' on this instance, so the lane has no unrestricted MCP principal."
+          exit 1
+        fi
+        if [ "$IS_ADMIN" != "1" ]; then
+          echo "::error::The 'admin' user is not flagged as an administrator (or the API did not return the flag). Under shopware/shopware#20600 that resolves to an EMPTY MCP allowlist, and every fixture would fail as a wrong-tool pick rather than as an auth problem. Response follows."
+          echo "$USER_JSON" | head -c 600
+          exit 1
+        fi
+
+        curl -fsS -X POST "${APP_URL}/api/user-access-key" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H 'Content-Type: application/json' \
+          -d "{\"userId\":\"${USER_ID}\",\"accessKey\":\"${ACCESS_KEY}\",\"secretAccessKey\":\"${SECRET_KEY}\"}" \
+          > /dev/null
+
+        echo "::add-mask::${SECRET_KEY}"
+        {
+          echo "access_key=${ACCESS_KEY}"
+          echo "secret_key=${SECRET_KEY}"
+        } >> "$GITHUB_OUTPUT"
+
+    # Kept even though the suite no longer authenticates with it: it is the
+    # subject of the fail-closed check in functional/runner.py. #20600 is the
+    # kind of change that arrives without warning, and the only way to know the
+    # allowlist is still being enforced is to hold a principal it should block
+    # and confirm that it does. Without this the lane would simply have stopped
+    # covering the integration path, silently.
+    - name: Create a no-allowlist integration (the fail-closed probe)
+      shell: bash
+      id: blocked_integration
       env:
         APP_URL: ${{ inputs.app_url }}
       run: |
@@ -706,10 +794,13 @@ runs:
           -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
           | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
 
+        # admin+writeAccess deliberately: the point is that an integration with
+        # the widest ACL Shopware offers is STILL blocked when its allowlist is
+        # unset. A locked-down integration would prove nothing about #20600.
         curl -fsS -X POST "${APP_URL}/api/integration" \
           -H "Authorization: Bearer ${TOKEN}" \
           -H 'Content-Type: application/json' \
-          -d "{\"label\":\"mcp-evals\",\"accessKey\":\"${ACCESS_KEY}\",\"secretAccessKey\":\"${SECRET_KEY}\",\"admin\":true,\"writeAccess\":true}" \
+          -d "{\"label\":\"mcp-evals-blocked\",\"accessKey\":\"${ACCESS_KEY}\",\"secretAccessKey\":\"${SECRET_KEY}\",\"admin\":true,\"writeAccess\":true}" \
           > /dev/null
 
         echo "::add-mask::${SECRET_KEY}"

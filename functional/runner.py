@@ -56,6 +56,7 @@ from mcp_client import (
     SW_SC_ACCESS_KEY,
     SW_SECRET_ACCESS_KEY,
     Endpoint,
+    admin_endpoint,
     enable_all_toolsets,
     enable_toolset,
     endpoint_by_name,
@@ -775,7 +776,63 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     run_checks(rep, session, endpoint, DEV_CHECKS, ctx)
 
 
+def verify_allowlist_is_enforced(rep: Reporter) -> None:
+    """An integration with no `mcp_allowlist` must reach nothing.
+
+    shopware/shopware#20600 made an unset allowlist grant nothing rather than
+    everything, and the suite's own principal moved to an administrator user to
+    stay unrestricted. That leaves the enforcement itself uncovered: if it
+    regressed to the old fail-OPEN behaviour, every check here would still pass
+    and nobody would learn that credentials predating MCP had quietly regained
+    the full capability surface.
+
+    So the lane mints a second integration — `admin: true`, `writeAccess: true`,
+    the widest ACL Shopware offers — with no allowlist, and this asserts the
+    server refuses it. Skipped rather than failed when the lane did not provide
+    one, because a developer running this against their own shop has no such
+    credential and should not be told their server is broken.
+    """
+    rep.section("Allowlist enforcement (fail-closed)")
+    access_key = os.environ.get("MCP_BLOCKED_ACCESS_KEY", "")
+    secret_key = os.environ.get("MCP_BLOCKED_SECRET_KEY", "")
+    if not access_key or not secret_key:
+        rep.skip("allowlist fail-closed (no MCP_BLOCKED_ACCESS_KEY on this lane)")
+        return
+
+    blocked = admin_endpoint(access_key, secret_key)
+    try:
+        session, _ = mcp_init(endpoint=blocked)
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        # Being refused at the handshake is a stricter outcome than being refused
+        # per tool, so it satisfies the same invariant.
+        rep.check_pass(f"a no-allowlist integration cannot open a session ({str(exc)[:60]})")
+        return
+
+    advertised = _advertised(rep, session, blocked, "blocked-integration tools/list")
+    if advertised is None:
+        return
+    extras = set(advertised) - META_TOOLS
+    if not extras:
+        rep.check_pass("a no-allowlist integration is advertised only the discovery meta-tools")
+    else:
+        rep.check_fail(
+            "allowlist enforcement",
+            "an integration with no allowlist can see: " + " ".join(sorted(extras)),
+        )
+
+    # Advertising nothing is not the same as refusing the call. The allowlist is
+    # checked on invocation too, and a client that already knows the name does
+    # not need it advertised.
+    resp = mcp_call(session, "shopware-entity-search", {"entity": "product", "limit": 1}, endpoint=blocked)
+    text = (resp.get("error") or {}).get("message", "") + mcp_result_text(resp)
+    if "allowlist" in text.lower() or (resp.get("result") or {}).get("isError"):
+        rep.check_pass("a no-allowlist integration is refused when it calls a tool by name")
+    else:
+        rep.check_fail("allowlist enforcement", f"entity-search ran for a blocked integration: {text[:120]}")
+
+
 def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, session: str) -> None:
+    verify_allowlist_is_enforced(rep)
     verify_default_surface(rep, session, endpoint)
     entity_toolset, toolsets = verify_admin_toolsets(rep, session, endpoint)
     verify_admin_discovery(rep, endpoint, entity_toolset, toolsets)
