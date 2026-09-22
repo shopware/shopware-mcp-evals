@@ -1342,7 +1342,20 @@ jobs:
           git checkout -B "$BRANCH"
 
           echo "$SW_SHA" > shopware.sha
-          git add shopware.sha tool-history/latest.json
+
+          # Re-stamp the lint ceiling from the snapshot this PR carries, DOWNWARD
+          # only. Without it the PR is unmergeable the moment upstream improves:
+          # documenting a parameter lowers the count, the committed ceiling stays
+          # where it was, and tests/test_toollint.py fails on the slack — on a PR
+          # whose entire content is the improvement.
+          #
+          # --tighten-budget rather than --update-budget, because this runs
+          # unattended: a count that ROSE must not be written back as the new
+          # ceiling, which would launder a regression into the baseline and leave
+          # nothing to go red about. Tightening can only make the gate stricter.
+          python -m toollint --snapshot tool-history/latest.json --tighten-budget
+
+          git add shopware.sha tool-history/latest.json tool-history/lint-budget.json
           # The Store snapshot rides along. Without this it would only ever be a
           # per-run artifact, and everything waiting on it — correct
           # expected_toolset values, dryRun read from schemas instead of guessed,

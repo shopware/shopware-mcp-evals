@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+import yaml
 
 import toollint as T
-from eval.result_schema import JsonObject, Snapshot, ToolDef, as_object
+from eval.result_schema import JsonObject, Snapshot, ToolDef, as_list, as_object
 
 # Long enough to clear MIN_DESCRIPTION_CHARS and carrying a trigger phrase, so
 # a tool built from the default is genuinely clean and a test that expects no
@@ -264,18 +265,28 @@ def test_render_shows_the_ceiling_next_to_the_number_it_bounds() -> None:
     assert "ceiling" not in T.render(report)
 
 
-def test_the_committed_budget_matches_the_committed_catalogue() -> None:
-    """The ratchet is only meaningful if its baseline is the real catalogue.
+def test_the_committed_budget_has_no_slack_against_the_committed_catalogue() -> None:
+    """The ratchet is only meaningful if its ceiling sits ON the real catalogue.
 
-    A budget stamped from a stale snapshot would sit above the live numbers and
-    silently permit the next regression, which is the failure this whole check
-    exists to prevent.
+    A ceiling ABOVE the live numbers is the failure this whole check exists to
+    prevent: nothing is wrong yet, but that many undocumented parameters could be
+    added without the gate noticing.
+
+    Asserted as "no slack" rather than as equality, because equality also fails
+    in the opposite direction — a count that ROSE — and that direction already
+    has an owner in `budget_breaches`, with a message that says which count and
+    by how much. Equality here made the nightly reconciliation PR unmergeable:
+    it stages the snapshot but the ceiling is re-stamped separately, so any
+    upstream improvement (shopware/shopware#20013 documenting parameters, say)
+    lowered the counts, left the ceiling behind, and failed pytest on a PR whose
+    whole content was the improvement.
     """
     root = Path(__file__).resolve().parents[1]
     snapshot = cast(Snapshot, cast(object, json.loads((root / "tool-history" / "latest.json").read_text())))
-    budget = cast(JsonObject, json.loads((root / "tool-history" / "lint-budget.json").read_text()))
+    budget = T.load_budget(root / "tool-history" / "lint-budget.json")
 
-    assert budget == cast(JsonObject, cast(object, T.budget_from(T.lint(snapshot)["facts"])))
+    assert budget is not None, "tool-history/lint-budget.json is missing or unreadable"
+    assert not T.budget_slack(T.lint(snapshot)["facts"], budget)
 
 
 def test_main_reports_an_unreadable_snapshot_as_an_error(
@@ -299,3 +310,88 @@ def test_the_committed_catalogue_lints_cleanly_enough_to_be_useful() -> None:
     flagged = [n for n, t in report["tools"].items() if t["findings"]]
 
     assert 0 < len(flagged) < len(report["tools"])
+
+
+# ---------------------------------------------------------------------------
+# Tightening: what the nightly reconciliation is allowed to do unattended
+# ---------------------------------------------------------------------------
+def _facts(undocumented: int, unconstrained: int) -> T.CatalogueFacts:
+    """Real facts with the two budgeted counts overridden, so the tests state the
+    numbers they are about instead of hand-building a schema to produce them."""
+    base = T.lint(catalogue(tool("a")))["facts"]
+    return {**base, "params_undocumented": undocumented, "string_params_unconstrained": unconstrained}
+
+
+def test_tightening_lowers_a_ceiling_the_catalogue_has_moved_below() -> None:
+    """The case that made the reconciliation PR unmergeable: upstream documents
+    parameters, the counts fall, and the ceiling has to follow them down."""
+    budget = T.LintBudget(params_undocumented=102, string_params_unconstrained=74)
+
+    assert T.tightened(_facts(60, 74), budget) == {
+        "params_undocumented": 60,
+        "string_params_unconstrained": 74,
+    }
+
+
+def test_tightening_never_raises_a_ceiling() -> None:
+    """The reason this is not just `--update-budget`. Re-stamping a count that
+    ROSE would write the regression back as the new baseline, and there would be
+    nothing left to go red about — on a bot commit nobody reads closely."""
+    budget = T.LintBudget(params_undocumented=102, string_params_unconstrained=74)
+
+    assert T.tightened(_facts(150, 200), budget) == {
+        "params_undocumented": 102,
+        "string_params_unconstrained": 74,
+    }
+    assert T.budget_breaches(_facts(150, 200), budget), "and the breach must still be reported"
+
+
+def test_tightening_each_count_independently() -> None:
+    """One improving while the other regresses is the ordinary mixed case."""
+    budget = T.LintBudget(params_undocumented=102, string_params_unconstrained=74)
+
+    assert T.tightened(_facts(60, 200), budget) == {
+        "params_undocumented": 60,
+        "string_params_unconstrained": 74,
+    }
+
+
+def test_slack_is_reported_per_count_and_says_what_it_permits() -> None:
+    budget = T.LintBudget(params_undocumented=102, string_params_unconstrained=74)
+
+    messages = T.budget_slack(_facts(60, 74), budget)
+
+    assert len(messages) == 1
+    assert "ceiling of 102" in messages[0] and "at 60" in messages[0]
+    assert "42 undocumented parameter(s) could be added" in messages[0]
+    assert not T.budget_slack(_facts(102, 74), budget), "a ceiling sitting on the counts has no slack"
+
+
+def test_the_nightly_restamps_the_budget_and_stages_it() -> None:
+    """The guard is only worth having where it is actually invoked.
+
+    The reconciliation step stages `shopware.sha` and the snapshots; if the
+    ceiling is not re-stamped and staged alongside them, the PR carries an
+    improvement it cannot merge.
+    """
+    workflow = as_object(
+        cast(
+            object,
+            yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/mcp-evals.yml").read_text()),
+        )
+    )
+    report = as_object(as_object(workflow.get("jobs")).get("report"))
+    steps = [as_object(s) for s in as_list(report.get("steps"))]
+    step = next(s for s in steps if "reconcil" in str(s.get("name", "")).lower() and "run" in s)
+    body = str(step["run"])
+
+    # Invocations only. Matching the whole body would hit the comment that
+    # explains why --update-budget is the wrong flag here.
+    invocations = [line.strip() for line in body.split("\n") if line.strip().startswith("python -m toollint")]
+    assert invocations, "the ceiling is never re-stamped, so any upstream improvement blocks the PR"
+    assert all("--tighten-budget" in line for line in invocations), invocations
+    assert not any("--update-budget" in line for line in invocations), (
+        f"unattended re-stamping must not be able to RAISE the ceiling: {invocations}"
+    )
+    staged = next(line for line in body.split("\n") if line.strip().startswith("git add shopware.sha"))
+    assert "lint-budget.json" in staged, f"the re-stamped ceiling is not staged: {staged.strip()}"

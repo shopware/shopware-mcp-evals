@@ -211,6 +211,43 @@ def budget_from(facts: CatalogueFacts) -> LintBudget:
     )
 
 
+def tightened(facts: CatalogueFacts, budget: LintBudget) -> LintBudget:
+    """The budget re-stamped DOWNWARD only: `min(committed, measured)` per count.
+
+    This is what the nightly reconciliation uses, and the asymmetry is the whole
+    point. `--update-budget` re-stamps whatever it measures, which is right for a
+    human deliberately accepting a number and wrong for a bot: a count that ROSE
+    would be written back as the new ceiling, laundering a regression into the
+    baseline and leaving nothing to go red about. Tightening can only ever make
+    the gate stricter, so it is safe to run unattended.
+
+    A count that rose is therefore left alone, `budget_breaches` still fires on
+    it, and a human decides whether to document the parameter or accept the
+    higher ceiling.
+    """
+    return LintBudget(
+        params_undocumented=min(budget["params_undocumented"], facts["params_undocumented"]),
+        string_params_unconstrained=min(budget["string_params_unconstrained"], facts["string_params_unconstrained"]),
+    )
+
+
+def budget_slack(facts: CatalogueFacts, budget: LintBudget) -> list[str]:
+    """Counts whose ceiling sits ABOVE the catalogue, worst first, empty when tight.
+
+    Slack is not a breach — nothing is currently wrong — but it is permission for
+    the next regression, granted by accident. It happens whenever upstream
+    documents a parameter and the committed ceiling is not re-stamped, which is
+    exactly what the nightly reconciliation now does automatically.
+    """
+    return [
+        f"`{key}` has a ceiling of {budget[key]} but the catalogue is at {facts[key]}, "
+        f"so {budget[key] - facts[key]} undocumented parameter(s) could be added without "
+        f"the gate noticing. Re-stamp with `--tighten-budget`."
+        for key in BUDGETED
+        if budget[key] > facts[key]
+    ]
+
+
 def budget_breaches(facts: CatalogueFacts, budget: LintBudget) -> list[str]:
     """Counts that rose above their ceiling, worst first, empty when clean.
 
@@ -309,6 +346,11 @@ def main() -> int:
         action="store_true",
         help="Re-stamp the budget from this snapshot instead of checking against it",
     )
+    parser.add_argument(
+        "--tighten-budget",
+        action="store_true",
+        help="Re-stamp DOWNWARD only (min of committed and measured). Safe to run unattended.",
+    )
     args = parser.parse_args()
 
     snapshot_path = cast(str, args.snapshot)
@@ -321,11 +363,16 @@ def main() -> int:
 
     report = lint(snapshot)
 
-    if cast(bool, args.update_budget):
-        budget = budget_from(report["facts"])
+    if cast(bool, args.update_budget) or cast(bool, args.tighten_budget):
+        measured = budget_from(report["facts"])
+        if cast(bool, args.tighten_budget):
+            committed = load_budget(budget_path)
+            # No committed budget yet: the measured one IS the tightest, so
+            # stamping it is tightening. Only an existing ceiling can constrain.
+            measured = tightened(report["facts"], committed) if committed else measured
         budget_path.parent.mkdir(parents=True, exist_ok=True)
-        budget_path.write_text(json.dumps(budget, indent=2) + "\n")
-        print(f"Wrote {budget_path}: {json.dumps(budget)}")
+        budget_path.write_text(json.dumps(measured, indent=2) + "\n")
+        print(f"Wrote {budget_path}: {json.dumps(measured)}")
         return 0
 
     # A missing budget warns rather than fails. It is the same call the drift
