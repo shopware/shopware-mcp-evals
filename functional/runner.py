@@ -893,6 +893,7 @@ class Catalogue:
     tools: set[str]
     resources: set[str]
     prompts: set[str]
+    searched: set[str]
 
     def toolset_of(self, tool: str) -> str:
         return next((name for name, tools in sorted(self.toolsets.items()) if tool in tools), "")
@@ -913,7 +914,20 @@ def load_catalogue(endpoint: Endpoint) -> Catalogue:
         tools={t.get("name", "") for t in mcp_tools_list_all(pinned_session, endpoint=pinned)},
         resources=set(mcp_list_names(session, "resources/list", endpoint=endpoint)),
         prompts=set(mcp_list_names(session, "prompts/list", endpoint=endpoint)),
+        searched=_searched(session, endpoint),
     )
+
+
+# Broad on purpose: the check is about which names tool-search may surface for a
+# principal, not about ranking, so it wants as much of the catalogue as it will
+# return. verify_admin_discovery uses the same query for its result cap.
+SEARCH_QUERY = "shopware"
+
+
+def _searched(session: str, endpoint: Endpoint) -> set[str]:
+    result = run_search(session, endpoint, SEARCH_QUERY, 50)
+    names = {str(as_object(as_object(r).get("tool")).get("name", "")) for r in as_list(result.get("data"))}
+    return names - META_TOOLS
 
 
 def _call_error(resp: McpResponse) -> str:
@@ -957,9 +971,11 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
     try:
         session, _ = mcp_init(endpoint=endpoint)
     except (RuntimeError, requests.exceptions.RequestException) as exc:
-        # Refused at the handshake is stricter than refused per tool, so it
-        # satisfies "blocked" — and nothing else.
-        check(expect == "blocked", "opens a session", f"initialize failed: {str(exc)[:80]}")
+        # Not a pass even for a principal that should be blocked: #20600 lets it
+        # open a session and see the meta-tools, so a handshake failure is a bad
+        # credential or a broken server — and would leave the unset state
+        # untested while reading as green.
+        check(False, "opens a session", f"initialize failed: {str(exc)[:80]}")
         return
 
     probe_toolset = cat.toolset_of(PROBE_TOOL)
@@ -1012,6 +1028,18 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
             got = set(mcp_list_names(session, method, endpoint=endpoint))
             want = everything if expect == "all" else set[str]()
             check(got == want, f"gets {len(want)} from {method}", f"got {len(got)}: {_names(got ^ want)}")
+
+        # AbstractToolSearchTool filters on its own; it may only surface what the
+        # principal can reach, and for "All" exactly what the administrator's
+        # search does.
+        searched = _searched(session, endpoint)
+        if expect == "all":
+            check(searched == cat.searched, "is shown every tool-search hit", _diff(cat.searched, searched))
+        else:
+            leaked = searched - (reach - META_TOOLS)
+            check(not leaked, "is shown only reachable tools by tool-search", f"it surfaced {_names(leaked)}")
+        if expect == "partial" and PROBE_TOOL in cat.searched:
+            check(PROBE_TOOL in searched, f"is shown {PROBE_TOOL} by tool-search", f"it surfaced {_names(searched)}")
 
         # Advertising is not the call boundary; a client that knows a name can
         # call it without ever listing anything.

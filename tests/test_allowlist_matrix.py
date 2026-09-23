@@ -34,9 +34,10 @@ PRINCIPALS = [
 SUITE = admin_endpoint("SUITE", "s", base_url="http://shop.example")
 
 # One check per surface: default surface, toolsets-list, toolset-enable,
-# ?toolsets=all, resources/list, prompts/list, the probe call — plus the control
-# call for the one-tool principal.
-CHECKS = 7 + 7 + 8
+# ?toolsets=all, resources/list, prompts/list, tool-search, the probe call —
+# plus, for the one-tool principal, that search still finds its tool and that
+# the control call is refused.
+CHECKS = 8 + 8 + 10
 
 
 def text_resp(payload: JsonObject) -> McpResponse:
@@ -51,6 +52,8 @@ class FakeServer:
         self.refuse_init: set[str] = set()
         # The reported bug: a principal whose toolsets-list is empty whatever it holds.
         self.no_toolsets_for: set[str] = set()
+        # Tools tool-search surfaces to a principal regardless of its allowlist.
+        self.search_leaks: dict[str, set[str]] = {}
 
     @staticmethod
     def key(endpoint: Endpoint | None) -> str:
@@ -87,6 +90,9 @@ class FakeServer:
         return []
 
     def call(self, _session: str, tool: str, _args: JsonObject, endpoint: Endpoint | None = None) -> McpResponse:
+        if tool == "shopware-tool-search":
+            found = self.allowed(endpoint) | self.search_leaks.get(self.key(endpoint), set())
+            return text_resp({"success": True, "data": [{"tool": {"name": n}} for n in sorted(found)]})
         if tool in self.allowed(endpoint):
             return text_resp({"success": True, "data": []})
         return {"error": {"code": -32602, "message": f"Tool {tool} is not enabled in your MCP allowlist."}}
@@ -204,19 +210,48 @@ def test_a_refusal_has_to_name_the_allowlist(monkeypatch: pytest.MonkeyPatch) ->
     assert f"is refused {PROBE_TOOL}" in fails[0]
 
 
-def test_a_blocked_principal_refused_a_session_passes_and_nothing_else_does(
+def test_a_principal_refused_a_session_fails_even_if_it_should_be_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An unset principal still opens a session and sees the meta-tools under
+    #20600. Counting a handshake failure as enforcement would leave the unset
+    state untested behind a green check."""
     fake = FakeServer()
     fake.refuse_init = {"UNSET", "ALL"}
 
-    rep = run(fake, monkeypatch)
-    fails = failures(rep)
+    fails = failures(run(fake, monkeypatch))
+
+    assert len(fails) == 2
+    assert all("initialize failed" in f for f in fails)
+    assert any("integration-unset" in f for f in fails)
+
+
+def test_tool_search_surfacing_an_unreachable_tool_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeServer()
+    fake.search_leaks = {"UNSET": {PROBE_TOOL}, "ONE": {CONTROL}}
+
+    fails = failures(run(fake, monkeypatch))
+
+    assert len(fails) == 2
+    assert all("is shown only reachable tools by tool-search" in f for f in fails)
+
+
+def test_tool_search_hiding_a_tool_from_all_capabilities_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeServer()
+    inner = fake.call
+
+    def call(_session: str, tool: str, _args: JsonObject, endpoint: Endpoint | None = None) -> McpResponse:
+        if tool == "shopware-tool-search" and fake.key(endpoint) == "ALL":
+            return text_resp({"success": True, "data": [{"tool": {"name": PROBE_TOOL}}]})
+        return inner(_session, tool, _args, endpoint)
+
+    fake.call = call
+
+    fails = failures(run(fake, monkeypatch))
 
     assert len(fails) == 1
-    assert "integration-all" in fails[0]
-    assert "initialize failed" in fails[0]
-    assert any("integration-unset: opens a session" in str(r["label"]) for r in rep.records)
+    assert "is shown every tool-search hit" in fails[0]
+    assert CONTROL in fails[0]
 
 
 def test_a_transport_error_aborts_one_principal_and_the_rest_still_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,7 +270,7 @@ def test_a_transport_error_aborts_one_principal_and_the_rest_still_run(monkeypat
 
     assert len(fails) == 1
     assert "aborted: resources/list failed: boom" in fails[0]
-    assert rep.passed == CHECKS - 7 + 4, "the blocked principal stops after its first four checks"
+    assert rep.passed == CHECKS - 8 + 4, "the blocked principal stops after its first four checks"
 
 
 def test_the_matrix_is_skipped_without_the_flag(monkeypatch: pytest.MonkeyPatch) -> None:

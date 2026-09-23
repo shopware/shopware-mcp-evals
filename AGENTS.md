@@ -437,7 +437,7 @@ which only waives ACL. So **the lane authenticates as an administrator user**
 A suite whose own principal is unrestricted cannot tell whether the allowlist
 works at all, so `--provision-principals` (CI and `trunk-lane.sh` pass it)
 creates the principals that can, checks each one on every surface
-(tools/list, `?toolsets=all`, toolsets-list, toolset-enable, resources/list,
+(tools/list, `?toolsets=all`, toolsets-list, toolset-enable, tool-search, resources/list,
 prompts/list, a direct call), and deletes them again:
 
 | principal | allowlist | must reach |
