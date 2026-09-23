@@ -961,3 +961,126 @@ def test_no_tool_call_still_reported_when_nothing_was_ever_attempted() -> None:
 
     assert result.get("fail_reason") == "no_tool_call"
     assert result.get("attempted_tools") == []
+
+
+# ---------------------------------------------------------------------------
+# The preloaded arm: ?toolsets=all at connect time
+# ---------------------------------------------------------------------------
+class Wire(TypedDict):
+    """Every URL the fixture sent a request to, and every enable the HARNESS made."""
+
+    urls: list[str]
+    enables: int
+
+
+@pytest.fixture
+def stub_preloaded(monkeypatch: pytest.MonkeyPatch) -> Wire:
+    """A server that records which URL each request went to.
+
+    The existing arm stubs assert `endpoint is E.ADMIN` by identity, which a
+    pinned clone would trip — so this arm gets a recorder of its own, checking
+    the one property that matters for it: the query string on EVERY request.
+    """
+    wire = Wire(urls=[], enables=0)
+
+    def seen(endpoint: object) -> None:
+        assert isinstance(endpoint, E.Endpoint)
+        wire["urls"].append(endpoint.url)
+
+    def init(endpoint: object = None) -> tuple[str, str]:
+        seen(endpoint)
+        return "sid", ""
+
+    def list_all(_session: str, endpoint: object = None) -> list[ToolDef]:
+        seen(endpoint)
+        return [
+            ToolDef(name=TOOL, description="d", inputSchema={}),
+            ToolDef(name="shopware-tool-search", description="d", inputSchema={}),
+        ]
+
+    def call(_session: str, _name: str, _args: JsonObject, endpoint: object = None) -> McpResponse:
+        seen(endpoint)
+        return reply('{"data": [{"id": "x"}]}')
+
+    def enable(*_args: object, **_kwargs: object) -> None:
+        wire["enables"] += 1
+
+    monkeypatch.setattr(E, "mcp_init", init)
+    monkeypatch.setattr(E, "mcp_tools_list_all", list_all)
+    monkeypatch.setattr(E, "mcp_call", call)
+    monkeypatch.setattr(E, "mcp_call_error", no_error)
+    monkeypatch.setattr(E, "mcp_result_text", replied_text)
+    monkeypatch.setattr(E, "enable_toolset", enable)
+    monkeypatch.setattr(E, "enable_all_toolsets", enable)
+    return wire
+
+
+def test_the_preloaded_arm_pins_every_toolset_on_every_request(stub_preloaded: Wire) -> None:
+    """Not just on initialize. McpRequestedToolsetResolver reads the query string
+    per request and stores nothing in the session, so a single later call sent to
+    the plain URL would quietly drop back to the default surface mid-fixture —
+    and the arm would be measuring discovery while reporting preloaded."""
+    E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 6, arm="preloaded")
+
+    assert stub_preloaded["urls"], "the fixture made no requests at all"
+    unpinned = [u for u in stub_preloaded["urls"] if not u.endswith("?toolsets=all")]
+    assert not unpinned, f"requests sent without ?toolsets=all: {unpinned}"
+
+
+def test_the_preloaded_arm_never_enables_anything_itself(stub_preloaded: Wire) -> None:
+    """The catalogue is supposed to arrive with the connection. An enable made by
+    the harness would be the `full` arm under another name."""
+    E.run_fixture_discovery("openai", FakeClient(), fixture(expected_toolset="entity"), "m", None, 6, arm="preloaded")
+
+    assert stub_preloaded["enables"] == 0
+
+
+@pytest.mark.usefixtures("stub_preloaded")
+def test_the_preloaded_arm_keeps_the_meta_tools() -> None:
+    """Unlike the diagnostic arms. The server advertises them next to the pinned
+    catalogue, so withholding them would measure a surface no client ever sees."""
+    client = FakeClient()
+
+    E.run_fixture_discovery("openai", client, fixture(), "m", None, 6, arm="preloaded")
+
+    names = offered(client.seen[0]["tools"])
+    assert "shopware-tool-search" in names and TOOL in names
+
+
+@pytest.mark.usefixtures("stub_preloaded")
+def test_the_preloaded_arm_is_graded_like_discovery_and_records_itself() -> None:
+    result = E.run_fixture_discovery(
+        "openai", FakeClient(), fixture(expected_toolset="entity"), "m", None, 6, arm="preloaded"
+    )
+
+    assert result["mode"] == "preloaded"
+    assert result["passed"] is True
+    # Nothing was enabled, so whether the "right" toolset was enabled is not a
+    # question this arm can be asked. Grading it would fail every fixture for an
+    # artefact of the setup rather than for anything the model did.
+    assert result.get("enabled_correct_toolset") is None
+
+
+def test_the_pass_threads_its_arm_through_to_every_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag is only worth having if the fixtures actually run under it; a pass
+    that printed `preloaded` and ran `discovery` would be the worst outcome."""
+    arms: list[str] = []
+
+    def record(*_args: object, arm: str = "discovery", **_kwargs: object) -> FixtureResult:
+        arms.append(arm)
+        return E.skipped_result(fixture(), arm, "recorded")
+
+    monkeypatch.setattr(E, "run_fixture_discovery", record)
+    E.run_discovery_pass("openai", FakeClient(), [fixture(), fixture()], "m", None, 6, {TOOL}, arm="preloaded")
+
+    # Four calls for two fixtures: the recorder returns a non-passing record, so
+    # each fixture is retried — and the retry has to carry the arm too, or a
+    # borderline miss would be re-graded under a different surface.
+    assert arms == ["preloaded"] * 4
+
+
+def test_only_the_production_arms_are_offered_as_a_pass() -> None:
+    """`isolated` and `full` withhold the meta-tools and exist to locate failures
+    under --triage; a whole pass under one would grade meta-fixtures as misses."""
+    assert set(E.PASS_ARMS) == {"discovery", "preloaded"}
+    assert not set(E.PASS_ARMS) & E.DIAGNOSTIC_ARMS

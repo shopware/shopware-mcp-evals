@@ -82,6 +82,10 @@ on:
         description: 'Re-run the failures under the isolated and full arms to locate each one (own description / cross-group collision / discovery layer). Nightly does this anyway; use this to diagnose on demand.'
         required: false
         default: 'false'
+      preloaded_arm:
+        description: 'Also run the admin fixtures with the whole catalogue pinned at connect time (?toolsets=all, shopware/shopware#20509) instead of discovered. Advisory. Compares accuracy and cost of a preloaded connector against discovery. Adds one primary-model pass.'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -171,6 +175,13 @@ env:
     ${{ github.event_name == 'schedule'
         || github.event.inputs.triage == 'true'
         || contains(github.event.pull_request.labels.*.name, 'run-triage') }}
+  # Opt-in, never nightly by default: it is a measurement to take a few times,
+  # not a regression signal to pay for every day. Same two ways in as TRIAGE —
+  # the dispatch input, or the `run-preloaded` label on a PR, because dispatch
+  # inputs are only accepted once this file is on the default branch.
+  PRELOADED: >-
+    ${{ github.event.inputs.preloaded_arm == 'true'
+        || contains(github.event.pull_request.labels.*.name, 'run-preloaded') }}
 
 
 jobs:
@@ -858,6 +869,23 @@ jobs:
             --advisory > coreprompt.log 2>&1 &
           pid_coreprompt=$!
 
+          # Fifth arm, opt-in: the same primary model on the same fixtures with the
+          # whole catalogue PINNED at connect time (?toolsets=all), meta-tools
+          # still advertised. It is the counterfactual to the gating arm: a
+          # connector like claude.ai reads tools/list once and never again, so
+          # for it this is not a diagnostic but the configuration it actually
+          # runs. The pair answers what connect-time selection buys — accuracy
+          # against the cost of advertising every schema on every turn.
+          pid_preloaded=""
+          if [ "${PRELOADED}" = "true" ]; then
+            python -m eval.runner --arm preloaded "${args[@]}" \
+              --output "results/eval-preloaded.json" \
+              --summary-row "results/rows/6-admin-preloaded.json" \
+              --suite-label "admin · preloaded (?toolsets=all)" \
+              --advisory > preloaded.log 2>&1 &
+            pid_preloaded=$!
+          fi
+
           # `|| rc=$?`, not `wait; rc=$?`. GitHub runs this with `bash -e`, which
           # the script's own `set -uo pipefail` does not undo, and a failing
           # `wait` is a simple command — so the shell exited *at the wait* the
@@ -872,6 +900,8 @@ jobs:
           # result, not a broken build.
           rc_noprompt=0; wait "${pid_noprompt}" || rc_noprompt=$?
           rc_coreprompt=0; wait "${pid_coreprompt}" || rc_coreprompt=$?
+          rc_preloaded=0
+          if [ -n "${pid_preloaded}" ]; then wait "${pid_preloaded}" || rc_preloaded=$?; fi
 
           echo "::group::admin · primary (exit ${rc_primary})"
           cat primary.log
@@ -885,6 +915,11 @@ jobs:
           echo "::group::admin · core prompt only (advisory, exit ${rc_coreprompt})"
           cat coreprompt.log
           echo "::endgroup::"
+          if [ -n "${pid_preloaded}" ]; then
+            echo "::group::admin · preloaded ?toolsets=all (advisory, exit ${rc_preloaded})"
+            cat preloaded.log
+            echo "::endgroup::"
+          fi
 
           echo "primary_exit=${rc_primary}" >> "$GITHUB_OUTPUT"
           echo "second_exit=${rc_second}" >> "$GITHUB_OUTPUT"
