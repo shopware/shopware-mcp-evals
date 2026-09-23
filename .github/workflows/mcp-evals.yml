@@ -928,9 +928,24 @@ jobs:
           # it. A green job that actually crashed is worse than a red one, and
           # that is exactly what happened when a report-rendering bug got
           # absorbed by the re-baselining window.
+          #
+          # That covers the ADVISORY arms too, and it did not always: this checked
+          # only the two gating arms, so a crashed no-prompt, core-prompt or
+          # preloaded run left the job green with its report and summary row
+          # silently missing. For the preloaded arm that is the whole point
+          # defeated — someone opted in to get that number. Advisory means its
+          # VERDICT never gates; it never meant a crash may pass unnoticed. An arm
+          # that was not started keeps its rc at 0 and cannot trip this.
           failed=0
-          if [ "${rc_primary}" -eq 3 ] || [ "${rc_second}" -eq 3 ]; then
-            echo "::error::an eval run crashed before producing a verdict (see the logs above)."
+          crashed=()
+          if [ "${rc_primary}" -eq 3 ]; then crashed+=("admin · primary"); fi
+          if [ "${rc_second}" -eq 3 ]; then crashed+=("admin · second validator"); fi
+          if [ "${rc_noprompt}" -eq 3 ]; then crashed+=("admin · no context prompt"); fi
+          if [ "${rc_coreprompt}" -eq 3 ]; then crashed+=("admin · core prompt only"); fi
+          if [ "${rc_preloaded}" -eq 3 ]; then crashed+=("admin · preloaded"); fi
+          if [ "${#crashed[@]}" -gt 0 ]; then
+            listed=$(printf '%s; ' "${crashed[@]}")
+            echo "::error::eval run(s) crashed before producing a verdict: ${listed%; } (see the logs above)."
             exit 1
           fi
           # The drift window covers BOTH gating arms, and it did not always: it
