@@ -188,13 +188,21 @@ def verify_default_surface(
     rep: Reporter, session: str, endpoint: Endpoint, also_expected: frozenset[str] = NO_EXTRA_DEFAULT_TOOLS
 ) -> None:
     """What a fresh session must advertise: the three meta-tools, plus whatever
-    the endpoint publishes by design.
+    else the endpoint currently puts on its default surface.
 
     On admin that second set is empty — every catalogue tool is deferred. On the
-    Store endpoint it is the thirteen UCP tools, which agentic-commerce 1.3.0
-    (UCP 2026-08-25) moved onto the default surface: a UCP client is specified to
-    find them by name at connect time, so deferring them behind a toolset would
-    have made the endpoint non-conformant.
+    Store endpoint it is currently the thirteen UCP tools, and that is a plugin
+    WORKAROUND, not the intended design. Core means the Store endpoint to work
+    exactly like admin (shopware/shopware#18298: meta-tools only, everything else
+    discovered). agentic-commerce #218 tagged its tools with core's reserved
+    `discovery` group because UCP agents connecting to its /ucp/mcp proxy list
+    tools once and never saw them behind a toolset — a real problem, solved in a
+    way that also puts them on every plain /store-api/_mcp connection. The fix is
+    proposed in shopware/agentic-commerce#254 (pin a `ucp` toolset on the proxy
+    via ?toolsets=) and shopware/shopware#20725 (reserve the group).
+
+    When that lands, the Store call site drops `also_expected` and this check
+    holds both endpoints to the same rule again.
 
     The set is passed in rather than read from the endpoint name, so "a deferred
     tool leaked" and "a tool this endpoint publishes" stay distinguishable. That
@@ -949,9 +957,10 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     provisioned state. They do — which is why the journey provisions it, rather
     than leaving thirteen tools untested and their fixtures graded on the tool
     name alone."""
-    # The thirteen UCP tools are published on the default surface by design since
-    # agentic-commerce 1.3.0, so they are expected here rather than counted as a
-    # leak. ucp.py owns the list.
+    # The thirteen UCP tools currently sit on the default surface — a plugin
+    # workaround, not the intended design (see verify_default_surface) — so they
+    # are expected here rather than counted as a leak. Drop `also_expected` once
+    # shopware/agentic-commerce#254 lands. ucp.py owns the list.
     verify_default_surface(rep, session, endpoint, also_expected=ucp.all_classified())
     verify_connect_time_toolsets(rep, endpoint, also_expected=ucp.all_classified())
 
