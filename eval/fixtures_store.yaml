@@ -212,9 +212,11 @@ fixtures:
       The prompt carries the address because it did not, and a model that has
       been asked to set an address nobody gave it SHOULD ask for one rather than
       invent it. It graded as no_tool_call on nightly 35825932203 for exactly
-      that reason, while checkout_update_email — the sibling that supplies its
-      value — passed. A prompt the right answer cannot act on measures nothing
-      about the description.
+      that reason. The address is the only thing that was missing:
+      update_checkout needs every line item resent (update is PUT, not PATCH),
+      and get_checkout on this id returns a full checkout (~4.9 KB on that run)
+      to read them from. checkout_update_email, which supplies its value, took
+      exactly that path — read, then write — and passed.
 
   - id: checkout_update_email
     category: unambiguous
@@ -228,14 +230,13 @@ fixtures:
     notes: >
       Selecting a shipping method is a checkout field write, not a new checkout.
 
-      Known to fail for a reason that is NOT the description — read this before
-      editing one. Choosing an option needs its id, which only a read of the
-      checkout can supply, so get_checkout is the correct first move; and the
-      session id here is a fixed value that exists on no lane, so that read
-      answers not-found and a sensible model stops rather than writing to a
-      checkout it was just told is not there. It needs a real checkout session
-      from the lane — a seeded {checkout_id} placeholder, like admin's
-      {cart_token} — before it can measure anything.
+      Failing on nightly 35825932203, and probably NOT because of a description
+      — read this before editing one. The model read the checkout (get_checkout
+      succeeded, ~4.8 KB) and then stopped without writing. The likeliest reason
+      is that the checkout offers no delivery option called "express", which
+      would make the prompt unanswerable on this lane; that is unverified, since
+      the eval record does not keep the read's payload. Check the checkout's
+      fulfillment options before touching update_checkout's description.
 
   - id: checkout_complete
     category: disambiguation

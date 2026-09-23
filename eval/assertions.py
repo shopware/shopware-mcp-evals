@@ -28,6 +28,7 @@ test of the seed.
 """
 
 import json
+import re
 from typing import cast
 
 from eval.result_schema import ExpectSpec, as_list, as_object
@@ -53,16 +54,6 @@ VALIDATION_MARKERS = (
 # The addressed thing does not exist. Distinct from a malformed request: the
 # call was shaped correctly, the id in it just does not resolve.
 NOT_FOUND_MARKERS = (
-    # UCP's error CODE, which prefixes every UCP error as `code: message`. The
-    # prose below matched every UCP not-found except one: get_order answers a
-    # guest with a deliberately non-leaking refusal — `not_found: Order "…" is
-    # not available to this request. A guest order can only be read back by the
-    # checkout session that placed it…` — and that prose names no absence at all.
-    # The code is the contract; the message is not. Missing it graded three
-    # correct get_order picks per nightly as tool_error, a third of every Store
-    # failure, on a refusal the UCP spec REQUIRES (reading an order needs an
-    # authenticated buyer, and the eval runs as a guest on a shared key).
-    "not_found",
     "not found",
     "no such",
     "does not exist",
@@ -71,6 +62,21 @@ NOT_FOUND_MARKERS = (
     "no entity",
     "404",
 )
+
+# UCP's error CODE, which prefixes every UCP error as `code: message`. The prose
+# markers above matched every UCP not-found except one: get_order answers a
+# guest with a deliberately non-leaking refusal — `not_found: Order "…" is not
+# available to this request. A guest order can only be read back by the
+# checkout session that placed it…` — whose prose names no absence at all. The
+# code is the contract; the message is not. Missing it graded three correct
+# get_order picks per nightly as tool_error, a third of every Store failure, on
+# a refusal the UCP spec requires of a guest.
+#
+# Anchored to the start, not matched as a substring. `check()` tests not-found
+# BEFORE validation — deliberately, see there — so an unanchored `not_found`
+# would let `validation: status must not be not_found` pass a malformed call at
+# the accepted tier. Only the code in the code position means the code.
+UCP_NOT_FOUND = re.compile(r"^\s*not_found\s*:")
 
 TIERS = ("data", "accepted", "none")
 
@@ -93,7 +99,7 @@ def is_not_found(error: str | None) -> bool:
     if not error:
         return False
     lowered = str(error).lower()
-    return any(marker in lowered for marker in NOT_FOUND_MARKERS)
+    return bool(UCP_NOT_FOUND.match(lowered)) or any(marker in lowered for marker in NOT_FOUND_MARKERS)
 
 
 def _payload(result_text: str | None) -> object:

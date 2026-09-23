@@ -245,6 +245,18 @@ def test_other_ucp_codes_are_not_mistaken_for_not_found() -> None:
         assert A.is_not_found(error) is False, error
 
 
+def test_the_code_counts_only_in_the_code_position() -> None:
+    """`check()` tests not-found BEFORE validation, so an unanchored match would
+    let a validation error that merely MENTIONS the token pass a malformed call
+    at the accepted tier — and inflate the rate it exists to keep honest."""
+    rejected = "validation: status must not be not_found"
+
+    assert A.is_not_found(rejected) is False
+    assert A.check("accepted", None, rejected) == (False, "invalid_arguments")
+    # Leading whitespace is still the code position.
+    assert A.is_not_found('  not_found: Cart "x" was not found.') is True
+
+
 def test_an_environment_failure_is_still_neither() -> None:
     assert A.check("accepted", None, "500 Internal Server Error") == (False, "tool_error")
     assert A.is_not_found("500 Internal Server Error") is False

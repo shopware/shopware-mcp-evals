@@ -372,9 +372,10 @@ python -m functional.runner --endpoint store --allow-mutations
 >   model obeys — 36 of 45 fixtures ran the enable ritual for tools already
 >   visible (4.2 steps against 1.5 direct) — then reaches for the one tool the
 >   ritual unlocked, `shopware-store-api-context`, including on both negatives.
-> - **2 — fixtures:** one asked to set an address it never gave (fixed); one
->   needs a real checkout session to choose an option from (needs a seeded
->   `{checkout_id}`; see its `notes`).
+> - **2 — fixtures:** one asked to set an address it never gave (fixed — its
+>   sibling that supplies a value passed by reading the checkout, then writing);
+>   one reads the checkout and stops, most likely because it offers no
+>   "express" option to pick (unverified; see its `notes`).
 >
 > `first_try_rate` 53% against a 82% pass rate is the ritual's footprint:
 > recovery is doing the work the first call should.
