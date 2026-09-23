@@ -328,6 +328,8 @@ def anthropic_turn(
             input=response.usage.input_tokens,
             cached_input=_sdk_int(response.usage, "cache_read_input_tokens"),
             output=response.usage.output_tokens,
+            # Only non-zero with cache_control, which this harness never sets.
+            cache_write=_sdk_int(response.usage, "cache_creation_input_tokens"),
         ),
     }
 
@@ -386,7 +388,13 @@ def openai_turn(
     # over ~1k tokens with no opt-in, so this is not zero even though this
     # harness never sets cache_control: it is a discount we receive whether or
     # not we asked for it, and ignoring it would overstate the bill.
-    cached = _sdk_int(_sdk_attr(response.usage, "prompt_tokens_details"), "cached_tokens")
+    details = _sdk_attr(response.usage, "prompt_tokens_details")
+    cached = _sdk_int(details, "cached_tokens")
+    # Also inside `prompt_tokens`, and billed above the input rate by the models
+    # that report it (measured on gpt-6-luna: 2410 of 2413 prompt tokens on a
+    # cold call, then 2410 cached on the repeat). Left in `input`, it would be
+    # priced 20% low on every cold prefix.
+    written = _sdk_int(details, "cache_write_tokens")
     return {
         "tool_calls": tool_calls,
         "assistant_message": assistant_message,
@@ -395,9 +403,10 @@ def openai_turn(
         ],
         "stop_reason": response.choices[0].finish_reason,
         "tokens": TokenCounts(
-            input=max(response.usage.prompt_tokens - cached, 0),
+            input=max(response.usage.prompt_tokens - cached - written, 0),
             cached_input=cached,
             output=response.usage.completion_tokens,
+            cache_write=written,
         ),
     }
 

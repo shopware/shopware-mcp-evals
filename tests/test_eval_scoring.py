@@ -115,12 +115,17 @@ def test_score_of_nothing_is_empty_not_an_error() -> None:
 def test_tokens_sum_across_results() -> None:
     results = [r("a", tokens={"input": 10, "output": 2}), r("b", tokens={"input": 5, "output": 1})]
 
-    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 0}
+    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 0, "cache_write": 0}
 
 
 def test_tokens_tolerate_a_result_that_never_reached_the_model() -> None:
     """An errored fixture has no token record at all."""
-    assert S.total_tokens([r("a"), r("b", tokens=None)]) == {"input": 0, "output": 0, "cached_input": 0}
+    assert S.total_tokens([r("a"), r("b", tokens=None)]) == {
+        "input": 0,
+        "output": 0,
+        "cached_input": 0,
+        "cache_write": 0,
+    }
 
 
 def test_cached_input_is_summed_and_not_dropped() -> None:
@@ -133,7 +138,7 @@ def test_cached_input_is_summed_and_not_dropped() -> None:
         r("b", tokens={"input": 5, "output": 1, "cached_input": 50}),
     ]
 
-    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 150}
+    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 150, "cache_write": 0}
 
 
 def test_cached_input_defaults_when_a_producer_omits_it() -> None:
@@ -145,7 +150,7 @@ def test_cached_input_defaults_when_a_producer_omits_it() -> None:
         r("b", tokens={"input": 5, "output": 1, "cached_input": 7}),
     ]
 
-    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 7}
+    assert S.total_tokens(results) == {"input": 15, "output": 3, "cached_input": 7, "cache_write": 0}
 
 
 # ---------------------------------------------------------------------------

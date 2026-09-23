@@ -95,7 +95,10 @@ def print_discovery_block(discovery: list[FixtureResult]):
     # dollar figure next to it — which is the confusion the aggregate itself
     # caused while it was dropping the field entirely.
     cached = d_tok.get("cached_input", 0)
+    written = d_tok.get("cache_write", 0)
     cached_note = f" ({cached:,} cached)" if cached else ""
+    if written:
+        cached_note += f" ({written:,} written to cache)"
     print(f"  Tokens: {d_tok.get('input', 0):,} in{cached_note} / {d_tok.get('output', 0):,} out")
 
     skipped = [r for r in discovery if r.get("skipped")]
