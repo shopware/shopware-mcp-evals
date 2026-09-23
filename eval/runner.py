@@ -367,7 +367,11 @@ def openai_turn(
     try:
         response = sdk.chat.completions.create(**kwargs, **{param: 1024})
     except Exception as exc:  # noqa: BLE001 — retried below, re-raised if it isn't a known probe
-        if model not in _REASONING_OFF and "reasoning_effort" in str(exc) and "'none'" in str(exc):
+        # Keyed on what THIS request sent, not on the shared set: fixtures run
+        # concurrently, and a call that went out before another thread learned
+        # the rule still has to retry. Checking the set instead errored the
+        # first four fixtures of every suite on the second gpt-6-luna trial.
+        if "reasoning_effort" not in kwargs and "reasoning_effort" in str(exc) and "'none'" in str(exc):
             _REASONING_OFF.add(model)
             return openai_turn(client, model, _system_prompt, messages, tools)
         other = "max_tokens" if param == "max_completion_tokens" else "max_completion_tokens"

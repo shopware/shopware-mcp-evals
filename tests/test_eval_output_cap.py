@@ -138,3 +138,22 @@ def test_an_unrelated_error_is_not_mistaken_for_the_reasoning_probe() -> None:
     with pytest.raises(RuntimeError, match="not supported with this model"):
         _ = E.openai_turn(client, "some-model", None, [], [])
     assert "some-model" not in E._REASONING_OFF
+
+
+def test_a_call_racing_another_thread_that_learned_the_rule_still_retries() -> None:
+    """Concurrent fixtures: this call went out without reasoning_effort, and by
+    the time its 400 arrives another thread has already recorded the model."""
+    fake = ReasoningStrictCompletions()
+    inner = fake.create
+
+    def create(**kwargs: object) -> SimpleNamespace:
+        if kwargs.get("reasoning_effort") is None:
+            E._REASONING_OFF.add("gpt-6-luna")
+        return inner(**kwargs)
+
+    fake.create = create
+    client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+
+    _ = E.openai_turn(client, "gpt-6-luna", None, [], [])
+
+    assert fake.calls == [None, "none"]
