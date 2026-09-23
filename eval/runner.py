@@ -341,6 +341,15 @@ def anthropic_turn(
 # only knows `max_tokens`.
 _OUTPUT_CAP_PARAM: dict[str, str] = {}
 
+# Models that refuse function tools under their default reasoning effort on
+# chat completions, and have to be told `reasoning_effort: "none"`. Measured on
+# gpt-6-luna: its default and "low" both answer 400 ("Function tools with
+# reasoning_effort are not supported ... set reasoning_effort to 'none'"), and
+# the first trial graded 0/96 on it. "none" is also where gpt-5.4-mini and
+# gpt-5.4-nano already sit here — they report 0 reasoning tokens by default —
+# so this compares like with like rather than handicapping the model.
+_REASONING_OFF: set[str] = set()
+
 
 def openai_turn(
     client: object,
@@ -352,10 +361,15 @@ def openai_turn(
     """One assistant turn (system prompt must already be in messages)."""
     sdk = cast(_OpenAIClient, client)
     kwargs: JsonObject = {"model": model, "tools": tools, "tool_choice": "auto", "messages": messages}
+    if model in _REASONING_OFF:
+        kwargs["reasoning_effort"] = "none"
     param = _OUTPUT_CAP_PARAM.get(model, "max_completion_tokens")
     try:
         response = sdk.chat.completions.create(**kwargs, **{param: 1024})
-    except Exception as exc:  # noqa: BLE001 — retried below, re-raised if it isn't the cap param
+    except Exception as exc:  # noqa: BLE001 — retried below, re-raised if it isn't a known probe
+        if model not in _REASONING_OFF and "reasoning_effort" in str(exc) and "'none'" in str(exc):
+            _REASONING_OFF.add(model)
+            return openai_turn(client, model, _system_prompt, messages, tools)
         other = "max_tokens" if param == "max_completion_tokens" else "max_completion_tokens"
         if model in _OUTPUT_CAP_PARAM or param not in str(exc):
             raise

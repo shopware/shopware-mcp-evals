@@ -42,8 +42,10 @@ def client_for(accepts: Iterable[str]) -> tuple[SimpleNamespace, FakeCompletions
 @pytest.fixture(autouse=True)
 def clear_cache() -> Iterator[None]:
     E._OUTPUT_CAP_PARAM.clear()
+    E._REASONING_OFF.clear()
     yield
     E._OUTPUT_CAP_PARAM.clear()
+    E._REASONING_OFF.clear()
 
 
 def test_modern_model_uses_max_completion_tokens_first() -> None:
@@ -98,3 +100,41 @@ def test_a_cached_model_does_not_retry_on_failure() -> None:
         E.openai_turn(client, "gpt-5.4-mini", None, [], [])
 
     assert fake.calls == ["max_completion_tokens"]
+
+
+class ReasoningStrictCompletions:
+    """gpt-6-luna on chat completions: function tools only with reasoning off."""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def create(self, **kwargs: object) -> SimpleNamespace:
+        self.calls.append(kwargs.get("reasoning_effort"))
+        if kwargs.get("reasoning_effort") != "none":
+            raise RuntimeError(
+                "Error code: 400 - Function tools with reasoning_effort are not supported for gpt-6-luna in "
+                "/v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'."
+            )
+        msg = SimpleNamespace(content="ok", tool_calls=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+        )
+
+
+def test_a_model_that_refuses_tools_with_reasoning_is_retried_with_it_off_once() -> None:
+    fake = ReasoningStrictCompletions()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
+
+    _ = E.openai_turn(client, "gpt-6-luna", None, [], [])
+    _ = E.openai_turn(client, "gpt-6-luna", None, [], [])
+
+    assert fake.calls == [None, "none", "none"], "probed once, then sent up front"
+
+
+def test_an_unrelated_error_is_not_mistaken_for_the_reasoning_probe() -> None:
+    client, _ = client_for(set())
+
+    with pytest.raises(RuntimeError, match="not supported with this model"):
+        _ = E.openai_turn(client, "some-model", None, [], [])
+    assert "some-model" not in E._REASONING_OFF
