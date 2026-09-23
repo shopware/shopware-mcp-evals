@@ -214,6 +214,49 @@ def test_the_store_regression_this_fixes() -> None:
     assert passed is True and reason is None
 
 
+def test_a_ucp_not_found_is_recognised_by_its_code_not_its_prose() -> None:
+    """The exact message get_order returned on nightly run 35825932203, three
+    times — once per order fixture, every one a correct pick.
+
+    Every other UCP not-found says "was not found" somewhere in its prose, which
+    is why the prose markers had caught them all. This one is a deliberately
+    non-leaking refusal: it names no absence, only that the order is not
+    available to this request. The UCP code in front of it is the only reliable
+    signal, and the refusal is one the spec requires of a guest.
+    """
+    refusal = (
+        'not_found: Order "019f0a186a007d47bafa9bc8bb53c140" is not available to this request. '
+        "A guest order can only be read back by the checkout session that placed it, "
+        "and a platform credential does not authenticate a buyer."
+    )
+
+    assert A.is_not_found(refusal) is True
+    assert A.check("accepted", None, refusal) == (True, None)
+    assert A.check("data", None, refusal) == (False, "not_found"), "a refusal is still not data"
+
+
+def test_other_ucp_codes_are_not_mistaken_for_not_found() -> None:
+    """The code marker must not make every UCP error read as a phantom id."""
+    for error in (
+        "invalid_request: line_items is required",
+        "validation: Completed checkout sessions cannot be updated.",
+        "internal: The tool call failed unexpectedly.",
+    ):
+        assert A.is_not_found(error) is False, error
+
+
+def test_the_code_counts_only_in_the_code_position() -> None:
+    """`check()` tests not-found BEFORE validation, so an unanchored match would
+    let a validation error that merely MENTIONS the token pass a malformed call
+    at the accepted tier — and inflate the rate it exists to keep honest."""
+    rejected = "validation: status must not be not_found"
+
+    assert A.is_not_found(rejected) is False
+    assert A.check("accepted", None, rejected) == (False, "invalid_arguments")
+    # Leading whitespace is still the code position.
+    assert A.is_not_found('  not_found: Cart "x" was not found.') is True
+
+
 def test_an_environment_failure_is_still_neither() -> None:
     assert A.check("accepted", None, "500 Internal Server Error") == (False, "tool_error")
     assert A.is_not_found("500 Internal Server Error") is False

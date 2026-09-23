@@ -204,9 +204,19 @@ fixtures:
 
   - id: checkout_update
     category: disambiguation
-    prompt: "Set the shipping address on checkout session 019f95241e007730893f7d7dd80202ed."
+    prompt: "Set the shipping address on checkout session 019f95241e007730893f7d7dd80202ed to Musterstrasse 1, 48624 Schöppingen, Germany."
     expected_tool: update_checkout
-    notes: Editing an open checkout → checkout-update, not checkout-create/complete.
+    notes: >
+      Editing an open checkout → update_checkout, not create/complete.
+
+      The prompt carries the address because it did not, and a model that has
+      been asked to set an address nobody gave it SHOULD ask for one rather than
+      invent it. It graded as no_tool_call on nightly 35825932203 for exactly
+      that reason. The address is the only thing that was missing:
+      update_checkout needs every line item resent (update is PUT, not PATCH),
+      and get_checkout on this id returns a full checkout (~4.9 KB on that run)
+      to read them from. checkout_update_email, which supplies its value, took
+      exactly that path — read, then write — and passed.
 
   - id: checkout_update_email
     category: unambiguous
@@ -217,7 +227,16 @@ fixtures:
     category: unambiguous
     prompt: "Pick the express delivery option for checkout session 019f95241e007730893f7d7dd80202ed."
     expected_tool: update_checkout
-    notes: Selecting a shipping method is a checkout field write, not a new checkout.
+    notes: >
+      Selecting a shipping method is a checkout field write, not a new checkout.
+
+      Failing on nightly 35825932203, and probably NOT because of a description
+      — read this before editing one. The model read the checkout (get_checkout
+      succeeded, ~4.8 KB) and then stopped without writing. The likeliest reason
+      is that the checkout offers no delivery option called "express", which
+      would make the prompt unanswerable on this lane; that is unverified, since
+      the eval record does not keep the read's payload. Check the checkout's
+      fulfillment options before touching update_checkout's description.
 
   - id: checkout_complete
     category: disambiguation
