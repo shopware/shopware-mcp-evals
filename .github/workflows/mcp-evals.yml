@@ -383,12 +383,12 @@ jobs:
           # seeded one. Empty if the seeding could not verify its write, and the
           # discovery still runs then.
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
-          # An integration with no mcp_allowlist, which the server must refuse.
-          # The suite authenticates as an administrator user now, so this is the
-          # only thing still covering that the allowlist is enforced at all.
-          MCP_BLOCKED_ACCESS_KEY: ${{ steps.lane.outputs.blocked_access_key }}
-          MCP_BLOCKED_SECRET_KEY: ${{ steps.lane.outputs.blocked_secret_key }}
-        run: python -m functional.runner --endpoint admin
+        # --provision-principals creates integrations and non-admin users with
+        # each allowlist state and checks what they reach. The suite itself runs
+        # as an administrator user, which the allowlist does not apply to, so
+        # this is the only coverage the allowlist has. Safe here: the lane dies
+        # with the job, and the principals are deleted afterwards anyway.
+        run: python -m functional.runner --endpoint admin --provision-principals
 
       # The Store catalogue has never been snapshotted, so everything that
       # derives from one had to be guessed for it: toolclass could not read
