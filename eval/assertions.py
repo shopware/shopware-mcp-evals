@@ -53,6 +53,16 @@ VALIDATION_MARKERS = (
 # The addressed thing does not exist. Distinct from a malformed request: the
 # call was shaped correctly, the id in it just does not resolve.
 NOT_FOUND_MARKERS = (
+    # UCP's error CODE, which prefixes every UCP error as `code: message`. The
+    # prose below matched every UCP not-found except one: get_order answers a
+    # guest with a deliberately non-leaking refusal — `not_found: Order "…" is
+    # not available to this request. A guest order can only be read back by the
+    # checkout session that placed it…` — and that prose names no absence at all.
+    # The code is the contract; the message is not. Missing it graded three
+    # correct get_order picks per nightly as tool_error, a third of every Store
+    # failure, on a refusal the UCP spec REQUIRES (reading an order needs an
+    # authenticated buyer, and the eval runs as a guest on a shared key).
+    "not_found",
     "not found",
     "no such",
     "does not exist",

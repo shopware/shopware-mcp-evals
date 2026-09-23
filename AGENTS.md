@@ -356,10 +356,28 @@ python -m functional.runner --endpoint store --allow-mutations
 > the flag was deleted without ever changing a verdict. The lesson is the
 > ordering: find out what the number is measuring before deciding it is wrong.
 >
-> The store suite's 64% is a real finding, not a threshold problem: every UCP
-> tool is unsafe to execute, so that suite is graded on selection alone, and its
-> failures cluster on `order-get`/`checkout-get`. It is advisory, so it shows up
-> as a red annotation on an otherwise green job.
+> The store suite is advisory, so a miss shows up as a red annotation on an
+> otherwise green job. Its UCP tools are executed now (they declare `dryRun`),
+> not graded on selection alone as this note once said. On nightly 35825932203
+> it read **82% (37/45)**, and not one of the eight misses was a UCP description
+> picking the wrong sibling:
+>
+> - **3 — a harness bug, fixed:** `get_order` answers a guest with a
+>   non-leaking refusal whose prose names no absence (`not_found: Order … is not
+>   available to this request`). The not-found matcher read prose, not UCP's
+>   error code, so three correct picks graded as `tool_error`. 82% → 89%.
+> - **3 — upstream, in core:** `shopware-toolsets-list` says *"Use this first for
+>   any task: no domain tools are advertised until you enable their toolset"*,
+>   which has been false on the Store endpoint since agentic-commerce 1.3.0. The
+>   model obeys — 36 of 45 fixtures ran the enable ritual for tools already
+>   visible (4.2 steps against 1.5 direct) — then reaches for the one tool the
+>   ritual unlocked, `shopware-store-api-context`, including on both negatives.
+> - **2 — fixtures:** one asked to set an address it never gave (fixed); one
+>   needs a real checkout session to choose an option from (needs a seeded
+>   `{checkout_id}`; see its `notes`).
+>
+> `first_try_rate` 53% against a 82% pass rate is the ritual's footprint:
+> recovery is doing the work the first call should.
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
 itself, and `compare_runs.py --gate both --min-pass-rate 0.9
