@@ -9,7 +9,7 @@ rather than as a KeyError mid-report.
 from typing import cast
 
 from eval import runner as E
-from eval.result_schema import SCHEMA_VERSION, AttemptRecord, Fixture, FixtureResult, JsonObject, MetaCall
+from eval.result_schema import SCHEMA_VERSION, AttemptRecord, Fixture, FixtureResult, JsonObject, MetaCall, TokenCounts
 
 
 def _fixture(**over: object) -> Fixture:
@@ -82,3 +82,16 @@ def test_skipped_and_error_results_are_versioned_too() -> None:
     producer has to stamp it — not just the graded path."""
     assert E.skipped_result(_fixture(), "discovery")["schema_version"] == SCHEMA_VERSION
     assert E.error_result(_fixture(), "discovery", ValueError("boom"))["schema_version"] == SCHEMA_VERSION
+
+
+def test_cache_writes_survive_into_the_fixture_result() -> None:
+    """The adapter moved them out of `input`; an accumulator that summed only the
+    older buckets then dropped them, and a cold gpt-6-luna fixture reported three
+    of its 2413 prompt tokens."""
+    st = E.DiscoveryState(arm="discovery")
+    st.add_tokens(TokenCounts(input=3, cached_input=0, output=5, cache_write=2410))
+    st.add_tokens(TokenCounts(input=4, cached_input=2410, output=5))
+
+    result = st.to_result(_fixture(), passed=True, latency=1.0)
+
+    assert result.get("tokens") == {"input": 7, "cached_input": 2410, "output": 10, "cache_write": 2410}

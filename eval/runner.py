@@ -48,7 +48,7 @@ import yaml
 
 import lane
 from eval.assertions import check, inband_error
-from eval.cost import load_pricing, run_cost
+from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
     BOLD,
     DIM,
@@ -508,7 +508,7 @@ class DiscoveryState:
     search_score: float | None = None
     search_candidates: int | None = None
     enabled_toolsets: list[str] = field(default_factory=list)
-    tokens: TokenCounts = field(default_factory=lambda: TokenCounts(input=0, cached_input=0, output=0))
+    tokens: TokenCounts = field(default_factory=lambda: TokenCounts(input=0, cached_input=0, output=0, cache_write=0))
     # Bytes of tool-result payload the model was made to read. A tool that
     # answers correctly but returns 40k of JSON is expensive for every client,
     # and nothing else in the suite would notice.
@@ -518,9 +518,9 @@ class DiscoveryState:
     surface_tokens_peak: int = 0
 
     def add_tokens(self, turn_tokens: TokenCounts) -> None:
-        self.tokens["input"] += turn_tokens.get("input", 0)
-        self.tokens["output"] += turn_tokens.get("output", 0)
-        self.tokens["cached_input"] = self.tokens.get("cached_input", 0) + turn_tokens.get("cached_input", 0)
+        # The shared helper, so a new bucket cannot again be summed everywhere
+        # except here — which is how cache writes were first dropped per fixture.
+        add_tokens(self.tokens, turn_tokens)
 
     def record_search(self, result_text: str, expected_tool: str | None, catalog: dict[str, ToolDef]) -> bool:
         """Absorb a shopware-tool-search result. Tracks whether the expected tool
