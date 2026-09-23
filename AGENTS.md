@@ -299,6 +299,14 @@ python -m functional.runner --skip-dev-tools
 .venv/bin/python3 -m eval.runner --id disambig_count_vs_search
 .venv/bin/python3 -m eval.runner --no-system-prompt       # ad-hoc, skip system prompt
 .venv/bin/python3 -m eval.runner --output results/x.json  # custom report path
+.venv/bin/python3 -m eval.runner --arm preloaded          # the whole catalogue pinned at
+                                                          # connect time (?toolsets=all),
+                                                          # meta-tools kept. Graded like
+                                                          # discovery; compare the two for
+                                                          # what preloading buys. In CI:
+                                                          # the `preloaded_arm` dispatch
+                                                          # input or the `run-preloaded`
+                                                          # PR label. Advisory, opt-in.
 .venv/bin/python3 -m eval.runner --triage                 # re-run ONLY the failures under
                                                           # the isolated + full arms.
                                                           # In CI: nightly, the `run-triage`

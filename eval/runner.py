@@ -89,6 +89,7 @@ from eval.scoring import (
 )
 from mcp_client import (
     ADMIN,
+    ALL_TOOLSETS,
     BASE,
     META_TOOLS,
     SW_ACCESS_KEY,
@@ -108,6 +109,16 @@ from mcp_client import (
 )
 from ownership import CORE, PROMPT_SETS, breakdown, owner_of
 from toolclass import classify, is_executable, prepare_call
+
+# The arms a full eval pass may run under. `discovery` is what a client sees on a
+# plain connect; `preloaded` is what it sees connected with `?toolsets=all`. Both
+# are production configurations graded the same way — the triage arms below are
+# the diagnostic ones.
+PASS_ARMS = ("discovery", "preloaded")
+
+# Arms that withhold the meta-tools so a meta-call cannot be misgraded as a wrong
+# answer (the bug that killed the old `baseline` mode). Only used by --triage.
+DIAGNOSTIC_ARMS = frozenset({"isolated", "full"})
 
 # A placeholder resolver reads one id off the live lane; a seeding resolver
 # WRITES and yields the several ids it filled from one cart.
@@ -622,6 +633,15 @@ def run_fixture_discovery(
     terminal_tools = ({expected_tool} | acceptable) if expected_tool else acceptable
     prov = PROVIDERS[provider]
 
+    # `preloaded` pins every toolset at CONNECT time (shopware/shopware#20509),
+    # which is what a claude.ai connector configured with `?toolsets=all` sees.
+    # The endpoint is rebound for the whole fixture, not just for mcp_init:
+    # McpRequestedToolsetResolver reads the query string on every request and
+    # stores nothing in the session, so a later tools/list or tools/call sent to
+    # the plain URL would quietly fall back to the default surface mid-fixture.
+    if arm == "preloaded":
+        endpoint = endpoint.with_toolsets(ALL_TOOLSETS)
+
     # Fresh session per fixture: toolset enablement persists per Mcp-Session-Id
     # and would leak across fixtures on a shared session.
     session_id, _ = mcp_init(endpoint=endpoint)
@@ -633,6 +653,12 @@ def run_fixture_discovery(
     #   isolated   only the group the answer lives in, so the question is purely
     #              "is this description distinguishable from its siblings".
     #   full       the whole catalogue at once: maximum collision pressure.
+    #   preloaded  the whole catalogue pinned via `?toolsets=all`, meta-tools
+    #              INCLUDED. Unlike `full` this is a production configuration,
+    #              not a diagnostic one: it is exactly what a connector pinned to
+    #              all toolsets advertises, so it is graded like `discovery` and
+    #              the two are the pair worth comparing — same fixtures, same
+    #              model, catalogue found vs catalogue given.
     #
     # The two diagnostic arms withhold the meta-tools. That is the fix for the
     # bug that killed the old `baseline` mode, which left them in the catalogue
@@ -650,7 +676,12 @@ def run_fixture_discovery(
     # directly callable because the allowlist, not advertising, is the call
     # boundary. This mirrors how a real MCP client exposes discovered tools.
     catalog = {t["name"]: t for t in mcp_tools_list_all(session_id, endpoint=endpoint)}
-    if arm != "discovery":
+    # Only the DIAGNOSTIC arms withhold the meta-tools. `preloaded` keeps them,
+    # because the server advertises them alongside the pinned catalogue and a
+    # model that searches before answering is behaving exactly as a real
+    # connector's would. The agentic loop already treats a meta-call as a step
+    # rather than an answer, so nothing is misgraded by leaving them in.
+    if arm in DIAGNOSTIC_ARMS:
         catalog = {n: t for n, t in catalog.items() if n not in META_TOOLS}
         # The diagnostic arms only mean anything if the tool under test was
         # actually put in front of the model. When enabling does not surface it
@@ -1227,9 +1258,11 @@ def run_discovery_pass(
     endpoint: Endpoint = ADMIN,
     workers: int = 1,
     tool_health: dict[str, ToolHealth] | None = None,
+    arm: str = "discovery",
 ) -> list[FixtureResult]:
     tool_health = tool_health or {}
-    print(f"\n{BOLD}── Mode: discovery (default surface + agentic loop) ──{RESET}\n")
+    surface = "whole catalogue pinned via ?toolsets=all" if arm == "preloaded" else "default surface"
+    print(f"\n{BOLD}── Mode: {arm} ({surface} + agentic loop) ──{RESET}\n")
     print(f"  concurrency={workers}\n")
 
     def worker(fixture: Fixture) -> FixtureResult:
@@ -1239,7 +1272,7 @@ def run_discovery_pass(
         # negative rates across instances, not a reason to skip.)
         expected = fixture.get("expected_tool")
         if expected and expected not in available_tools:
-            result = skipped_result(fixture, "discovery")
+            result = skipped_result(fixture, arm)
             result["_line"] = render_line(result)
             return result
         # The lane could not supply an id this prompt names, so the call the
@@ -1247,7 +1280,7 @@ def run_discovery_pass(
         # to the model — the three cart fixtures failed on exactly this while
         # the model named merchant-cart-checkout correctly every time.
         if unresolved := fixture.get("unresolved_placeholder"):
-            result = skipped_result(fixture, "discovery", f"lane could not resolve {{{unresolved}}}")
+            result = skipped_result(fixture, arm, f"lane could not resolve {{{unresolved}}}")
             result["_line"] = render_line(result)
             return result
         # Registered but proven broken by the static layer. Grading a model on
@@ -1255,13 +1288,13 @@ def run_discovery_pass(
         # pays full model price to learn something one direct call already
         # established.
         if reason := unhealthy_reason(expected, tool_health):
-            result = skipped_result(fixture, "discovery", reason)
+            result = skipped_result(fixture, arm, reason)
             result["_line"] = render_line(result)
             return result
         max_steps = int(fixture.get("max_steps", default_max_steps))
         try:
             result = run_fixture_discovery(
-                provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint
+                provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint, arm=arm
             )
             attempts = 1
             # Retry once on failure: the models are nondeterministic, so a single
@@ -1269,14 +1302,14 @@ def run_discovery_pass(
             # both attempts. Skips/errors are not retried.
             if not result["passed"]:
                 retry = run_fixture_discovery(
-                    provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint
+                    provider, client, fixture, model, system_prompt, max_steps, endpoint=endpoint, arm=arm
                 )
                 attempts = 2
                 if retry["passed"]:
                     result = retry
             result["attempts"] = attempts
         except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
-            result = error_result(fixture, "discovery", exc)
+            result = error_result(fixture, arm, exc)
         result["_line"] = render_line(result)
         return result
 
@@ -1375,6 +1408,18 @@ def build_parser() -> argparse.ArgumentParser:
     # Kept as a flag rather than deleted so existing invocations and the docs'
     # `--modes discovery` keep working; `discovery` is now the only legal value.
     parser.add_argument("--modes", default="discovery", help="Only 'discovery' is supported (baseline was removed)")
+    parser.add_argument(
+        "--arm",
+        choices=PASS_ARMS,
+        default="discovery",
+        help=(
+            "What the model is shown before it says anything. `discovery`: the default surface, "
+            "tools found through the meta-tools. `preloaded`: the whole catalogue pinned at "
+            "connect time via ?toolsets=all (shopware/shopware#20509), meta-tools included — "
+            "what a connector pinned to every toolset sees. Run both to measure what connect-time "
+            "selection buys in accuracy, tokens and steps."
+        ),
+    )
     parser.add_argument(
         "--max-steps",
         type=int,
@@ -1977,6 +2022,7 @@ def run_suite(args: argparse.Namespace) -> int:
             endpoint=endpoint,
             workers=concurrency,
             tool_health=tool_health,
+            arm=cast(str, args.arm),
         )
 
     # `_line` is progress-display scaffolding, not part of the report contract.
