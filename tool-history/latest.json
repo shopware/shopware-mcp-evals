@@ -290,13 +290,16 @@
       "inputSchema": {
         "properties": {
           "aggregations": {
+            "description": "A JSON ARRAY of Admin API aggregation definitions, as a string. Each element needs \"name\" and \"type\"; every type except \"filter\" also needs \"field\" \u2014 e.g. [{\"name\":\"order_count\",\"type\":\"count\",\"field\":\"id\"}] to count orders, or [{\"name\":\"revenue\",\"type\":\"sum\",\"field\":\"amountTotal\"}] to total them. A \"filter\" element takes no \"field\": it wraps another aggregation, so it needs \"filter\" (an array of filter definitions) and \"aggregation\" (the nested definition to apply inside it). A bare object rather than an array is the most common mistake and is rejected.",
             "type": "string"
           },
           "entity": {
+            "description": "Entity name to aggregate over, e.g. \"order\" or \"product\". See the shopware://entities resource for the full list.",
             "type": "string"
           },
           "filters": {
             "default": "[]",
+            "description": "A JSON array of Admin API filter definitions, as a string, narrowing what is aggregated \u2014 e.g. [{\"type\":\"equals\",\"field\":\"stateId\",\"value\":\"...\"}]. Defaults to no filter.",
             "type": "string"
           }
         },
@@ -337,12 +340,15 @@
         "properties": {
           "criteria": {
             "default": "{}",
+            "description": "A JSON OBJECT of Admin API criteria, as a string \u2014 most usefully \"associations\" to include related data, e.g. {\"associations\":{\"lineItems\":{}}} on an order, and \"includes\" to trim the response. Defaults to no criteria.",
             "type": "string"
           },
           "entity": {
+            "description": "Entity name to read, e.g. \"order\" or \"product\". See the shopware://entities resource for the full list.",
             "type": "string"
           },
           "id": {
+            "description": "The entity's UUID (32-character hex). To find a record by any other field, use shopware-entity-search instead.",
             "type": "string"
           }
         },
@@ -370,26 +376,31 @@
       "name": "shopware-entity-schema"
     },
     {
-      "description": "Search and filter Shopware entities \u2014 use this to look up a product by its productNumber or any exact field value, including as the first step in Storefront cart/checkout workflows. For count/sum/average reporting, use shopware-entity-aggregate instead (the _meta.total here is pagination metadata, not a reporting count). Accepts Admin API criteria JSON. Returns {success, data: [...], _meta: {total, page, limit}}. If you don't already know the field names, shopware-entity-schema will tell you.",
+      "description": "Search, list and filter Shopware entities of any type \u2014 orders, products, customers, categories and the rest. Use this to LIST or page through records (\"the last 10 orders\", \"all customers in Berlin\"), and to look one up by productNumber or any other exact field value, including as the first step in Storefront cart/checkout workflows. Sort with criteria.sort, e.g. [{\"field\":\"orderDateTime\",\"order\":\"DESC\"}]. For count/sum/average reporting, use shopware-entity-aggregate instead (the _meta.total here is pagination metadata, not a reporting count). Accepts Admin API criteria JSON. Returns {success, data: [...], _meta: {total, page, limit}}. If you don't already know the field names, shopware-entity-schema will tell you.",
       "inputSchema": {
         "properties": {
           "criteria": {
             "default": "{}",
+            "description": "A JSON OBJECT of Admin API criteria, as a string \u2014 \"filter\", \"sort\", \"associations\", \"includes\". E.g. {\"sort\":[{\"field\":\"orderDateTime\",\"order\":\"DESC\"}]} for the most recent first, or {\"filter\":[{\"type\":\"equals\",\"field\":\"productNumber\",\"value\":\"SW10001\"}]} to look one up. Defaults to no criteria.",
             "type": "string"
           },
           "entity": {
+            "description": "Entity name to search, e.g. \"order\", \"product\" or \"customer\". See the shopware://entities resource for the full list.",
             "type": "string"
           },
           "limit": {
             "default": 25,
+            "description": "Records per page, starting at 1. The upper bound is the shop's configured Admin API limit (shopware.api.max_limit); exceeding it returns an error naming the real maximum.",
             "type": "integer"
           },
           "page": {
             "default": 1,
+            "description": "Page number, starting at 1.",
             "type": "integer"
           },
           "term": {
             "default": "",
+            "description": "Free-text search across the entity's searchable fields. Prefer an exact \"filter\" in `criteria` when you know the field.",
             "type": "string"
           }
         },
@@ -406,12 +417,15 @@
         "properties": {
           "dryRun": {
             "default": true,
+            "description": "Validate without writing. Leave true first, then call again with false to persist.",
             "type": "boolean"
           },
           "entity": {
+            "description": "Entity name to write, e.g. \"product\" or \"category\". See the shopware://entities resource for the full list.",
             "type": "string"
           },
           "payload": {
+            "description": "The entity's fields as a JSON string: one OBJECT, or an ARRAY of objects to write several records in a single call. Include \"id\" on a record to UPDATE it, omit it to CREATE one \u2014 e.g. {\"id\":\"...\",\"name\":\"Summer Sale\"} renames an existing category, and [{...},{...}] upserts both. shopware-entity-schema lists the field names and which are required.",
             "type": "string"
           }
         },
@@ -541,18 +555,22 @@
         "properties": {
           "action": {
             "default": "get",
+            "description": "\"get\" to read the current theme config, \"update\" to change it.",
             "type": "string"
           },
           "config": {
             "default": "{}",
+            "description": "A JSON OBJECT of theme config values to write, as a string \u2014 keyed by config field name, e.g. {\"sw-color-brand-primary\":{\"value\":\"#189eff\"}}. Only read by action \"update\"; call \"get\" first to see the field names and their current shape.",
             "type": "string"
           },
           "dryRun": {
             "default": true,
+            "description": "Preview the change without writing. Leave true first, then call again with false to persist.",
             "type": "boolean"
           },
           "salesChannelId": {
             "default": "",
+            "description": "The sales channel's UUID, or its name as shown in the admin, e.g. \"Storefront\". See the shopware://sales-channels resource.",
             "type": "string"
           }
         },
