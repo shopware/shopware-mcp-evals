@@ -280,8 +280,13 @@ jobs:
               # reader needs "these 11 descriptions changed" first.
               git show HEAD:tool-history/latest.json > /tmp/baseline.json
               {
+                # A neutral heading, because the file can differ without any
+                # change eval.drift counts as significant (a title, an
+                # annotation), and it now prints its heading in that case too.
+                # "Drift detected" above "No catalogue drift" would contradict
+                # itself in the one place a reader looks for the verdict.
                 python -m eval.drift --old /tmp/baseline.json --new tool-history/latest.json \
-                  --heading "Tool description drift detected"
+                  --heading "Tool catalogue vs the committed baseline"
                 echo ""
                 echo "Shopware ref: \`${{ steps.lane.outputs.shopware_ref }}\` → \`${{ steps.lane.outputs.shopware_sha }}\`"
                 echo ""

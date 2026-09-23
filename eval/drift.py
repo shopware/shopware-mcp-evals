@@ -124,9 +124,17 @@ def is_significant(s: DriftSummary) -> bool:
 
 
 def render(s: DriftSummary, heading: str = "Tool description drift") -> str:
-    """Markdown, ordered by how much a reader should care."""
+    """Markdown, ordered by how much a reader should care.
+
+    The heading is emitted in the no-drift case too. The reconciliation PR body
+    concatenates one report per catalogue, and a headless "No catalogue drift"
+    landed directly under the admin section's drift list, where it read as a
+    verdict contradicting the list above it rather than as the Store result it
+    was. That is #47's confusion in mirror image — #47 said "no drift" while the
+    Store catalogue had moved — and the fix is the same: say which catalogue.
+    """
     if not is_significant(s):
-        return "No catalogue drift vs the committed baseline.\n"
+        return f"## {heading}\n\nNo catalogue drift vs the committed baseline.\n"
 
     out = [f"## {heading}", ""]
 

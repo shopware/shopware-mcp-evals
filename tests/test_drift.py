@@ -45,6 +45,20 @@ def test_identical_snapshots_are_not_drift() -> None:
     assert "No catalogue drift" in D.render(s)
 
 
+def test_an_empty_report_still_says_which_catalogue_it_is_about() -> None:
+    """The reconciliation body stacks one report per catalogue. On #54 the Store
+    report was empty, and without a heading its "No catalogue drift" sat directly
+    under the admin drift list, reading as a verdict that contradicted it."""
+    s = D.summarise(snap(), snap())
+    body = D.render(D.summarise(snap(), snap(tools=[])), "What moved upstream") + D.render(
+        s, "What moved on the Store endpoint (/store-api/_mcp)"
+    )
+
+    assert D.render(s, "Store").startswith("## Store\n")
+    store = body.index("## What moved on the Store endpoint")
+    assert body.index("No catalogue drift") > store, "the no-drift line must sit under its own heading"
+
+
 def test_a_changed_description_is_named() -> None:
     s = D.summarise(snap([tool("a", "before")]), snap([tool("a", "after")]))
 
