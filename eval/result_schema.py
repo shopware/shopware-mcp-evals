@@ -124,6 +124,10 @@ class TokenCounts(TypedDict, total=False):
     input: Required[int]
     output: Required[int]
     cached_input: int
+    # Prompt tokens written into the cache on this call. Billed above the input
+    # rate by the models that charge for it (gpt-5.6-*, gpt-6-*: 1.25x), and
+    # reported automatically — no opt-in. Absent from reports written before it.
+    cache_write: int
 
 
 class AttemptRecord(TypedDict, total=False):
@@ -587,6 +591,9 @@ class ModelPrice(TypedDict, total=False):
     input: float
     output: float
     cached_input: float
+    # Omitted for a model that does not bill writes separately; they then cost
+    # the input rate, which is what they are for such a model.
+    cache_write: float
     unverified: bool
 
 

@@ -223,7 +223,7 @@ def test_a_fixture_reaching_its_expected_tool_passes() -> None:
 
     assert result["selected_tool"] == TOOL and result["passed"] is True
     assert result["mode"] == "discovery"
-    assert result.get("tokens") == {"input": 120, "cached_input": 0, "output": 8}
+    assert result.get("tokens") == {"input": 120, "cached_input": 0, "output": 8, "cache_write": 0}
     assert (result.get("latency_s") or 0) >= 0
 
 

@@ -272,7 +272,9 @@ scripts/trunk-lane.sh
 scripts/trunk-lane.sh --eval
 
 # Registry: does the server's declared ACL agree with toolclass? Admin only —
-# debug:mcp has no endpoint flag and lists no Store tools (shopware/shopware#18848).
+# not because debug:mcp cannot see the Store registry (`--scope=store-api` has
+# listed it since shopware/shopware#18848), but because registry_check does not
+# read that table yet.
 bin/console debug:mcp --tools --no-ansi > /tmp/m.txt
 python -m eval.registry_check --from-file /tmp/m.txt
 
@@ -284,6 +286,7 @@ python -m eval.preflight --endpoint store
 python -m functional.runner
 python -m functional.runner --skip-media-upload
 python -m functional.runner --skip-dev-tools
+python -m functional.runner --provision-principals  # CREATES integrations, users, a role (deleted after)
 
 # Layer 2 — LLM eval. Discovery mode only: default surface + agentic meta-tool
 # loop. There was a `baseline` mode (full catalogue, single shot); it was removed
@@ -431,10 +434,28 @@ origins on those headers, and which one you use decides what you can see:
 shopware/shopware#20600 made an unset allowlist grant nothing rather than
 everything, and an integration never bypasses it — not even one flagged `admin`,
 which only waives ACL. So **the lane authenticates as an administrator user**
-(`setup-lane` mints a `SWUA…` key for `admin`), and a second integration with no
-allowlist is minted purely so `verify_allowlist_is_enforced` can assert the
-server still refuses it. A suite whose own principal is unrestricted cannot
-otherwise tell that enforcement is working.
+(`setup-lane` mints a `SWUA…` key for `admin`).
+
+A suite whose own principal is unrestricted cannot tell whether the allowlist
+works at all, so `--provision-principals` (CI and `trunk-lane.sh` pass it)
+creates the principals that can, checks each one on every surface
+(tools/list, `?toolsets=all`, toolsets-list, toolset-enable, tool-search, resources/list,
+prompts/list, a direct call), and deletes them again:
+
+| principal | allowlist | must reach |
+|---|---|---|
+| integration, non-admin user | unset | the meta-tools, nothing else; every call refused |
+| integration | "All capabilities" | exactly what the admin user reaches |
+| integration, non-admin user | one tool | that tool; a tool from another toolset is refused |
+
+**"All capabilities" on an integration does not save `null`.** Since #20600 the
+Administration writes every name `/api/_action/mcp/capabilities` returned when
+the dialog opened (`fullSelection()`). So it is a snapshot: a tool added later is
+not granted, and the switch then reads as off. `functional/principals.py` builds
+the "All" principal from the same route, so it holds the list the switch would
+write. An integration that shows "All" while toolsets-list answers `[]` most
+likely still has `NULL` stored, and the admin JS rendering it is a build from
+before #20600.
 
 The session must be initialized with `method: initialize` before any other call;
 the `Mcp-Session-Id` response header scopes toolset enablement.
@@ -447,6 +468,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
 | `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
+| `functional/principals.py` | The allowlist matrix's throwaway integrations, users and ACL role, created through the Admin API with the suite's own key (`client_credentials` accepts `SWUA…`) and deleted in a `finally`. Behind `--provision-principals` |
 | `functional/customer.py` | Logs the customer half in, registering the account through the Store API on first use. The context token is only in the `sw-context-token` header, and `storefrontUrl` has to come from the sales channel — both cost a debugging round to find |
 | `eval/preflight.py` | One read-only call, no model, ~1s. Fails with a named cause and, on the Store endpoint, probes the UCP profile URI — the one cause the error text can never name |
 | `eval/registry_check.py` | The server's declared ACL privileges against `toolclass`. Two independent sources disagreeing is what catches a tool wrongly filed as READ_ONLY, which would then be executed for real |
@@ -485,6 +507,12 @@ and the thirteen UCP buyer-journey tools (`create_cart`, `search_catalog`,
 `complete_checkout`, …). Since agentic-commerce 1.3.0 those are advertised on
 the **default surface** rather than deferred behind toolsets, so `store-api` —
 holding `shopware-store-api-context` — is the only toolset on that endpoint.
+That is a plugin workaround, not the design: core means Store to match admin
+(shopware/shopware#18298), and the plugin got there by claiming core's reserved
+`discovery` group. Fix proposed in shopware/agentic-commerce#254 and
+shopware/shopware#20725 — treat the Store default-surface exception in
+`functional/runner.py` and the missing `expected_toolset` on UCP fixtures as
+temporary.
 The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
 provisioned state; tool *selection* for those is covered by the LLM eval.
 

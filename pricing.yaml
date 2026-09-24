@@ -13,23 +13,46 @@
 # `cached_input` is the rate for a cached prompt prefix. It is not an
 # optimisation this harness opts into — OpenAI caches automatically above ~1k
 # tokens — but the discount lands on the bill either way, so it is priced.
-# Cache *writes* are not modelled: they only occur with an explicit
-# cache_control, which this harness never sets. If that changes, add the bucket.
+# `cache_write` is the rate for prompt tokens written into the cache. The
+# gpt-5.6-* and gpt-6-* models bill writes automatically at 1.25x input and
+# report them as `cache_write_tokens`; a model without the key has its writes
+# (if it reports any) priced at its input rate.
+#
+# All OpenAI rates: Standard tier, short context, from
+# https://platform.openai.com/docs/pricing.
 
-verified: "2026-07-30"
+verified: "2026-09-23"
 
 models:
-  # Primary gating model (eval/runner.py PROVIDER_DEFAULTS["openai"]).
-  # The input rate is the one quoted in that module's own comment.
+  # The primary until 2026-09-23. Output and cached input were estimates until 2026-09-23 (3.00 and 0.375),
+  # which put this model's share of a run ~55% above the bill: cached input is
+  # two thirds of its input tokens.
   gpt-5.4-mini:
     input: 0.75
-    output: 3.00
-    cached_input: 0.375
-    # output and cached_input are estimates from the usual mini-tier ratios and
-    # have NOT been checked against the price list. Output is ~0.5% of this
-    # suite's token volume so the total barely moves, but the flag renders in
-    # the summary rather than being a comment nobody reads.
-    unverified: true
+    output: 4.50
+    cached_input: 0.075
+
+  # Candidates that were trialled against it.
+  gpt-5.4-nano:
+    input: 0.20
+    output: 1.25
+    cached_input: 0.02
+  gpt-5-mini:
+    input: 0.25
+    output: 2.00
+    cached_input: 0.025
+  gpt-5.6-luna:
+    input: 0.20
+    output: 1.20
+    cached_input: 0.02
+    cache_write: 0.25
+  # Primary gating model (eval/runner.py PROVIDER_DEFAULTS["openai"]).
+  # Callable with the repo's key although /v1/models does not list it.
+  gpt-6-luna:
+    input: 0.10
+    output: 0.50
+    cached_input: 0.01
+    cache_write: 0.125
 
   # Pinned second validator.
   gpt-4o-mini:

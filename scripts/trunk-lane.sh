@@ -69,7 +69,7 @@ echo "NOTE: --allow-mutations places a REAL ORDER on ${SW_BASE_URL}."
 
 echo
 echo "=== static checks (admin)"
-"${PYTHON}" -m functional.runner --endpoint admin || true
+"${PYTHON}" -m functional.runner --endpoint admin --provision-principals || true
 
 if [ "${RUN_EVAL}" != "true" ]; then
   echo

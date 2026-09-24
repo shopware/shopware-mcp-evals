@@ -896,3 +896,12 @@ def test_the_catalogue_lint_is_rendered_here_not_in_a_second_workflow() -> None:
     assert "<summary>Tool catalogue lint — static description findings</summary>" in text
     # Its own H2 must not compete with this page's.
     assert "## Tool catalogue lint" not in text
+
+
+def test_cost_section_names_cache_writes_only_when_there_are_some() -> None:
+    written = cost_block(tokens={"input": 1_500_000, "cached_input": 200_000, "output": 12_000, "cache_write": 300_000})
+
+    assert "1.5M input (200k cached, 300k cache writes)" in S.render_cost(
+        [row("s", "gpt-6-luna", 0.9, 10, cost=written)]
+    )
+    assert "cache writes" not in S.render_cost([row("s", "m", 0.9, 10, cost=cost_block())])

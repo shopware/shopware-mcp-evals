@@ -447,8 +447,8 @@ something else.
 # Anthropic (default), claude-sonnet-4-6
 python -m eval.runner
 
-# OpenAI — gpt-5.4-mini is the CI primary and the openai default
-python -m eval.runner --provider openai --model gpt-5.4-mini
+# OpenAI — gpt-6-luna is the CI primary and the openai default
+python -m eval.runner --provider openai --model gpt-6-luna
 
 # Second validator in CI — an older-generation model on the same fixtures. A
 # fixture both models miss points at the tool description; one both pass is noise.
@@ -817,10 +817,17 @@ are not installed in CI, so they are outside the tested catalogue.
 The **Store API MCP endpoint** (`/store-api/_mcp`) is covered experimentally: the
 UCP buyer-journey tools (`create_cart`, `search_catalog`, …) and
 `shopware-store-api-context` come from the `shopware/agentic-commerce` plugin.
-Unlike admin, the UCP tools are advertised on the default surface rather than
-deferred — a UCP client is specified to find them by name at connect time — so
-only `shopware-store-api-context` sits behind a toolset. It authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`) plus
-a context token. Run it with:
+For now, unlike admin, the UCP tools are advertised on the default surface
+rather than deferred, so only `shopware-store-api-context` sits behind a
+toolset. That is not the intended design: core means both endpoints to work
+identically ([shopware/shopware#18298](https://github.com/shopware/shopware/pull/18298)),
+and the plugin reached the default surface by claiming core's reserved
+`discovery` group so UCP agents on its `/ucp/mcp` proxy would see its tools.
+The fix is tracked in [shopware/agentic-commerce#254](https://github.com/shopware/agentic-commerce/issues/254)
+and [shopware/shopware#20725](https://github.com/shopware/shopware/issues/20725);
+until it lands the Store suite measures selection among visible tools, not
+discovery. It authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`)
+plus a context token. Run it with:
 
 ```bash
 python -m functional.runner --endpoint store               # Layer 1 (discovery mechanics + context)
@@ -910,18 +917,20 @@ plugin code. The trade-off is that plugin-side churn can turn a run red without
 a change here — pin a single run via the `dev_tools_ref` / `merchant_tools_ref`
 dispatch inputs.
 
-`shopware/agentic-commerce` is **temporarily pinned** to
-`fix/mcp-tool-error-visibility-and-catalog-lookup-ids`
-([#154](https://github.com/shopware/agentic-commerce/pull/154)) and checked out
-unless `run_store=false`. Its default branch has neither in-band tool errors nor
-`dryRun`, so CI saw `-32603 Error while executing tool` with an empty body where
-a lane with #154 sees `{"success":false,"error":{…,"violations":[…]}}`. That
-single difference made a local run and a CI run disagree for an afternoon.
-**Remove the pin when #154 merges.**
+`shopware/agentic-commerce` tracks its default branch too, checked out unless
+`run_store=false`. It was pinned for a while to the branch of
+[#154](https://github.com/shopware/agentic-commerce/pull/154), because the
+default branch then had neither in-band tool errors nor `dryRun` — CI saw
+`-32603 Error while executing tool` with an empty body where a lane with #154
+saw `{"success":false,"error":{…,"violations":[…]}}`, and a local run and a CI
+run disagreed for an afternoon over it. #154 merged on 2026-08-04 and the pin
+was removed.
 
-Related and also open: [shopware/shopware#18848](https://github.com/shopware/shopware/pull/18848)
-adds `debug:mcp --scope=store-api`. Until it lands, `eval/registry_check.py` sees
-the 30 admin tools and none of the Store ones.
+[shopware/shopware#18848](https://github.com/shopware/shopware/pull/18848)
+(merged 2026-08-04) made `debug:mcp` list the Store registry, reachable as
+`debug:mcp --scope=store-api`. `eval/registry_check.py` still reads only the
+admin table, so it checks the admin tools and none of the Store ones —
+extending it to the Store scope is open.
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the

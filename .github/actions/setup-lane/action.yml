@@ -57,12 +57,6 @@ outputs:
   sw_secret_key:
     description: Secret for the admin-user access key.
     value: ${{ steps.integration.outputs.secret_key }}
-  blocked_access_key:
-    description: An integration with no mcp_allowlist, which the server must refuse. Drives the fail-closed check.
-    value: ${{ steps.blocked_integration.outputs.access_key }}
-  blocked_secret_key:
-    description: Secret for the no-allowlist integration.
-    value: ${{ steps.blocked_integration.outputs.secret_key }}
   sc_access_key:
     description: Sales-channel access key for the Store endpoint.
     value: ${{ steps.sc.outputs.sc_access_key }}
@@ -764,43 +758,6 @@ runs:
           -H "Authorization: Bearer ${TOKEN}" \
           -H 'Content-Type: application/json' \
           -d "{\"userId\":\"${USER_ID}\",\"accessKey\":\"${ACCESS_KEY}\",\"secretAccessKey\":\"${SECRET_KEY}\"}" \
-          > /dev/null
-
-        echo "::add-mask::${SECRET_KEY}"
-        {
-          echo "access_key=${ACCESS_KEY}"
-          echo "secret_key=${SECRET_KEY}"
-        } >> "$GITHUB_OUTPUT"
-
-    # Kept even though the suite no longer authenticates with it: it is the
-    # subject of the fail-closed check in functional/runner.py. #20600 is the
-    # kind of change that arrives without warning, and the only way to know the
-    # allowlist is still being enforced is to hold a principal it should block
-    # and confirm that it does. Without this the lane would simply have stopped
-    # covering the integration path, silently.
-    - name: Create a no-allowlist integration (the fail-closed probe)
-      shell: bash
-      id: blocked_integration
-      env:
-        APP_URL: ${{ inputs.app_url }}
-      run: |
-        set -euo pipefail
-
-        ACCESS_KEY="SWIA$(openssl rand -hex 12 | tr 'a-f' 'A-F')"
-        SECRET_KEY="$(openssl rand -hex 32)"
-
-        TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \
-          -H 'Content-Type: application/json' \
-          -d '{"grant_type":"password","client_id":"administration","scope":"write","username":"admin","password":"shopware"}' \
-          | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
-
-        # admin+writeAccess deliberately: the point is that an integration with
-        # the widest ACL Shopware offers is STILL blocked when its allowlist is
-        # unset. A locked-down integration would prove nothing about #20600.
-        curl -fsS -X POST "${APP_URL}/api/integration" \
-          -H "Authorization: Bearer ${TOKEN}" \
-          -H 'Content-Type: application/json' \
-          -d "{\"label\":\"mcp-evals-blocked\",\"accessKey\":\"${ACCESS_KEY}\",\"secretAccessKey\":\"${SECRET_KEY}\",\"admin\":true,\"writeAccess\":true}" \
           > /dev/null
 
         echo "::add-mask::${SECRET_KEY}"

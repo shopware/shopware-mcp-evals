@@ -84,7 +84,7 @@ def test_an_unknown_token_bucket_is_billed_at_nothing_rather_than_crashing() -> 
 
 def test_token_totals_ignore_fixtures_that_never_reached_the_model() -> None:
     totals = C.token_totals([result("a"), bare("skipped", skipped=True), bare("errored", error="boom")])
-    assert totals == {"input": 1000, "cached_input": 0, "output": 100}
+    assert totals == {"input": 1000, "cached_input": 0, "output": 100, "cache_write": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -249,3 +249,31 @@ def test_a_model_used_by_two_suites_is_named_once() -> None:
     pricing: Pricing = {"models": {"m1": PRICES | {"unverified": True}}}
     dupes = [C.run_cost([result("a")], "m1", pricing), C.run_cost([result("b")], "m1", pricing)]
     assert C.combine(dupes)["unverified_models"] == ["m1"]
+
+
+# ---------------------------------------------------------------------------
+# Cache writes
+# ---------------------------------------------------------------------------
+def test_cache_writes_are_priced_at_their_own_rate() -> None:
+    tokens = TokenCounts(input=0, cached_input=0, output=0, cache_write=1_000_000)
+
+    assert C.cost_usd(tokens, {"input": 0.10, "output": 0.5, "cached_input": 0.01, "cache_write": 0.125}) == 0.125
+
+
+def test_cache_writes_fall_back_to_the_input_rate() -> None:
+    """A model with no separate write price bills a written token as input."""
+    tokens = TokenCounts(input=0, cached_input=0, output=0, cache_write=1_000_000)
+
+    assert C.cost_usd(tokens, PRICES) == 1.0
+
+
+def test_cache_writes_are_summed_and_tolerated_when_absent() -> None:
+    """Reports from before the bucket existed carry no key and must still add up."""
+    results = [
+        result("a", tokens=TokenCounts(input=10, cached_input=0, output=1, cache_write=40)),
+        result("b", tokens=TokenCounts(input=5, cached_input=2, output=1)),
+    ]
+
+    assert C.token_totals(results) == {"input": 15, "cached_input": 2, "output": 2, "cache_write": 40}
+    run = C.run_cost(results, "m1", PRICING)
+    assert C.combine([run, run])["tokens"].get("cache_write") == 80

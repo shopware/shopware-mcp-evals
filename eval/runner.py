@@ -24,7 +24,7 @@ was measuring the grading difference between the two modes.
 
 Usage:
     python -m eval.runner                                  # both modes, Anthropic
-    python -m eval.runner --provider openai --model gpt-5.4-mini
+    python -m eval.runner --provider openai --model gpt-6-luna
     python -m eval.runner --modes discovery --max-steps 8
     python -m eval.runner --category disambiguation
     python -m eval.runner --id disambig_count_vs_search
@@ -48,7 +48,7 @@ import yaml
 
 import lane
 from eval.assertions import check, inband_error
-from eval.cost import load_pricing, run_cost
+from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
     BOLD,
     DIM,
@@ -328,6 +328,8 @@ def anthropic_turn(
             input=response.usage.input_tokens,
             cached_input=_sdk_int(response.usage, "cache_read_input_tokens"),
             output=response.usage.output_tokens,
+            # Only non-zero with cache_control, which this harness never sets.
+            cache_write=_sdk_int(response.usage, "cache_creation_input_tokens"),
         ),
     }
 
@@ -338,6 +340,15 @@ def anthropic_turn(
 # OpenAI-compatible endpoints (the `github` provider) working — Mistral there
 # only knows `max_tokens`.
 _OUTPUT_CAP_PARAM: dict[str, str] = {}
+
+# Models that refuse function tools under their default reasoning effort on
+# chat completions, and have to be told `reasoning_effort: "none"`. Measured on
+# gpt-6-luna: its default and "low" both answer 400 ("Function tools with
+# reasoning_effort are not supported ... set reasoning_effort to 'none'"), and
+# the first trial graded 0/96 on it. "none" is also where gpt-5.4-mini and
+# gpt-5.4-nano already sit here — they report 0 reasoning tokens by default —
+# so this compares like with like rather than handicapping the model.
+_REASONING_OFF: set[str] = set()
 
 
 def openai_turn(
@@ -350,10 +361,19 @@ def openai_turn(
     """One assistant turn (system prompt must already be in messages)."""
     sdk = cast(_OpenAIClient, client)
     kwargs: JsonObject = {"model": model, "tools": tools, "tool_choice": "auto", "messages": messages}
+    if model in _REASONING_OFF:
+        kwargs["reasoning_effort"] = "none"
     param = _OUTPUT_CAP_PARAM.get(model, "max_completion_tokens")
     try:
         response = sdk.chat.completions.create(**kwargs, **{param: 1024})
-    except Exception as exc:  # noqa: BLE001 — retried below, re-raised if it isn't the cap param
+    except Exception as exc:  # noqa: BLE001 — retried below, re-raised if it isn't a known probe
+        # Keyed on what THIS request sent, not on the shared set: fixtures run
+        # concurrently, and a call that went out before another thread learned
+        # the rule still has to retry. Checking the set instead errored the
+        # first four fixtures of every suite on the second gpt-6-luna trial.
+        if "reasoning_effort" not in kwargs and "reasoning_effort" in str(exc) and "'none'" in str(exc):
+            _REASONING_OFF.add(model)
+            return openai_turn(client, model, _system_prompt, messages, tools)
         other = "max_tokens" if param == "max_completion_tokens" else "max_completion_tokens"
         if model in _OUTPUT_CAP_PARAM or param not in str(exc):
             raise
@@ -386,7 +406,13 @@ def openai_turn(
     # over ~1k tokens with no opt-in, so this is not zero even though this
     # harness never sets cache_control: it is a discount we receive whether or
     # not we asked for it, and ignoring it would overstate the bill.
-    cached = _sdk_int(_sdk_attr(response.usage, "prompt_tokens_details"), "cached_tokens")
+    details = _sdk_attr(response.usage, "prompt_tokens_details")
+    cached = _sdk_int(details, "cached_tokens")
+    # Also inside `prompt_tokens`, and billed above the input rate by the models
+    # that report it (measured on gpt-6-luna: 2410 of 2413 prompt tokens on a
+    # cold call, then 2410 cached on the repeat). Left in `input`, it would be
+    # priced 20% low on every cold prefix.
+    written = _sdk_int(details, "cache_write_tokens")
     return {
         "tool_calls": tool_calls,
         "assistant_message": assistant_message,
@@ -395,9 +421,10 @@ def openai_turn(
         ],
         "stop_reason": response.choices[0].finish_reason,
         "tokens": TokenCounts(
-            input=max(response.usage.prompt_tokens - cached, 0),
+            input=max(response.usage.prompt_tokens - cached - written, 0),
             cached_input=cached,
             output=response.usage.completion_tokens,
+            cache_write=written,
         ),
     }
 
@@ -499,7 +526,7 @@ class DiscoveryState:
     search_score: float | None = None
     search_candidates: int | None = None
     enabled_toolsets: list[str] = field(default_factory=list)
-    tokens: TokenCounts = field(default_factory=lambda: TokenCounts(input=0, cached_input=0, output=0))
+    tokens: TokenCounts = field(default_factory=lambda: TokenCounts(input=0, cached_input=0, output=0, cache_write=0))
     # Bytes of tool-result payload the model was made to read. A tool that
     # answers correctly but returns 40k of JSON is expensive for every client,
     # and nothing else in the suite would notice.
@@ -509,9 +536,9 @@ class DiscoveryState:
     surface_tokens_peak: int = 0
 
     def add_tokens(self, turn_tokens: TokenCounts) -> None:
-        self.tokens["input"] += turn_tokens.get("input", 0)
-        self.tokens["output"] += turn_tokens.get("output", 0)
-        self.tokens["cached_input"] = self.tokens.get("cached_input", 0) + turn_tokens.get("cached_input", 0)
+        # The shared helper, so a new bucket cannot again be summed everywhere
+        # except here — which is how cache writes were first dropped per fixture.
+        add_tokens(self.tokens, turn_tokens)
 
     def record_search(self, result_text: str, expected_tool: str | None, catalog: dict[str, ToolDef]) -> bool:
         """Absorb a shopware-tool-search result. Tracks whether the expected tool
@@ -1014,9 +1041,21 @@ PROVIDERS: dict[str, Provider] = {
     # a generation removed from gpt-4o-mini while being cheaper than gpt-4o
     # ($0.75 vs ~$2.50 per 1M input) at the same latency; measured on the 24
     # disambiguation fixtures it scored 19/19 against gpt-4o's 18/19.
+    #
+    # gpt-6-luna since 2026-09-23, on a clean trial (run 35868771852, 0 errors)
+    # over all 96 admin and 45 Store fixtures: primary 98% (core 33/33) against
+    # gpt-5.4-mini's 98%, and 97% without the context prompt against 91%. It is
+    # weaker on two advisory arms — core prompt only 88% (92%), Store 89% (93%) —
+    # and its one fixture failed by both models is a negative where it hit the
+    # step cap still searching, not a wrong pick. ~7x cheaper: $0.10 / $0.01
+    # cached / $0.50 out against $0.75 / $0.075 / $4.50. It needs
+    # reasoning_effort "none" to take function tools on chat completions;
+    # openai_turn learns that (see _REASONING_OFF).
+    # gpt-5.4-nano was the other candidate: 97% primary, but 82-86% on the
+    # advisory arms and two fixtures failed by both models.
     "openai": Provider(
         name="openai",
-        default_model="gpt-5.4-mini",
+        default_model="gpt-6-luna",
         credential_env="OPENAI_API_KEY",
         system_as_param=False,
         tools_attr="tools_for_openai",
