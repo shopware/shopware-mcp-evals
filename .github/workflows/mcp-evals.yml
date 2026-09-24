@@ -722,15 +722,18 @@ jobs:
   # ---------------------------------------------------------------------------
   # 1b. The Redis session store — the production setup for more than one
   # worker, which no other job runs. Its own lane because the store is fixed
-  # when the container compiles. No model, no credit, so it gates.
+  # when the container compiles. No model, no credit, so it gates — including
+  # the nightly auto-merge: eval/reconcile.py requires it, so a trunk commit
+  # that breaks Redis-backed sessions is not pinned unseen.
   #
-  # Parallel to `static` rather than behind it, and therefore on its own
-  # resolution of the ref: nothing downstream reads this verdict, so it cannot
-  # be the commit-A-measured-on-B problem the eval jobs avoid by waiting.
+  # Behind `static`, on the commit static resolved, for the same reason as the
+  # eval jobs: a verdict that decides whether commit A is pinned has to be
+  # measured on A. It runs alongside them, so the wait costs no wall clock.
   # ---------------------------------------------------------------------------
   session-store:
     name: Redis session store
-    if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'run-evals') && !github.event.pull_request.head.repo.fork) }}
+    needs: static
+    if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -750,7 +753,7 @@ jobs:
         uses: ./.github/actions/setup-lane
         with:
           shopware_repo: ${{ env.SHOPWARE_REPO }}
-          shopware_ref: ${{ github.event.inputs.shopware_ref }}
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
           event_name: ${{ github.event_name }}
           app_url: ${{ env.APP_URL }}
           # Only for the sales-channel key, which setup-lane mints alongside the
@@ -1241,7 +1244,7 @@ jobs:
   # ---------------------------------------------------------------------------
   report:
     name: Report
-    needs: [static, admin-eval, store-eval]
+    needs: [static, session-store, admin-eval, store-eval]
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1480,6 +1483,7 @@ jobs:
           # eval/reconcile.py, which refuses to auto-merge on anything but success.
           STATIC_RESULT: ${{ needs.static.result }}
           ADMIN_EVAL_RESULT: ${{ needs.admin-eval.result }}
+          SESSION_STORE_RESULT: ${{ needs.session-store.result }}
           STORE_SNAPSHOT_RESULT: ${{ needs.static.outputs.store_snapshot }}
           MERGE_TOKEN: ${{ steps.merge_token.outputs.token }}
         run: |
@@ -1651,6 +1655,7 @@ jobs:
           AUTO_MERGE=false
           if python -m eval.reconcile --staged "${STAGED[@]}" "${SNAPSHOTS[@]}" \
                --job "static=${STATIC_RESULT}" --job "admin-eval=${ADMIN_EVAL_RESULT}" \
+               --job "session-store=${SESSION_STORE_RESULT}" \
                --job "store-snapshot=${STORE_SNAPSHOT_RESULT:-missing}" > /tmp/verdict.md; then
             AUTO_MERGE=true
           fi

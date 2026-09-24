@@ -14,7 +14,7 @@ import pytest
 from eval import reconcile as R
 from eval.result_schema import Snapshot, ToolDef, Toolset
 
-GREEN = {"static": "success", "admin-eval": "success", "store-snapshot": "success"}
+GREEN = {"static": "success", "admin-eval": "success", "session-store": "success", "store-snapshot": "success"}
 
 
 def snap(*names: str, description: str = "d") -> Snapshot:
@@ -57,7 +57,7 @@ def test_a_collapsed_catalogue_blocks() -> None:
     assert R.blockers(["shopware.sha"], collapsed, GREEN) == ["the store catalogue collapsed"]
 
 
-@pytest.mark.parametrize("job", ["static", "admin-eval"])
+@pytest.mark.parametrize("job", ["static", "admin-eval", "session-store"])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped"])
 def test_a_red_night_blocks_because_the_pin_would_move_prs_onto_it(job: str, result: str) -> None:
     """#20600: no description changed, and the lane could reach nothing."""
@@ -67,9 +67,9 @@ def test_a_red_night_blocks_because_the_pin_would_move_prs_onto_it(job: str, res
 
 
 def test_an_unreported_job_blocks() -> None:
-    assert R.blockers(["shopware.sha"], SAME, {"static": "success", "store-snapshot": "success"}) == [
-        "`admin-eval` did not pass on this Shopware commit (missing)"
-    ]
+    assert R.blockers(
+        ["shopware.sha"], SAME, {"static": "success", "session-store": "success", "store-snapshot": "success"}
+    ) == ["`admin-eval` did not pass on this Shopware commit (missing)"]
 
 
 @pytest.mark.parametrize("outcome", ["failure", "skipped"])
@@ -79,6 +79,14 @@ def test_an_unmeasured_store_catalogue_blocks(outcome: str) -> None:
     reasons = R.blockers(["shopware.sha"], SAME, {**GREEN, "store-snapshot": outcome})
 
     assert reasons == [f"`store-snapshot` did not pass on this Shopware commit ({outcome})"]
+
+
+def test_a_broken_redis_session_store_blocks() -> None:
+    """The production multi-worker setup: a trunk commit that breaks it passes
+    static and admin-eval, which both run on the file store."""
+    reasons = R.blockers(["shopware.sha"], SAME, {**GREEN, "session-store": "failure"})
+
+    assert reasons == ["`session-store` did not pass on this Shopware commit (failure)"]
 
 
 def test_the_store_eval_has_no_veto() -> None:
@@ -116,6 +124,8 @@ def test_cli_exits_zero_and_says_why_when_it_may_merge(tmp_path: Path, capsys: p
             "static=success",
             "--job",
             "admin-eval=success",
+            "--job",
+            "session-store=success",
             "--job",
             "store-snapshot=success",
         ]

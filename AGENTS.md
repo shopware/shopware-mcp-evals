@@ -101,10 +101,10 @@ sequenceDiagram
   workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
   runs there — its prose findings advisory, its two parameter counts ratcheted
   against `tool-history/lint-budget.json`). `mcp-evals.yml` runs
-  `static` → (`admin-eval`, `store-eval`) → `report`, each building its own lane
-  via `.github/actions/setup-lane`, plus `session-store` in parallel to `static`
-  (see [Session store](#session-store)). It installs Shopware at the pinned
-  `shopware.sha` and checks the plugin repos out at their **default branch**, so
+  `static` → (`admin-eval`, `store-eval`, `session-store`) → `report`, each
+  building its own lane via `.github/actions/setup-lane` on the commit `static`
+  resolved (`session-store`: see [Session store](#session-store)). It installs
+  Shopware at the pinned `shopware.sha` and checks the plugin repos out at their **default branch**, so
   plugin churn can turn a run red without a change here — except
   `agentic-commerce`, which also tracks its default branch (the #154 pin this
   line used to describe was removed once the fix landed upstream).
@@ -522,7 +522,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
-| `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static` + `admin-eval` green on that commit. Merges with an octo-sts token (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment |
+| `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static`, `admin-eval` and `session-store` green on that commit. Merges with an octo-sts token (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |
 | `tool-history/lint-budget.json` | Committed ceiling for toollint's two parameter counts; may fall, may not rise |
