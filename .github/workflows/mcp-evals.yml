@@ -359,10 +359,15 @@ jobs:
           cd shopware
           bin/console debug:mcp --tools --no-ansi > /tmp/debug-mcp.txt
           cd ..
-          python -m eval.registry_check --from-file /tmp/debug-mcp.txt || {
+          # The verdict's first line as an annotation too: a passing job's log is
+          # not retrievable through the API, so without it nobody can see how many
+          # tools per server were actually checked.
+          set -o pipefail
+          python -m eval.registry_check --from-file /tmp/debug-mcp.txt | tee /tmp/registry-check.txt || {
             echo "::error::The server's declared privileges disagree with toolclass.py. See above - a READ_ONLY tool that mutates would be executed for real."
             exit 1
           }
+          echo "::notice::registry_check: $(grep -E '^(OK|NOTE)' /tmp/registry-check.txt | tr '\n' ' ')"
 
       # Only the nightly cron opens this. A cron run resolves the ref to trunk, so
       # its drift IS the upstream movement someone has to reconcile — and printing
