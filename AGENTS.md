@@ -271,10 +271,9 @@ python -m toollint
 scripts/trunk-lane.sh
 scripts/trunk-lane.sh --eval
 
-# Registry: does the server's declared ACL agree with toolclass? Admin only —
-# not because debug:mcp cannot see the Store registry (`--scope=store-api` has
-# listed it since shopware/shopware#18848), but because registry_check does not
-# read that table yet.
+# Registry: does the server's declared ACL agree with toolclass? Both servers —
+# without --scope, debug:mcp prints an Admin API and a Store API block
+# (shopware/shopware#18848), and registry_check checks each on its own.
 bin/console debug:mcp --tools --no-ansi > /tmp/m.txt
 python -m eval.registry_check --from-file /tmp/m.txt
 

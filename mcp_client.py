@@ -365,6 +365,13 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
     resp = _rpc(
         "initialize",
         {
+            # A session-era revision on purpose. Everything here is scoped by
+            # Mcp-Session-Id — toolset enablement persists per session, and
+            # discovery-mode eval opens a fresh one per fixture. mcp/sdk 0.8
+            # serves the stateless 2026-07-28 revision, which mints no session
+            # id; Shopware keeps both endpoints on the session era with
+            # Builder::withoutModernEra(). If that ever goes, this is where it
+            # shows up first, as the error below.
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {"name": "mcp-eval", "version": "2.0"},
@@ -373,7 +380,11 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
     )
     session_id = resp.headers.get("Mcp-Session-Id", "")
     if not session_id:
-        raise RuntimeError("No Mcp-Session-Id in response headers")
+        raise RuntimeError(
+            "No Mcp-Session-Id in response headers. The server answered initialize without a session; "
+            "if it now serves the stateless 2026-07-28 revision (no Builder::withoutModernEra()), "
+            "per-session toolset enablement no longer works and this suite has to change with it."
+        )
     instructions = _response(resp, 1).get("result", {}).get("instructions", "")
     return session_id, instructions
 
