@@ -447,8 +447,8 @@ something else.
 # Anthropic (default), claude-sonnet-4-6
 python -m eval.runner
 
-# OpenAI — gpt-5.4-mini is the CI primary and the openai default
-python -m eval.runner --provider openai --model gpt-5.4-mini
+# OpenAI — gpt-6-luna is the CI primary and the openai default
+python -m eval.runner --provider openai --model gpt-6-luna
 
 # Second validator in CI — an older-generation model on the same fixtures. A
 # fixture both models miss points at the tool description; one both pass is noise.

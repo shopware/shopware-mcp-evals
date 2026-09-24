@@ -24,7 +24,7 @@ was measuring the grading difference between the two modes.
 
 Usage:
     python -m eval.runner                                  # both modes, Anthropic
-    python -m eval.runner --provider openai --model gpt-5.4-mini
+    python -m eval.runner --provider openai --model gpt-6-luna
     python -m eval.runner --modes discovery --max-steps 8
     python -m eval.runner --category disambiguation
     python -m eval.runner --id disambig_count_vs_search
@@ -1041,9 +1041,21 @@ PROVIDERS: dict[str, Provider] = {
     # a generation removed from gpt-4o-mini while being cheaper than gpt-4o
     # ($0.75 vs ~$2.50 per 1M input) at the same latency; measured on the 24
     # disambiguation fixtures it scored 19/19 against gpt-4o's 18/19.
+    #
+    # gpt-6-luna since 2026-09-23, on a clean trial (run 35868771852, 0 errors)
+    # over all 96 admin and 45 Store fixtures: primary 98% (core 33/33) against
+    # gpt-5.4-mini's 98%, and 97% without the context prompt against 91%. It is
+    # weaker on two advisory arms — core prompt only 88% (92%), Store 89% (93%) —
+    # and its one fixture failed by both models is a negative where it hit the
+    # step cap still searching, not a wrong pick. ~7x cheaper: $0.10 / $0.01
+    # cached / $0.50 out against $0.75 / $0.075 / $4.50. It needs
+    # reasoning_effort "none" to take function tools on chat completions;
+    # openai_turn learns that (see _REASONING_OFF).
+    # gpt-5.4-nano was the other candidate: 97% primary, but 82-86% on the
+    # advisory arms and two fixtures failed by both models.
     "openai": Provider(
         name="openai",
-        default_model="gpt-5.4-mini",
+        default_model="gpt-6-luna",
         credential_env="OPENAI_API_KEY",
         system_as_param=False,
         tools_attr="tools_for_openai",
