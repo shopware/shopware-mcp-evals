@@ -737,7 +737,12 @@ jobs:
         uses: ./.github/actions/setup-lane
         with:
           shopware_repo: ${{ env.SHOPWARE_REPO }}
-          shopware_ref: ${{ github.event.inputs.shopware_ref }}
+          # The commit `static` resolved, not the ref again. On a schedule the ref is
+          # `trunk`, and resolving it a second time minutes later can land on a newer
+          # commit — then this job's verdict describes a Shopware the reconciliation
+          # never pins, and eval/reconcile.py would auto-merge commit A on a pass
+          # measured on B. Falls back to the input if static produced no sha.
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
           event_name: ${{ github.event_name }}
           app_url: ${{ env.APP_URL }}
           run_store: ${{ env.RUN_STORE }}
@@ -1053,7 +1058,12 @@ jobs:
         uses: ./.github/actions/setup-lane
         with:
           shopware_repo: ${{ env.SHOPWARE_REPO }}
-          shopware_ref: ${{ github.event.inputs.shopware_ref }}
+          # The commit `static` resolved, not the ref again. On a schedule the ref is
+          # `trunk`, and resolving it a second time minutes later can land on a newer
+          # commit — then this job's verdict describes a Shopware the reconciliation
+          # never pins, and eval/reconcile.py would auto-merge commit A on a pass
+          # measured on B. Falls back to the input if static produced no sha.
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
           event_name: ${{ github.event_name }}
           app_url: ${{ env.APP_URL }}
           run_store: ${{ env.RUN_STORE }}

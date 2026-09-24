@@ -982,10 +982,20 @@ snapshots. The six steps above are what you do when you want a specific ref
 rather than trunk HEAD, or when a fixture has to move with the description —
 step 5 is the part no bot can do.
 
-Merging that PR is still a human act, and it is the **only** way the pinned SHA
-changes: CI proposes, it never pushes to `main`. Leaving it open is not free,
-though — until it merges, PR and push runs keep testing whatever Shopware the
-pin names while the nightly tests trunk, and the two drift apart silently.
+Merging that PR is the **only** way the pinned SHA changes, and it is a human
+act except in one case: a scheduled night where the PR moves `shopware.sha` and
+nothing else, both catalogues were measured with no drift, and `static` and
+`admin-eval` passed on that exact commit. Then the nightly merges it itself,
+with an octo-sts token (policy in `.github/chainguard/reconcile.sts.yaml`; octo-sts
+may bypass the org's default-branch ruleset, `GITHUB_TOKEN` may not).
+`eval/reconcile.py` holds the rule and writes its verdict into the PR body; if
+the token is missing or the merge is refused, the PR stays open with a comment
+that it is safe to merge by hand. Anything else — a tool added, removed or
+reworded — always waits for a review.
+
+Leaving a PR open is not free, though — until it merges, PR and push runs keep
+testing whatever Shopware the pin names while the nightly tests trunk, and the
+two drift apart silently.
 
 ### Tool description history
 
