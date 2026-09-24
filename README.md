@@ -1,6 +1,6 @@
 # shopware-mcp-evals
 
-[![MCP Evals](https://github.com/shopware/shopware-mcp-evals/actions/workflows/mcp-evals.yml/badge.svg)](https://github.com/shopware/shopware-mcp-evals/actions/workflows/mcp-evals.yml)
+[![MCP Evals](https://github.com/shopware/shopware-mcp-evals/actions/workflows/mcp-evals.yml/badge.svg?branch=main&event=schedule)](https://github.com/shopware/shopware-mcp-evals/actions/workflows/mcp-evals.yml?query=event%3Aschedule)
 
 Two-layer test suite for the Shopware MCP server. Runs against a live Shopware
 instance over HTTP using Shopware access keys (the suite uses an
@@ -927,10 +927,10 @@ run disagreed for an afternoon over it. #154 merged on 2026-08-04 and the pin
 was removed.
 
 [shopware/shopware#18848](https://github.com/shopware/shopware/pull/18848)
-(merged 2026-08-04) made `debug:mcp` list the Store registry, reachable as
-`debug:mcp --scope=store-api`. `eval/registry_check.py` still reads only the
-admin table, so it checks the admin tools and none of the Store ones —
-extending it to the Store scope is open.
+(merged 2026-08-04) made `debug:mcp` list the Store registry: without
+`--scope` it prints one block per server. `eval/registry_check.py` reads both,
+each as its own registry, so a Store tool nothing has classified — a new UCP
+tool, say — fails the check the same way an admin one does.
 
 **B. Snapshot-based drift detection.** After each run, the workflow snapshots
 the live catalogue to `tool-history/latest.json` and diffs it against the

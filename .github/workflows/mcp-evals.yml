@@ -349,9 +349,10 @@ jobs:
       # Also catches a tool the server grew that nothing has classified yet —
       # those are silently never executed, which looks like a passing suite.
       #
-      # Admin registry only: `debug:mcp` takes no endpoint flag and does not list
-      # the Store/UCP tools at all (measured — 30 registered against 17 more that
-      # the store endpoint advertises). eval/preflight.py covers that side.
+      # Both registries: without --scope, debug:mcp prints an Admin API and a
+      # Store API block (shopware/shopware#18848), and registry_check reads each
+      # on its own. Before it did, every UCP tool was silently dropped (their
+      # names use underscores) and shopware-store-api-context was filed as admin.
       - name: Check the tool registry against toolclass
         if: ${{ !cancelled() }}
         run: |
