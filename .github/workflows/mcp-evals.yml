@@ -230,6 +230,12 @@ jobs:
       shopware_sha: ${{ steps.lane.outputs.shopware_sha }}
       drift: ${{ steps.drift.outputs.drift }}
       snapshot_changed: ${{ steps.snapshot.outputs.changed }}
+      # `outcome`, not `conclusion`: the step is continue-on-error, so its
+      # conclusion is `success` even when it failed. eval/reconcile.py needs to
+      # know the Store catalogue was actually measured tonight; without that the
+      # committed store.json from the checkout is compared with itself and reads
+      # as "no drift".
+      store_snapshot: ${{ steps.store_snapshot.outcome }}
     steps:
       - name: Checkout evals repo
         uses: actions/checkout@v7
@@ -402,6 +408,7 @@ jobs:
       # Uploaded as an artifact rather than committed here: the nightly
       # reconciliation PR is where a snapshot enters the repo.
       - name: Snapshot Store tool catalogue
+        id: store_snapshot
         if: ${{ !cancelled() && env.RUN_STORE == 'true' && steps.lane.outputs.store_plugin_ok == 'true' }}
         continue-on-error: true
         env:
@@ -730,7 +737,12 @@ jobs:
         uses: ./.github/actions/setup-lane
         with:
           shopware_repo: ${{ env.SHOPWARE_REPO }}
-          shopware_ref: ${{ github.event.inputs.shopware_ref }}
+          # The commit `static` resolved, not the ref again. On a schedule the ref is
+          # `trunk`, and resolving it a second time minutes later can land on a newer
+          # commit — then this job's verdict describes a Shopware the reconciliation
+          # never pins, and eval/reconcile.py would auto-merge commit A on a pass
+          # measured on B. Falls back to the input if static produced no sha.
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
           event_name: ${{ github.event_name }}
           app_url: ${{ env.APP_URL }}
           run_store: ${{ env.RUN_STORE }}
@@ -1046,7 +1058,12 @@ jobs:
         uses: ./.github/actions/setup-lane
         with:
           shopware_repo: ${{ env.SHOPWARE_REPO }}
-          shopware_ref: ${{ github.event.inputs.shopware_ref }}
+          # The commit `static` resolved, not the ref again. On a schedule the ref is
+          # `trunk`, and resolving it a second time minutes later can land on a newer
+          # commit — then this job's verdict describes a Shopware the reconciliation
+          # never pins, and eval/reconcile.py would auto-merge commit A on a pass
+          # measured on B. Falls back to the input if static produced no sha.
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
           event_name: ${{ github.event_name }}
           app_url: ${{ env.APP_URL }}
           run_store: ${{ env.RUN_STORE }}
@@ -1132,6 +1149,13 @@ jobs:
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Job-level, so it replaces the workflow's permissions for this job and has
+    # to repeat them. id-token is only for the octo-sts step below, and only
+    # this job gets it.
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
     steps:
       - name: Checkout evals repo
         uses: actions/checkout@v7
@@ -1331,6 +1355,23 @@ jobs:
       # Deliberately NOT gated on drift. The drift check moved into the script,
       # because the cleanup path needs to run in the one case a drift gate
       # excludes — see the comment on it below.
+      # A token that may merge through the org's default-branch ruleset, which
+      # GITHUB_TOKEN may not (it requires an approval, and the bot cannot
+      # approve its own PR). Trust policy: .github/chainguard/reconcile.sts.yaml,
+      # which issues it only to this workflow's scheduled run on main. Fetched
+      # every night rather than only when a merge qualifies, because a step
+      # cannot be gated on a shell variable of the next one; it is unused
+      # otherwise. continue-on-error: without it the reconciliation still runs
+      # and leaves the PR for a human, which is the pre-octo-sts behaviour.
+      - name: Token for merging a no-drift reconciliation (nightly only)
+        id: merge_token
+        if: ${{ github.event_name == 'schedule' }}
+        continue-on-error: true
+        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # ratchet:octo-sts/action@v1.1.1
+        with:
+          scope: shopware/shopware-mcp-evals
+          identity: reconcile
+
       - name: Reconciliation PR (nightly only)
         if: ${{ github.event_name == 'schedule' }}
         continue-on-error: true
@@ -1339,6 +1380,12 @@ jobs:
           SW_SHA: ${{ needs.static.outputs.shopware_sha }}
           DRIFT: ${{ needs.static.outputs.drift }}
           SNAPSHOT_CHANGED: ${{ needs.static.outputs.snapshot_changed }}
+          # Whether this night passed on the Shopware commit it would pin. Read by
+          # eval/reconcile.py, which refuses to auto-merge on anything but success.
+          STATIC_RESULT: ${{ needs.static.result }}
+          ADMIN_EVAL_RESULT: ${{ needs.admin-eval.result }}
+          STORE_SNAPSHOT_RESULT: ${{ needs.static.outputs.store_snapshot }}
+          MERGE_TOKEN: ${{ steps.merge_token.outputs.token }}
         run: |
           set -euo pipefail
           # ONE rolling branch, not one per upstream sha. The per-sha name was
@@ -1495,6 +1542,24 @@ jobs:
             echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } >> /tmp/body.md
 
+          # Whether this PR may merge itself: only when it moves shopware.sha and
+          # nothing else, neither catalogue drifted, and this night's gating jobs
+          # passed on the commit it pins. eval/reconcile.py holds the rule and
+          # says why; its verdict goes into the body either way, so a PR left
+          # open explains what a human has to look at.
+          mapfile -t STAGED < <(git diff --cached --name-only)
+          SNAPSHOTS=(--snapshot admin /tmp/baseline.json tool-history/latest.json)
+          if [ -f tool-history/store.json ] && [ -s /tmp/baseline-store.json ]; then
+            SNAPSHOTS+=(--snapshot store /tmp/baseline-store.json tool-history/store.json)
+          fi
+          AUTO_MERGE=false
+          if python -m eval.reconcile --staged "${STAGED[@]}" "${SNAPSHOTS[@]}" \
+               --job "static=${STATIC_RESULT}" --job "admin-eval=${ADMIN_EVAL_RESULT}" \
+               --job "store-snapshot=${STORE_SNAPSHOT_RESULT:-missing}" > /tmp/verdict.md; then
+            AUTO_MERGE=true
+          fi
+          { echo ""; cat /tmp/verdict.md; } >> /tmp/body.md
+
           git commit -q -m "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
                         -m "Opened by the nightly eval run. See the PR body for what moved."
           git push -f origin "$BRANCH"
@@ -1511,6 +1576,22 @@ jobs:
             gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
               --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
               --body-file /tmp/body.md
+          fi
+
+          if [ "$AUTO_MERGE" = "true" ]; then
+            PR="$(open_pr)"
+            # Merged with the octo-sts token, the one identity that may bypass the
+            # ruleset. It is also an app token, so unlike a GITHUB_TOKEN merge the
+            # push to main triggers the usual workflows. No token (octo-sts
+            # unreachable, policy not on main yet) or a refused merge leaves the PR
+            # open with a comment saying it is safe to merge by hand.
+            if [ -n "${MERGE_TOKEN}" ] && GH_TOKEN="${MERGE_TOKEN}" gh pr merge "$PR" --merge --admin --delete-branch; then
+              echo "Merged #${PR}: the pin moved to ${SW_SHA:0:12} and nothing else changed."
+            else
+              gh pr comment "$PR" --body "Every auto-merge condition held, but the merge did not go through (no octo-sts token, or GitHub refused it). This PR only moves \`shopware.sha\` onto a commit tonight's run passed on, so it is safe to merge by hand."
+              if [ -n "${MERGE_TOKEN}" ]; then HAD_TOKEN="present, merge refused"; else HAD_TOKEN="missing"; fi
+              echo "::warning::Reconciliation PR #${PR} qualified for auto-merge but was not merged (octo-sts token: ${HAD_TOKEN})."
+            fi
           fi
 
       - name: Upload eval results

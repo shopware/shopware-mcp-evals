@@ -1,0 +1,15 @@
+# Token for the nightly to merge its own reconciliation PR (eval/reconcile.py
+# decides when). octo-sts may bypass the org's default-branch ruleset, which the
+# workflow's GITHUB_TOKEN may not — and the bot cannot approve its own PR.
+#
+# Narrow on purpose: only the scheduled run of mcp-evals.yml on main, and only
+# what merging a PR needs.
+issuer: https://token.actions.githubusercontent.com
+subject: repo:shopware/shopware-mcp-evals:ref:refs/heads/main
+claim_pattern:
+  job_workflow_ref: shopware/shopware-mcp-evals/\.github/workflows/mcp-evals\.yml@refs/heads/main
+  event_name: schedule
+
+permissions:
+  contents: write
+  pull_requests: write

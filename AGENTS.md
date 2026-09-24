@@ -489,6 +489,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
+| `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static` + `admin-eval` green on that commit. Merges with an octo-sts token (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |
 | `tool-history/lint-budget.json` | Committed ceiling for toollint's two parameter counts; may fall, may not rise |
