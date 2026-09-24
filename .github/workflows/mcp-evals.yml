@@ -1339,6 +1339,10 @@ jobs:
           SW_SHA: ${{ needs.static.outputs.shopware_sha }}
           DRIFT: ${{ needs.static.outputs.drift }}
           SNAPSHOT_CHANGED: ${{ needs.static.outputs.snapshot_changed }}
+          # Whether this night passed on the Shopware commit it would pin. Read by
+          # eval/reconcile.py, which refuses to auto-merge on anything but success.
+          STATIC_RESULT: ${{ needs.static.result }}
+          ADMIN_EVAL_RESULT: ${{ needs.admin-eval.result }}
         run: |
           set -euo pipefail
           # ONE rolling branch, not one per upstream sha. The per-sha name was
@@ -1495,6 +1499,23 @@ jobs:
             echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } >> /tmp/body.md
 
+          # Whether this PR may merge itself: only when it moves shopware.sha and
+          # nothing else, neither catalogue drifted, and this night's gating jobs
+          # passed on the commit it pins. eval/reconcile.py holds the rule and
+          # says why; its verdict goes into the body either way, so a PR left
+          # open explains what a human has to look at.
+          mapfile -t STAGED < <(git diff --cached --name-only)
+          SNAPSHOTS=(--snapshot admin /tmp/baseline.json tool-history/latest.json)
+          if [ -f tool-history/store.json ] && [ -s /tmp/baseline-store.json ]; then
+            SNAPSHOTS+=(--snapshot store /tmp/baseline-store.json tool-history/store.json)
+          fi
+          AUTO_MERGE=false
+          if python -m eval.reconcile --staged "${STAGED[@]}" "${SNAPSHOTS[@]}" \
+               --job "static=${STATIC_RESULT}" --job "admin-eval=${ADMIN_EVAL_RESULT}" > /tmp/verdict.md; then
+            AUTO_MERGE=true
+          fi
+          { echo ""; cat /tmp/verdict.md; } >> /tmp/body.md
+
           git commit -q -m "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
                         -m "Opened by the nightly eval run. See the PR body for what moved."
           git push -f origin "$BRANCH"
@@ -1511,6 +1532,21 @@ jobs:
             gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
               --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
               --body-file /tmp/body.md
+          fi
+
+          if [ "$AUTO_MERGE" = "true" ]; then
+            PR="$(open_pr)"
+            # Needs GitHub Actions on the default-branch ruleset's bypass list: the
+            # ruleset requires an approval, and a PR's author cannot approve it.
+            # Without the bypass the merge is refused, and the PR stays open with a
+            # comment saying it is safe to merge by hand — a one-click review
+            # rather than a silent no-op.
+            if gh pr merge "$PR" --merge --admin --delete-branch; then
+              echo "Merged #${PR}: the pin moved to ${SW_SHA:0:12} and nothing else changed."
+            else
+              gh pr comment "$PR" --body "Every auto-merge condition held, but GitHub refused the merge. This PR only moves \`shopware.sha\` onto a commit tonight's run passed on, so it is safe to merge by hand. To let it merge itself, add GitHub Actions as a bypass actor on the default-branch ruleset."
+              echo "::warning::Reconciliation PR #${PR} qualified for auto-merge but the merge was refused (no ruleset bypass?)."
+            fi
           fi
 
       - name: Upload eval results
