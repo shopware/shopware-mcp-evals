@@ -18,6 +18,11 @@ way:
     on the commit being pinned — otherwise the pin moves every PR onto a Shopware
     that is already red.
 
+The merge itself happens in the workflow, with an octo-sts token: the org's
+default-branch ruleset requires an approval, the bot cannot approve its own PR,
+and octo-sts is the identity allowed to bypass it (trust policy in
+`.github/chainguard/reconcile.sts.yaml`).
+
 Pure decision in `blockers()`; the CLI only loads files and prints. Exit 0 means
 "merge it", exit 1 means "leave it for a human", with the reasons on stdout for
 the PR body.
