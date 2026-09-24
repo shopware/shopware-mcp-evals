@@ -1,16 +1,23 @@
 # LLM Eval Fixtures — Store API endpoint (/store-api/_mcp)
 #
-# NOT the same discovery model as admin, since agentic-commerce 1.3.0 (UCP
-# 2026-08-25). All thirteen UCP buyer-journey tools are now advertised on a fresh
-# session — they are `default_tools` in tool-history/store.json — and the UCP
-# toolsets that used to defer them are gone. The only toolset left on this
-# endpoint is `store-api`, holding shopware-store-api-context.
+# NOT the same discovery model as admin — for now, and not by intent. Core means
+# the Store endpoint to work exactly like admin (shopware/shopware#18298), but
+# since agentic-commerce 1.3.0 all thirteen UCP buyer-journey tools are
+# advertised on a fresh session — they are `default_tools` in
+# tool-history/store.json — because the plugin tagged them with core's reserved
+# `discovery` group so UCP agents on its /ucp/mcp proxy would see them. The only
+# toolset left on this endpoint is `store-api`, holding
+# shopware-store-api-context. The fix is proposed in
+# shopware/agentic-commerce#254 and shopware/shopware#20725; when it lands, the
+# UCP fixtures get their `expected_toolset` back.
 #
-# So these fixtures no longer measure discovery. Nothing here has to be found
-# before it can be picked; what is under test is selection among thirteen
-# simultaneously visible, deliberately adjacent tools. `expected_toolset` is
-# therefore absent on every UCP fixture and present only on the three
-# store-api-context ones. Run with:
+# Until then the UCP fixtures do not measure discovery. None of those tools has
+# to be found before it can be picked; what is under test is selection among
+# thirteen simultaneously visible, deliberately adjacent tools, so
+# `expected_toolset` is absent on every UCP fixture. The three
+# store-api-context fixtures are the exception: that tool is still deferred
+# behind `store-api`, so they do discover it, and carry
+# `expected_toolset: store-api`. Run with:
 #   python -m eval.runner --endpoint store
 #
 # Fields are identical to fixtures.yaml (see its header), and the same coverage
@@ -19,7 +26,9 @@
 # checkout-cancel, cart-get vs checkout-get), so most of the extra prompts are
 # boundary cases between neighbouring stages of the funnel.
 #
-# Grading is on tool selection; the terminal UCP tool is never executed.
+# Grading executes the call, as on admin: read-only UCP tools run as they are,
+# mutating ones with the dryRun the plugin declares (ucp.py), and the result is
+# asserted.
 
 fixtures:
 

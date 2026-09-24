@@ -272,7 +272,9 @@ scripts/trunk-lane.sh
 scripts/trunk-lane.sh --eval
 
 # Registry: does the server's declared ACL agree with toolclass? Admin only —
-# debug:mcp has no endpoint flag and lists no Store tools (shopware/shopware#18848).
+# not because debug:mcp cannot see the Store registry (`--scope=store-api` has
+# listed it since shopware/shopware#18848), but because registry_check does not
+# read that table yet.
 bin/console debug:mcp --tools --no-ansi > /tmp/m.txt
 python -m eval.registry_check --from-file /tmp/m.txt
 
@@ -485,6 +487,12 @@ and the thirteen UCP buyer-journey tools (`create_cart`, `search_catalog`,
 `complete_checkout`, …). Since agentic-commerce 1.3.0 those are advertised on
 the **default surface** rather than deferred behind toolsets, so `store-api` —
 holding `shopware-store-api-context` — is the only toolset on that endpoint.
+That is a plugin workaround, not the design: core means Store to match admin
+(shopware/shopware#18298), and the plugin got there by claiming core's reserved
+`discovery` group. Fix proposed in shopware/agentic-commerce#254 and
+shopware/shopware#20725 — treat the Store default-surface exception in
+`functional/runner.py` and the missing `expected_toolset` on UCP fixtures as
+temporary.
 The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
 provisioned state; tool *selection* for those is covered by the LLM eval.
 
