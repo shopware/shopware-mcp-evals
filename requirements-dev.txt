@@ -11,5 +11,5 @@
 # change. Bumping any of these is a deliberate PR, the same way shopware.sha is.
 pytest>=8,<10
 pytest-cov>=6,<8
-ruff==0.16.0
-basedpyright==1.39.9
+ruff==0.16.8
+basedpyright==1.40.1
