@@ -60,22 +60,27 @@ def load_pricing(path: str | Path | None = None) -> Pricing:
 ZERO_PRICES = ModelPrice(input=0.0, output=0.0, cached_input=0.0)
 
 
+def add_tokens(into: TokenCounts, tokens: TokenCounts) -> None:
+    """Add one bucket set to a running total, tolerating buckets a producer omits."""
+    into["input"] += tokens.get("input", 0)
+    into["output"] += tokens.get("output", 0)
+    into["cached_input"] = into.get("cached_input", 0) + tokens.get("cached_input", 0)
+    into["cache_write"] = into.get("cache_write", 0) + tokens.get("cache_write", 0)
+
+
 def prices_for(model: str, pricing: Pricing) -> ModelPrice | None:
     return (pricing.get("models") or {}).get(model)
 
 
 def token_totals(results: list[FixtureResult]) -> TokenCounts:
-    """Sum the three token buckets across every fixture that reached the model.
+    """Sum the token buckets across every fixture that reached the model.
 
     Skipped and errored fixtures carry no `tokens` key — they never got that
     far — so they contribute nothing rather than needing to be filtered out.
     """
-    totals = TokenCounts(input=0, cached_input=0, output=0)
+    totals = TokenCounts(input=0, cached_input=0, output=0, cache_write=0)
     for r in results or []:
-        tokens = r.get("tokens") or EMPTY_TOKENS
-        totals["input"] += tokens.get("input", 0)
-        totals["cached_input"] = totals.get("cached_input", 0) + tokens.get("cached_input", 0)
-        totals["output"] += tokens.get("output", 0)
+        add_tokens(totals, r.get("tokens") or EMPTY_TOKENS)
     return totals
 
 
@@ -84,6 +89,7 @@ def cost_usd(tokens: TokenCounts, prices: ModelPrice) -> float:
     billed = (
         tokens.get("input", 0) * (prices.get("input") or 0.0)
         + tokens.get("cached_input", 0) * (prices.get("cached_input") or 0.0)
+        + tokens.get("cache_write", 0) * (prices.get("cache_write") or prices.get("input") or 0.0)
         + tokens.get("output", 0) * (prices.get("output") or 0.0)
     )
     return billed / PER_TOKENS
@@ -182,14 +188,11 @@ def combine(runs: list[CostBlock]) -> CombinedCost:
     known — but leave the dollar total incomplete, which the caller says out
     loud rather than rounding away.
     """
-    tokens = TokenCounts(input=0, cached_input=0, output=0)
+    tokens = TokenCounts(input=0, cached_input=0, output=0, cache_write=0)
     total = 0.0
     unpriced: list[str] = []
     for run in runs or []:
-        run_tokens = run.get("tokens") or EMPTY_TOKENS
-        tokens["input"] += run_tokens.get("input", 0)
-        tokens["cached_input"] = tokens.get("cached_input", 0) + run_tokens.get("cached_input", 0)
-        tokens["output"] += run_tokens.get("output", 0)
+        add_tokens(tokens, run.get("tokens") or EMPTY_TOKENS)
         run_total = run.get("total_usd")
         if run_total is None:
             unpriced.append(run.get("model", ""))

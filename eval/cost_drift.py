@@ -55,7 +55,7 @@ def metrics(report: Report) -> dict[str, float]:
     if graded:
         # Cached and full-price input together: what moved is how much context
         # the model was handed, regardless of what it was billed for.
-        total_input = (tokens.get("input") or 0) + (tokens.get("cached_input") or 0)
+        total_input = (tokens.get("input") or 0) + (tokens.get("cached_input") or 0) + (tokens.get("cache_write") or 0)
         out["input_tokens_per_fixture"] = total_input / graded
         out["output_tokens_per_fixture"] = (tokens.get("output") or 0) / graded
     for key, value in (

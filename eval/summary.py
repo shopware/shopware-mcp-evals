@@ -185,7 +185,9 @@ def render_cost(rows: list[SummaryRow]) -> str:
 
     parts = [
         f"**Cost of this run:** {total} · "
-        f"{_tokens(tokens['input'])} input ({_tokens(tokens.get('cached_input', 0))} cached) · "
+        f"{_tokens(tokens['input'])} input ({_tokens(tokens.get('cached_input', 0))} cached"
+        + (f", {_tokens(tokens.get('cache_write', 0))} cache writes" if tokens.get("cache_write") else "")
+        + ") · "
         f"{_tokens(tokens['output'])} output"
     ]
     if graded and job["total_usd"]:

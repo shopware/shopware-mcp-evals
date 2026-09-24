@@ -17,10 +17,14 @@ from eval import runner as E
 from tests.stubs import const
 
 
-def openai_response(prompt_tokens: int, completion_tokens: int = 5, cached: int | None = None) -> SimpleNamespace:
+def openai_response(
+    prompt_tokens: int, completion_tokens: int = 5, cached: int | None = None, written: int | None = None
+) -> SimpleNamespace:
     usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
     if cached is not None:
         usage.prompt_tokens_details = SimpleNamespace(cached_tokens=cached)
+    if written is not None:
+        usage.prompt_tokens_details = SimpleNamespace(cached_tokens=cached or 0, cache_write_tokens=written)
     msg = SimpleNamespace(content="ok", tool_calls=None)
     return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=usage)
 
@@ -44,7 +48,7 @@ def test_openai_cached_tokens_are_subtracted_from_the_full_price_bucket() -> Non
     E._OUTPUT_CAP_PARAM.clear()
     turn = E.openai_turn(client_returning(openai_response(1000, cached=800), "openai"), "m", None, [], [])
 
-    assert turn["tokens"] == {"input": 200, "cached_input": 800, "output": 5}
+    assert turn["tokens"] == {"input": 200, "cached_input": 800, "output": 5, "cache_write": 0}
 
 
 def test_anthropic_cached_tokens_are_not_subtracted() -> None:
@@ -52,7 +56,7 @@ def test_anthropic_cached_tokens_are_not_subtracted() -> None:
     here — the mirror of the OpenAI bug — would under-count the bill."""
     turn = E.anthropic_turn(client_returning(anthropic_response(200, cache_read=800), "anthropic"), "m", None, [], [])
 
-    assert turn["tokens"] == {"input": 200, "cached_input": 800, "output": 5}
+    assert turn["tokens"] == {"input": 200, "cached_input": 800, "output": 5, "cache_write": 0}
 
 
 def test_both_providers_normalise_to_the_same_shape() -> None:
@@ -71,7 +75,17 @@ def test_a_provider_reporting_no_cache_detail_bills_everything_at_full_price() -
     """Third-party OpenAI-compatible endpoints omit the field entirely."""
     E._OUTPUT_CAP_PARAM.clear()
     turn = E.openai_turn(client_returning(openai_response(300), "openai"), "m", None, [], [])
-    assert turn["tokens"] == {"input": 300, "cached_input": 0, "output": 5}
+    assert turn["tokens"] == {"input": 300, "cached_input": 0, "output": 5, "cache_write": 0}
 
     turn = E.anthropic_turn(client_returning(anthropic_response(300), "anthropic"), "m", None, [], [])
-    assert turn["tokens"] == {"input": 300, "cached_input": 0, "output": 5}
+    assert turn["tokens"] == {"input": 300, "cached_input": 0, "output": 5, "cache_write": 0}
+
+
+def test_openai_cache_writes_get_their_own_bucket() -> None:
+    """Measured on gpt-6-luna: a cold call reports 2410 of 2413 prompt tokens as
+    `cache_write_tokens`, and they are inside `prompt_tokens`. Leaving them in
+    `input` prices them at the input rate, 20% under what they are billed."""
+    E._OUTPUT_CAP_PARAM.clear()
+    turn = E.openai_turn(client_returning(openai_response(2413, written=2410), "openai"), "m", None, [], [])
+
+    assert turn["tokens"] == {"input": 3, "cached_input": 0, "output": 5, "cache_write": 2410}

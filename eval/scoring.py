@@ -12,6 +12,7 @@ eval/runner.py, which produces the records. The same split is why
 eval/summary.py and eval/compare_runs.py are the best-tested code here.
 """
 
+from eval.cost import EMPTY_TOKENS, add_tokens
 from eval.result_schema import (
     DiscoverySummary,
     Fixture,
@@ -99,7 +100,7 @@ def score(results: list[FixtureResult]) -> Score:
 
 
 def total_tokens(results: list[FixtureResult]) -> TokenCounts:
-    """All three counters, `cached_input` included.
+    """Every counter, `cached_input` and `cache_write` included.
 
     It used to sum `input` and `output` only, which silently understated usage on
     any run with prompt caching — and disagreed with the cost table, which has
@@ -110,12 +111,9 @@ def total_tokens(results: list[FixtureResult]) -> TokenCounts:
     omit it (a provider that reports no cache, or an older report), so it is read
     with a default rather than indexed.
     """
-    agg = TokenCounts(input=0, output=0, cached_input=0)
+    agg = TokenCounts(input=0, output=0, cached_input=0, cache_write=0)
     for r in results:
-        t = r.get("tokens") or {}
-        agg["input"] += t.get("input", 0)
-        agg["output"] += t.get("output", 0)
-        agg["cached_input"] = agg.get("cached_input", 0) + t.get("cached_input", 0)
+        add_tokens(agg, r.get("tokens") or EMPTY_TOKENS)
     return agg
 
 
