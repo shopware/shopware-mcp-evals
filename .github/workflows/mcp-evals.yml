@@ -230,6 +230,12 @@ jobs:
       shopware_sha: ${{ steps.lane.outputs.shopware_sha }}
       drift: ${{ steps.drift.outputs.drift }}
       snapshot_changed: ${{ steps.snapshot.outputs.changed }}
+      # `outcome`, not `conclusion`: the step is continue-on-error, so its
+      # conclusion is `success` even when it failed. eval/reconcile.py needs to
+      # know the Store catalogue was actually measured tonight; without that the
+      # committed store.json from the checkout is compared with itself and reads
+      # as "no drift".
+      store_snapshot: ${{ steps.store_snapshot.outcome }}
     steps:
       - name: Checkout evals repo
         uses: actions/checkout@v7
@@ -402,6 +408,7 @@ jobs:
       # Uploaded as an artifact rather than committed here: the nightly
       # reconciliation PR is where a snapshot enters the repo.
       - name: Snapshot Store tool catalogue
+        id: store_snapshot
         if: ${{ !cancelled() && env.RUN_STORE == 'true' && steps.lane.outputs.store_plugin_ok == 'true' }}
         continue-on-error: true
         env:
@@ -1343,6 +1350,7 @@ jobs:
           # eval/reconcile.py, which refuses to auto-merge on anything but success.
           STATIC_RESULT: ${{ needs.static.result }}
           ADMIN_EVAL_RESULT: ${{ needs.admin-eval.result }}
+          STORE_SNAPSHOT_RESULT: ${{ needs.static.outputs.store_snapshot }}
         run: |
           set -euo pipefail
           # ONE rolling branch, not one per upstream sha. The per-sha name was
@@ -1511,7 +1519,8 @@ jobs:
           fi
           AUTO_MERGE=false
           if python -m eval.reconcile --staged "${STAGED[@]}" "${SNAPSHOTS[@]}" \
-               --job "static=${STATIC_RESULT}" --job "admin-eval=${ADMIN_EVAL_RESULT}" > /tmp/verdict.md; then
+               --job "static=${STATIC_RESULT}" --job "admin-eval=${ADMIN_EVAL_RESULT}" \
+               --job "store-snapshot=${STORE_SNAPSHOT_RESULT:-missing}" > /tmp/verdict.md; then
             AUTO_MERGE=true
           fi
           { echo ""; cat /tmp/verdict.md; } >> /tmp/body.md

@@ -14,7 +14,7 @@ import pytest
 from eval import reconcile as R
 from eval.result_schema import Snapshot, ToolDef, Toolset
 
-GREEN = {"static": "success", "admin-eval": "success"}
+GREEN = {"static": "success", "admin-eval": "success", "store-snapshot": "success"}
 
 
 def snap(*names: str, description: str = "d") -> Snapshot:
@@ -67,9 +67,18 @@ def test_a_red_night_blocks_because_the_pin_would_move_prs_onto_it(job: str, res
 
 
 def test_an_unreported_job_blocks() -> None:
-    assert R.blockers(["shopware.sha"], SAME, {"static": "success"}) == [
+    assert R.blockers(["shopware.sha"], SAME, {"static": "success", "store-snapshot": "success"}) == [
         "`admin-eval` did not pass on this Shopware commit (missing)"
     ]
+
+
+@pytest.mark.parametrize("outcome", ["failure", "skipped"])
+def test_an_unmeasured_store_catalogue_blocks(outcome: str) -> None:
+    """The step is continue-on-error and skipped without the plugin; either way
+    the committed store.json is still on disk and compares equal to itself."""
+    reasons = R.blockers(["shopware.sha"], SAME, {**GREEN, "store-snapshot": outcome})
+
+    assert reasons == [f"`store-snapshot` did not pass on this Shopware commit ({outcome})"]
 
 
 def test_the_store_eval_has_no_veto() -> None:
@@ -107,6 +116,8 @@ def test_cli_exits_zero_and_says_why_when_it_may_merge(tmp_path: Path, capsys: p
             "static=success",
             "--job",
             "admin-eval=success",
+            "--job",
+            "store-snapshot=success",
         ]
     )
 

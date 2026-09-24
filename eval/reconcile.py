@@ -40,9 +40,13 @@ from eval.result_schema import Snapshot
 # block the merge.
 MERGEABLE_FILES = frozenset({"shopware.sha", "tool-history/lint-budget.json"})
 
-# The jobs whose failure means the new Shopware commit is not safe to pin. The
-# Store eval is advisory everywhere else, so it does not get a veto here.
-GATING_JOBS = ("static", "admin-eval")
+# What must have succeeded on the commit being pinned. `static` and `admin-eval`
+# are the gates; `store-snapshot` is the step that measures the Store catalogue.
+# It runs continue-on-error and is skipped without the plugin, and in both cases
+# the committed store.json is still on disk — so without this entry the Store
+# comparison would read the baseline against itself and call it "no drift". The
+# Store EVAL is advisory everywhere else, so it gets no veto here.
+REQUIRED = ("static", "admin-eval", "store-snapshot")
 
 
 def blockers(
@@ -67,7 +71,7 @@ def blockers(
         elif is_significant(summarise(old, new)):
             reasons.append(f"the {label} catalogue drifted")
 
-    for job in GATING_JOBS:
+    for job in REQUIRED:
         result = job_results.get(job, "missing")
         if result != "success":
             reasons.append(f"`{job}` did not pass on this Shopware commit ({result})")
@@ -110,8 +114,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("**Left for review:** " + "; ".join(reasons) + ".")
         return 1
     print(
-        "**Merged automatically:** only `shopware.sha` moved, neither catalogue drifted, "
-        "and `static` and `admin-eval` passed on this Shopware commit."
+        "**Merged automatically:** only `shopware.sha` moved, both catalogues were measured "
+        "tonight and neither drifted, and `static` and `admin-eval` passed on this Shopware commit."
     )
     return 0
 
