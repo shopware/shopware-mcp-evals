@@ -440,6 +440,34 @@ def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[Tool
     raise RuntimeError("tools/list pagination did not terminate within 50 pages")
 
 
+# What resources/list and prompts/list return, and the field that names an entry
+# — the same field the allowlist stores for that type.
+_LISTS = {"resources/list": ("resources", "uri"), "prompts/list": ("prompts", "name")}
+
+
+def mcp_list_names(session_id: str, method: str, endpoint: Endpoint = ADMIN) -> list[str]:
+    """Every name resources/list or prompts/list returns, following nextCursor."""
+    key, field = _LISTS[method]
+    names: list[str] = []
+    cursor = None
+    for _ in range(50):  # runaway guard
+        params: JsonObject = {} if cursor is None else {"cursor": cursor}
+        resp = _rpc_json(method, params, session_id, rpc_id=4, endpoint=endpoint)
+        # Raised rather than read as an empty list: for a principal that should
+        # be blocked, "nothing" is the passing answer, so a server error must not
+        # be able to produce it.
+        if "error" in resp:
+            raise RuntimeError(f"{method} failed: {resp['error'].get('message', 'unknown error')}")
+        result = _as_object(resp.get("result"))
+        entries = result.get(key)
+        for entry in cast(list[object], entries) if isinstance(entries, list) else []:
+            names.append(str(_as_object(entry).get(field, "")))
+        cursor = result.get("nextCursor")
+        if not cursor:
+            return names
+    raise RuntimeError(f"{method} pagination did not terminate within 50 pages")
+
+
 def mcp_toolsets_list(session_id: str, endpoint: Endpoint = ADMIN) -> list[Toolset]:
     """Call shopware-toolsets-list and return the parsed toolsets array:
     [{name, title, description, tools, enabled}, ...]"""

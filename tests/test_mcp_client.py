@@ -659,3 +659,43 @@ def test_with_toolsets_keeps_the_credentials_and_the_store_context_token() -> No
     assert pinned.auth_headers == original.auth_headers
     assert pinned.url.endswith("?toolsets=all")
     assert pinned.path == original.path and pinned.name == original.name
+
+
+# ---------------------------------------------------------------------------
+# resources/list and prompts/list
+# ---------------------------------------------------------------------------
+def test_list_names_follows_the_cursor_and_reads_the_allowlisted_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resources are named by `uri`, which is what the allowlist stores for them."""
+    pages: dict[object, JsonObject] = {
+        None: {"resources": [{"uri": "shopware://a", "name": "a"}], "nextCursor": "p2"},
+        "p2": {"resources": [{"uri": "shopware://b", "name": "b"}]},
+    }
+
+    def post(_url: str, **kwargs: object) -> FakeResp:
+        body = cast(JsonObject, kwargs["json"])
+        cursor = cast(JsonObject, body["params"]).get("cursor")
+        return json_resp({"jsonrpc": "2.0", "id": body["id"], "result": pages[cursor]})
+
+    monkeypatch.setattr(C.requests, "post", post)
+
+    assert C.mcp_list_names("sid", "resources/list") == ["shopware://a", "shopware://b"]
+
+
+def test_list_names_raises_on_an_error_instead_of_reading_it_as_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """For a principal that should be blocked, an empty list is the passing
+    answer — a server error must not be able to produce it."""
+    monkeypatch.setattr(
+        C.requests, "post", const(json_resp({"jsonrpc": "2.0", "id": 4, "error": {"message": "Method not found"}}))
+    )
+
+    with pytest.raises(RuntimeError, match="prompts/list failed: Method not found"):
+        _ = C.mcp_list_names("sid", "prompts/list")
+
+
+def test_list_names_gives_up_on_a_cursor_that_never_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        C.requests, "post", const(json_resp({"jsonrpc": "2.0", "id": 4, "result": {"prompts": [], "nextCursor": "x"}}))
+    )
+
+    with pytest.raises(RuntimeError, match="did not terminate"):
+        _ = C.mcp_list_names("sid", "prompts/list")

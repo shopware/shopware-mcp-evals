@@ -27,6 +27,7 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
 
@@ -47,6 +48,7 @@ from functional.checks import (
 )
 from functional.customer import CustomerUnavailable, provision
 from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
+from functional.principals import PROBE_ARGS, PROBE_TOOL, AdminApi, Principal, ProvisioningFailed, provisioned
 from functional.reporting import Reporter
 from mcp_client import (
     ALL_TOOLSETS,
@@ -62,7 +64,9 @@ from mcp_client import (
     enable_toolset,
     endpoint_by_name,
     mcp_call,
+    mcp_call_error,
     mcp_init,
+    mcp_list_names,
     mcp_result_text,
     mcp_tools_list_all,
     mcp_toolsets_list,
@@ -881,63 +885,231 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     run_checks(rep, session, endpoint, DEV_CHECKS, ctx)
 
 
-def verify_allowlist_is_enforced(rep: Reporter) -> None:
-    """An integration with no `mcp_allowlist` must reach nothing.
+# ---------------------------------------------------------------------------
+# Allowlist matrix: what each kind of principal can reach
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class Catalogue:
+    """What the suite's own principal reaches, which every other one is measured against.
 
-    shopware/shopware#20600 made an unset allowlist grant nothing rather than
-    everything, and the suite's own principal moved to an administrator user to
-    stay unrestricted. That leaves the enforcement itself uncovered: if it
-    regressed to the old fail-OPEN behaviour, every check here would still pass
-    and nobody would learn that credentials predating MCP had quietly regained
-    the full capability surface.
-
-    So the lane mints a second integration — `admin: true`, `writeAccess: true`,
-    the widest ACL Shopware offers — with no allowlist, and this asserts the
-    server refuses it. Skipped rather than failed when the lane did not provide
-    one, because a developer running this against their own shop has no such
-    credential and should not be told their server is broken.
+    That principal is an administrator user, so the allowlist does not apply to
+    it (#20600): this is the whole catalogue, and "All capabilities" on an
+    integration has to reach exactly this much.
     """
-    rep.section("Allowlist enforcement (fail-closed)")
-    access_key = os.environ.get("MCP_BLOCKED_ACCESS_KEY", "")
-    secret_key = os.environ.get("MCP_BLOCKED_SECRET_KEY", "")
-    if not access_key or not secret_key:
-        rep.skip("allowlist fail-closed (no MCP_BLOCKED_ACCESS_KEY on this lane)")
-        return
 
-    blocked = admin_endpoint(access_key, secret_key)
+    toolsets: Mapping[str, frozenset[str]]
+    tools: set[str]
+    resources: set[str]
+    prompts: set[str]
+    searched: set[str]
+
+    def toolset_of(self, tool: str) -> str:
+        return next((name for name, tools in sorted(self.toolsets.items()) if tool in tools), "")
+
+    def control_tool(self) -> str:
+        """A tool from a toolset other than the probe's: what a one-tool grant must not reach."""
+        probe = self.toolset_of(PROBE_TOOL)
+        return next((min(tools) for name, tools in sorted(self.toolsets.items()) if name != probe and tools), "")
+
+
+def load_catalogue(endpoint: Endpoint) -> Catalogue:
+    session, _ = mcp_init(endpoint=endpoint)
+    toolsets = {ts["name"]: frozenset(ts.get("tools", [])) for ts in mcp_toolsets_list(session, endpoint=endpoint)}
+    pinned = endpoint.with_toolsets(ALL_TOOLSETS)
+    pinned_session, _ = mcp_init(endpoint=pinned)
+    return Catalogue(
+        toolsets=toolsets,
+        tools={t.get("name", "") for t in mcp_tools_list_all(pinned_session, endpoint=pinned)},
+        resources=set(mcp_list_names(session, "resources/list", endpoint=endpoint)),
+        prompts=set(mcp_list_names(session, "prompts/list", endpoint=endpoint)),
+        searched=_searched(session, endpoint),
+    )
+
+
+# Broad on purpose: the check is about which names tool-search may surface for a
+# principal, not about ranking, so it wants as much of the catalogue as it will
+# return. verify_admin_discovery uses the same query for its result cap.
+SEARCH_QUERY = "shopware"
+
+
+def _searched(session: str, endpoint: Endpoint) -> set[str]:
+    result = run_search(session, endpoint, SEARCH_QUERY, 50)
+    names = {str(as_object(as_object(r).get("tool")).get("name", "")) for r in as_list(result.get("data"))}
+    return names - META_TOOLS
+
+
+def _call_error(resp: McpResponse) -> str:
+    """Why a call did not run, including the in-band `{"success": false}` kind."""
+    return mcp_call_error(resp) or inband_error(mcp_result_text(resp)) or ""
+
+
+def _refused_by_allowlist(resp: McpResponse) -> bool:
+    # Named, not just "errored": an argument-validation error is also an error,
+    # and counting it as a refusal would pass a server that enforces nothing.
+    return "allowlist" in ((resp.get("error") or {}).get("message", "") + mcp_result_text(resp)).lower()
+
+
+def _names(items: set[str]) -> str:
+    return " ".join(sorted(items)[:8]) + (" …" if len(items) > 8 else "")
+
+
+def _diff(want: set[str], got: set[str]) -> str:
+    return f"missing {_names(want - got) or '-'}, extra {_names(got - want) or '-'}"
+
+
+def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite: Endpoint) -> None:
+    """Every discovery surface, and both call paths, for one principal.
+
+    Each surface is filtered separately on the server (`McpAllowlistListRequestHandler`,
+    `McpToolsetRegistry`, `AbstractToolSearchTool`, `McpServerController`), so a
+    fix to one leaves the others free to disagree. The report that started this
+    was one of them — toolsets-list empty for an integration whose allowlist the
+    Administration showed as "All capabilities".
+    """
+    who = principal.label.split("-", 3)[-1]
+    expect = principal.expect
+
+    def check(ok: bool, claim: str, detail: str) -> None:
+        if ok:
+            rep.check_pass(f"{who}: {claim}")
+        else:
+            rep.check_fail(f"allowlist: {who}", f"expected it {claim}, but {detail}")
+
+    endpoint = admin_endpoint(principal.access_key, principal.secret_key, base_url=suite.base_url)
     try:
-        session, _ = mcp_init(endpoint=blocked)
+        session, _ = mcp_init(endpoint=endpoint)
     except (RuntimeError, requests.exceptions.RequestException) as exc:
-        # Being refused at the handshake is a stricter outcome than being refused
-        # per tool, so it satisfies the same invariant.
-        rep.check_pass(f"a no-allowlist integration cannot open a session ({str(exc)[:60]})")
+        # Not a pass even for a principal that should be blocked: #20600 lets it
+        # open a session and see the meta-tools, so a handshake failure is a bad
+        # credential or a broken server — and would leave the unset state
+        # untested while reading as green.
+        check(False, "opens a session", f"initialize failed: {str(exc)[:80]}")
         return
 
-    advertised = _advertised(rep, session, blocked, "blocked-integration tools/list")
-    if advertised is None:
+    probe_toolset = cat.toolset_of(PROBE_TOOL)
+    control = cat.control_tool()
+    try:
+        advertised = set(_advertised(rep, session, endpoint, f"allowlist: {who} tools/list") or ())
+        check(advertised == META_TOOLS, "is advertised only the meta-tools by default", f"saw {_names(advertised)}")
+
+        listed = {ts["name"] for ts in mcp_toolsets_list(session, endpoint=endpoint)}
+        if expect == "blocked":
+            check(not listed, "is listed no toolsets", f"toolsets-list returned {_names(listed)}")
+        elif expect == "all":
+            check(
+                listed == set(cat.toolsets),
+                "is listed every toolset",
+                _diff(set(cat.toolsets), listed),
+            )
+        else:
+            check(
+                probe_toolset in listed and cat.toolset_of(control) not in listed,
+                f"is listed {probe_toolset} and not {cat.toolset_of(control)}",
+                f"toolsets-list returned {_names(listed) or 'nothing'}",
+            )
+
+        enable_error = _call_error(enable_toolset(session, probe_toolset, endpoint=endpoint))
+        if expect == "blocked":
+            check(bool(enable_error), f"is refused toolset-enable {probe_toolset}", "the toolset was enabled")
+        else:
+            check(not enable_error, f"can enable {probe_toolset}", enable_error[:120])
+
+        pinned = endpoint.with_toolsets(ALL_TOOLSETS)
+        pinned_session, _ = mcp_init(endpoint=pinned)
+        reach = {t.get("name", "") for t in mcp_tools_list_all(pinned_session, endpoint=pinned)}
+        if expect == "blocked":
+            check(reach == META_TOOLS, "reaches only the meta-tools with ?toolsets=all", f"reached {_names(reach)}")
+        elif expect == "all":
+            check(
+                reach == cat.tools,
+                f"reaches the whole catalogue ({len(cat.tools)} tools) with ?toolsets=all",
+                _diff(cat.tools, reach),
+            )
+        else:
+            check(
+                PROBE_TOOL in reach and control not in reach,
+                f"reaches {PROBE_TOOL} and not {control} with ?toolsets=all",
+                f"reached {_names(reach)}",
+            )
+
+        for method, everything in (("resources/list", cat.resources), ("prompts/list", cat.prompts)):
+            got = set(mcp_list_names(session, method, endpoint=endpoint))
+            want = everything if expect == "all" else set[str]()
+            check(got == want, f"gets {len(want)} from {method}", f"got {len(got)}: {_names(got ^ want)}")
+
+        # AbstractToolSearchTool filters on its own; it may only surface what the
+        # principal can reach, and for "All" exactly what the administrator's
+        # search does.
+        searched = _searched(session, endpoint)
+        if expect == "all":
+            check(searched == cat.searched, "is shown every tool-search hit", _diff(cat.searched, searched))
+        else:
+            leaked = searched - (reach - META_TOOLS)
+            check(not leaked, "is shown only reachable tools by tool-search", f"it surfaced {_names(leaked)}")
+        if expect == "partial" and PROBE_TOOL in cat.searched:
+            check(PROBE_TOOL in searched, f"is shown {PROBE_TOOL} by tool-search", f"it surfaced {_names(searched)}")
+
+        # Advertising is not the call boundary; a client that knows a name can
+        # call it without ever listing anything.
+        probe = mcp_call(session, PROBE_TOOL, PROBE_ARGS, endpoint=endpoint)
+        if expect == "blocked":
+            check(
+                _refused_by_allowlist(probe),
+                f"is refused {PROBE_TOOL}",
+                f"the call answered: {_call_error(probe)[:120] or 'ok'}",
+            )
+        else:
+            check(not _call_error(probe), f"can call {PROBE_TOOL}", _call_error(probe)[:120])
+        if expect == "partial" and control:
+            refused = _refused_by_allowlist(mcp_call(session, control, {}, endpoint=endpoint))
+            check(refused, f"is refused {control}", "the call was not refused by the allowlist")
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        rep.check_fail(f"allowlist: {who}", f"aborted: {exc}")
+
+
+def verify_allowlist_matrix(rep: Reporter, endpoint: Endpoint, provision: bool) -> None:
+    """Integrations and non-admin users, with no allowlist, "All", and one tool.
+
+    shopware/shopware#20600 made the allowlist the gate for every principal
+    except an administrator user, and moved this suite onto one. So nothing the
+    rest of the run sees depends on the allowlist at all — it could grant
+    nothing to anyone, or everything, and every other check would stay green.
+    The principals are created per run (functional/principals.py) because what
+    "All capabilities" saves is a snapshot of the catalogue, and a list minted
+    in setup-lane would drift from the one the Administration writes.
+    """
+    rep.section("Allowlist matrix (integrations and non-admin users)")
+    if not provision:
+        rep.skip("allowlist matrix needs --provision-principals: it creates integrations, users and a role")
         return
-    extras = set(advertised) - META_TOOLS
-    if not extras:
-        rep.check_pass("a no-allowlist integration is advertised only the discovery meta-tools")
-    else:
+
+    try:
+        cat = load_catalogue(endpoint)
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        rep.check_fail("allowlist matrix", f"could not read the reference catalogue: {exc}")
+        return
+    # Everything below compares against this, and an empty reference makes
+    # "reaches exactly as much as the administrator" pass for a principal that
+    # reaches nothing.
+    if cat.tools <= META_TOOLS or not cat.toolset_of(PROBE_TOOL):
         rep.check_fail(
-            "allowlist enforcement",
-            "an integration with no allowlist can see: " + " ".join(sorted(extras)),
+            "allowlist matrix", f"the suite's own principal reaches no {PROBE_TOOL}, so nothing can be compared"
         )
+        return
 
-    # Advertising nothing is not the same as refusing the call. The allowlist is
-    # checked on invocation too, and a client that already knows the name does
-    # not need it advertised.
-    resp = mcp_call(session, "shopware-entity-search", {"entity": "product", "limit": 1}, endpoint=blocked)
-    text = (resp.get("error") or {}).get("message", "") + mcp_result_text(resp)
-    if "allowlist" in text.lower() or (resp.get("result") or {}).get("isError"):
-        rep.check_pass("a no-allowlist integration is refused when it calls a tool by name")
-    else:
-        rep.check_fail("allowlist enforcement", f"entity-search ran for a blocked integration: {text[:120]}")
+    try:
+        api = AdminApi(
+            endpoint.base_url, endpoint.auth_headers["sw-access-key"], endpoint.auth_headers["sw-secret-access-key"]
+        )
+        with provisioned(api) as principals:
+            for principal in principals:
+                verify_principal(rep, principal, cat, endpoint)
+    except ProvisioningFailed as exc:
+        rep.check_fail("allowlist matrix", f"could not provision the principals: {exc}")
 
 
 def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, session: str) -> None:
-    verify_allowlist_is_enforced(rep)
+    verify_allowlist_matrix(rep, endpoint, provision=cast(bool, args.provision_principals))
     verify_default_surface(rep, session, endpoint)
     verify_connect_time_toolsets(rep, endpoint)
     entity_toolset, toolsets = verify_admin_toolsets(rep, session, endpoint)
@@ -1116,6 +1288,14 @@ def main() -> int:
             "Let the UCP buyer journey commit: it creates a cart and a checkout and PLACES A REAL "
             "ORDER. Only for a disposable lane (CI, a local trunk lane) — never a shop you care "
             "about. Without it the journey is skipped and says so."
+        ),
+    )
+    parser.add_argument(
+        "--provision-principals",
+        action="store_true",
+        help=(
+            "Create throwaway integrations, non-admin users and an ACL role to check what each "
+            "allowlist state reaches; they are deleted afterwards. Admin endpoint only."
         ),
     )
     args = parser.parse_args()
