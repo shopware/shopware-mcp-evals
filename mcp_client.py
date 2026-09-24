@@ -389,6 +389,14 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
     return session_id, instructions
 
 
+def mcp_close(session_id: str, endpoint: Endpoint = ADMIN) -> int:
+    """End a session with `DELETE`, as the Streamable HTTP transport defines it.
+    Returns the HTTP status rather than raising: what a refused close looks like
+    is the caller's question, not a transport failure."""
+    headers = {**endpoint.auth_headers, "Mcp-Session-Id": session_id}
+    return requests.delete(endpoint.url, headers=headers, timeout=30).status_code
+
+
 def mcp_call(session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:
     """Call a tool. Returns the full JSON-RPC response dict."""
     return _rpc_json(

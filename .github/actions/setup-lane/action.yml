@@ -41,6 +41,15 @@ inputs:
   agentic_commerce_ref:
     description: shopware/agentic-commerce ref.
     default: ''
+  session_store:
+    description: >-
+      Where the MCP servers keep their sessions. `file` is Shopware's default;
+      `redis` applies the documented production recipe and needs a Redis
+      service on the job (see `redis_url`).
+    default: file
+  redis_url:
+    description: The pool the `redis` session store writes to. Its own database, so the checks' key scans stay small.
+    default: redis://localhost:6379/5
   plugins_pat:
     description: Token that can read the private plugin repositories.
     required: true
@@ -327,6 +336,8 @@ runs:
         # (agentic-commerce#167): a lower constraint here is unsatisfiable
         # alongside it, so this value is not free to lag behind.
         UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '>=0.0.5 <0.1.0' }}
+        SESSION_STORE: ${{ inputs.session_store }}
+        REDIS_URL: ${{ inputs.redis_url }}
       run: |
         set -euo pipefail
 
@@ -550,6 +561,52 @@ runs:
                         enabled: false
         YAML
 
+        # The Redis session store, as products/tools/mcp-server/configuration.md
+        # in shopware/docs configures it for production: both servers on
+        # `store: cache` over one Redis pool, and both active-session registries
+        # moved onto that pool too — they sit on the per-machine cache.system
+        # otherwise (shopware/shopware#19980). One file rather than the docs'
+        # three: a `services:` block is honoured from any config file, and it
+        # means nothing here has to merge into a services.yaml it did not write.
+        #
+        # Not env-scoped, unlike the rate-limit override above, so it applies to
+        # whatever env the server runs.
+        if [ "$SESSION_STORE" = "redis" ]; then
+          php -m | grep -qix redis \
+            || { echo "::error::session_store=redis needs the PHP redis extension; this PHP has none"; exit 1; }
+          cat > config/packages/zz-mcp-evals-redis-sessions.yaml <<YAML
+        mcp:
+            servers:
+                admin:
+                    session:
+                        store: cache
+                        cache_pool: mcp.session.cache_psr16
+                store_api:
+                    session:
+                        store: cache
+                        cache_pool: mcp.session.cache_psr16
+
+        framework:
+            cache:
+                pools:
+                    cache.mcp_sessions:
+                        adapter: cache.adapter.redis_tag_aware
+                        provider: '${REDIS_URL}'
+                        default_lifetime: 3600
+
+        services:
+            mcp.session.cache_psr16:
+                class: Symfony\Component\Cache\Psr16Cache
+                arguments: ['@cache.mcp_sessions']
+            shopware.mcp.session_registry_cache:
+                class: Symfony\Component\Cache\Psr16Cache
+                arguments: ['@cache.mcp_sessions']
+            mcp.store_api.session_registry_cache:
+                class: Symfony\Component\Cache\Psr16Cache
+                arguments: ['@cache.mcp_sessions']
+        YAML
+        fi
+
         bin/console cache:clear --no-interaction
         bin/console cache:warmup --no-interaction
 
@@ -557,6 +614,19 @@ runs:
         bin/console debug:container "Shopware\Core\Framework\Mcp\Controller\McpServerController" 2>&1 \
           | grep -E 'Public|private|class' | head -5 \
           || { echo "::error::McpServerController not found in compiled container"; exit 1; }
+
+        # A session-store recipe that is not picked up leaves the file store in
+        # place and every endpoint working, so the container is the only place
+        # the difference shows before a request is made. Both servers, because
+        # the recipe configures each separately.
+        if [ "$SESSION_STORE" = "redis" ]; then
+          for server in admin store_api; do
+            bin/console debug:container "mcp.server.${server}.session.store" --no-ansi 2>&1 \
+              | grep -q 'Mcp\\Server\\Session\\Psr16SessionStore' \
+              || { echo "::error::mcp.server.${server}.session.store is not Psr16SessionStore — the Redis session recipe did not apply"; exit 1; }
+          done
+          echo "::notice::MCP session store: Redis (${REDIS_URL}) for admin and store_api"
+        fi
 
         # Restart the daemonized symfony web server so PHP-FPM workers reload
         # the freshly compiled container (otherwise opcache serves stale bytecode).
