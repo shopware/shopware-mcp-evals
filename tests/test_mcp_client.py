@@ -699,3 +699,19 @@ def test_list_names_gives_up_on_a_cursor_that_never_ends(monkeypatch: pytest.Mon
 
     with pytest.raises(RuntimeError, match="did not terminate"):
         _ = C.mcp_list_names("sid", "prompts/list")
+
+
+def test_mcp_close_deletes_the_session_and_returns_the_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A refused close is an answer, not a transport failure — so no raise."""
+    sent: list[dict[str, str]] = []
+
+    def fake_delete(url: str, headers: dict[str, str], timeout: int) -> FakeResp:
+        assert url == C.ADMIN.url and timeout == 30
+        sent.append(headers)
+        return FakeResp(404)
+
+    monkeypatch.setattr(C.requests, "delete", fake_delete)
+
+    assert C.mcp_close("sid-1", endpoint=C.ADMIN) == 404
+    assert sent[0]["Mcp-Session-Id"] == "sid-1"
+    assert sent[0]["sw-access-key"] == C.ADMIN.auth_headers["sw-access-key"]
