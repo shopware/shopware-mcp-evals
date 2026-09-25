@@ -1154,11 +1154,14 @@ jobs:
     needs: [static, admin-eval, store-eval]
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 25, not 15: the reconciliation waits up to 10 minutes for the PR's lint.
+    timeout-minutes: 25
     # Job-level, so it replaces the workflow's permissions for this job and has
     # to repeat them. id-token is only for the octo-sts step below, and only
-    # this job gets it.
+    # this job gets it. actions: read is for eval.await_runs, which lists the
+    # reconciliation PR's own runs before merging it.
     permissions:
+      actions: read
       contents: write
       pull-requests: write
       id-token: write
@@ -1584,8 +1587,22 @@ jobs:
               --body-file /tmp/body.md
           fi
 
+          # Not before the PR's own runs have finished. Merging a second after
+          # opening made both of them lose their ref and fail at startup with no
+          # jobs — a red Lint and a red MCP Evals after every auto-merge — and
+          # it moved the pin without lint ever running on the commit. Lint must
+          # pass; the evals skip on an unlabelled PR and only have to finish.
           if [ "$AUTO_MERGE" = "true" ]; then
             PR="$(open_pr)"
+            if ! python -m eval.await_runs --sha "$(git rev-parse HEAD)" \
+                 --require "Lint & unit tests" --settle "MCP Evals" > /tmp/await.txt; then
+              AUTO_MERGE=false
+              gh pr comment "$PR" --body "Not merged automatically: $(cat /tmp/await.txt)."
+              echo "::warning::Reconciliation PR #${PR} was not merged: $(cat /tmp/await.txt)"
+            fi
+          fi
+
+          if [ "$AUTO_MERGE" = "true" ]; then
             # Merged with the octo-sts token, the one identity that may bypass the
             # ruleset. It is also an app token, so unlike a GITHUB_TOKEN merge the
             # push to main triggers the usual workflows. No token (octo-sts
