@@ -194,19 +194,15 @@ def verify_default_surface(
     """What a fresh session must advertise: the three meta-tools, plus whatever
     else the endpoint currently puts on its default surface.
 
-    On admin that second set is empty — every catalogue tool is deferred. On the
-    Store endpoint it is currently the thirteen UCP tools, and that is a plugin
-    WORKAROUND, not the intended design. Core means the Store endpoint to work
-    exactly like admin (shopware/shopware#18298: meta-tools only, everything else
-    discovered). agentic-commerce #218 tagged its tools with core's reserved
-    `discovery` group because UCP agents connecting to its /ucp/mcp proxy list
-    tools once and never saw them behind a toolset — a real problem, solved in a
-    way that also puts them on every plain /store-api/_mcp connection. The fix is
-    proposed in shopware/agentic-commerce#254 (pin a `ucp` toolset on the proxy
-    via ?toolsets=) and shopware/shopware#20725 (reserve the group).
-
-    When that lands, the Store call site drops `also_expected` and this check
-    holds both endpoints to the same rule again.
+    On admin that second set is empty — every catalogue tool is deferred, and
+    core means the Store endpoint to work the same way (shopware/shopware#18298:
+    meta-tools only, everything else discovered). agentic-commerce up to 1.3.0
+    puts its thirteen UCP tools into core's reserved `discovery` group, so a plain
+    /store-api/_mcp connection advertises them too. shopware/agentic-commerce#254
+    moves them into a `ucp` toolset that its /ucp/mcp proxy pins via ?toolsets=.
+    The Store call site therefore passes only the UCP tools that are in no
+    toolset (see `_ucp_default_published`): all thirteen against a plugin that
+    still uses `discovery`, none against one that has the fix.
 
     The set is passed in rather than read from the endpoint name, so "a deferred
     tool leaked" and "a tool this endpoint publishes" stay distinguishable. That
@@ -239,6 +235,16 @@ def verify_default_surface(
 
 def load_toolsets(session: str, endpoint: Endpoint) -> list[Toolset]:
     return mcp_toolsets_list(session, endpoint=endpoint)
+
+
+def _ucp_default_published(session: str, endpoint: Endpoint) -> frozenset[str]:
+    """The UCP tools this server publishes on the default surface: the ones in no toolset.
+
+    agentic-commerce up to 1.3.0 puts them into core's `discovery` group, which is
+    never listed as a toolset, so all of them count. From
+    shopware/agentic-commerce#254 on they sit in the `ucp` toolset, and none do."""
+    in_toolsets = {tool for ts in load_toolsets(session, endpoint) for tool in ts.get("tools", [])}
+    return frozenset(ucp.all_classified()) - in_toolsets
 
 
 def verify_connect_time_toolsets(
@@ -1129,12 +1135,12 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     provisioned state. They do — which is why the journey provisions it, rather
     than leaving thirteen tools untested and their fixtures graded on the tool
     name alone."""
-    # The thirteen UCP tools currently sit on the default surface — a plugin
-    # workaround, not the intended design (see verify_default_surface) — so they
-    # are expected here rather than counted as a leak. Drop `also_expected` once
-    # shopware/agentic-commerce#254 lands. ucp.py owns the list.
-    verify_default_surface(rep, session, endpoint, also_expected=ucp.all_classified())
-    verify_connect_time_toolsets(rep, endpoint, also_expected=ucp.all_classified())
+    # UCP tools in a toolset are deferred like any other tool. Only a plugin that
+    # still puts them into core's `discovery` group publishes them by default
+    # (see verify_default_surface), so the expectation follows the live server.
+    ucp_default = _ucp_default_published(session, endpoint)
+    verify_default_surface(rep, session, endpoint, also_expected=ucp_default)
+    verify_connect_time_toolsets(rep, endpoint, also_expected=ucp_default)
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")
