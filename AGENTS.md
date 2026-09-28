@@ -95,15 +95,16 @@ sequenceDiagram
   (plus id/prompt uniqueness and toolset correctness) against
   `tool-history/latest.json`, so a new server-side tool fails the unit tests
   until it has prompts.
-- **Two workflows, and the heavy one is four jobs.** `lint.yml` is the fast gate
+- **Two workflows, and the heavy one is five jobs.** `lint.yml` is the fast gate
   (ruff, ruff format, basedpyright, pytest+cov, then ShellCheck **twice** — once
   over `functional/**/*.sh` + `scripts/**/*.sh`, once over the shell inside
   workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
   runs there — its prose findings advisory, its two parameter counts ratcheted
   against `tool-history/lint-budget.json`). `mcp-evals.yml` runs
-  `static` → (`admin-eval`, `store-eval`) → `report`, each building its own lane
-  via `.github/actions/setup-lane`. It installs Shopware at the pinned
-  `shopware.sha` and checks the plugin repos out at their **default branch**, so
+  `static` → (`admin-eval`, `store-eval`, `session-store`) → `report`, each
+  building its own lane via `.github/actions/setup-lane` on the commit `static`
+  resolved (`session-store`: see [Session store](#session-store)). It installs
+  Shopware at the pinned `shopware.sha` and checks the plugin repos out at their **default branch**, so
   plugin churn can turn a run red without a change here — except
   `agentic-commerce`, which also tracks its default branch (the #154 pin this
   line used to describe was removed once the fix landed upstream).
@@ -419,6 +420,37 @@ from the rate too — they are missing data, not wrong answers — but
 back into the rate: that reports a broken server as a bad model, and it once
 turned an 89% run into a reported 53%.
 
+## Session store
+
+Every job except one runs Shopware's default file store. `session-store` builds
+its lane with `session_store: redis`, which writes the production recipe from
+the docs (products/tools/mcp-server/configuration.md in shopware/docs) and a
+Redis service, then runs `python -m functional.sessions` and the admin
+functional suite on it. What it took to get right:
+
+- **A recipe that is not picked up changes nothing you can see.** The file store
+  stays, every endpoint works. The docs' pre-0.13 recipe overrode
+  `mcp.session.store`, a service that no longer exists. So setup-lane gates on
+  `debug:container mcp.server.{admin,store_api}.session.store` naming
+  `Psr16SessionStore`. Don't trust that a config file exists, or that sessions work.
+- **Each check fails on the file store, or it proves nothing.** A key appears on
+  `initialize`, and deleting that key makes the server refuse the session. The
+  second one is the check that matters: a key only shows the server writes to
+  Redis, not that it reads from there. The refusal is HTTP 404 with
+  `Session not found or has expired.`, and the check matches that message.
+  An unrelated 404 must not pass.
+- **Sharing the sessions does not share the registry.** App-driven
+  `tools/list_changed` broadcasts go to the sessions listed in a registry on
+  `cache.system`, which is local to each machine (shopware/shopware#19980). The
+  lane overrides `shopware.mcp.session_registry_cache` and
+  `mcp.store_api.session_registry_cache` the way the docs describe, and a check
+  fails if the registry isn't in Redis. When core fixes the default, drop the
+  override from setup-lane and keep the check.
+- The registry is written without a TTL, so it gets the pool's
+  `default_lifetime`. That is safe only because every MCP response carries
+  `Mcp-Session-Id` and rewrites the registry. A pool lifetime shorter than
+  `session.ttl` would drop live sessions from it.
+
 ## Auth
 
 The MCP server at `SW_BASE_URL/api/_mcp` takes **access keys, NOT OAuth**:
@@ -467,6 +499,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
 | `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
+| `functional/sessions.py` | Where the sessions live: Redis keys, TTL, registry, endpoint separation, `DELETE`, and refusal once the key is gone. Needs `--redis-url` / `MCP_EVALS_REDIS_URL`, skips without. See [Session store](#session-store) |
+| `functional/resp.py` | The four Redis commands `sessions.py` needs, over a socket, so the check needs no Redis client library |
 | `functional/principals.py` | The allowlist matrix's throwaway integrations, users and ACL role, created through the Admin API with the suite's own key (`client_credentials` accepts `SWUA…`) and deleted in a `finally`. Behind `--provision-principals` |
 | `functional/customer.py` | Logs the customer half in, registering the account through the Store API on first use. The context token is only in the `sw-context-token` header, and `storefrontUrl` has to come from the sales channel — both cost a debugging round to find |
 | `eval/preflight.py` | One read-only call, no model, ~1s. Fails with a named cause and, on the Store endpoint, probes the UCP profile URI — the one cause the error text can never name |
@@ -488,7 +522,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
-| `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static` + `admin-eval` green on that commit. Merges with an octo-sts token (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment |
+| `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static`, `admin-eval` and `session-store` green on that commit. Merges with an octo-sts token (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |
 | `tool-history/lint-budget.json` | Committed ceiling for toollint's two parameter counts; may fall, may not rise |

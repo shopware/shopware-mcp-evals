@@ -720,6 +720,99 @@ jobs:
 
 
   # ---------------------------------------------------------------------------
+  # 1b. The Redis session store — the production setup for more than one
+  # worker, which no other job runs. Its own lane because the store is fixed
+  # when the container compiles. No model, no credit, so it gates — including
+  # the nightly auto-merge: eval/reconcile.py requires it, so a trunk commit
+  # that breaks Redis-backed sessions is not pinned unseen.
+  #
+  # Behind `static`, on the commit static resolved, for the same reason as the
+  # eval jobs: a verdict that decides whether commit A is pinned has to be
+  # measured on A. It runs alongside them, so the wait costs no wall clock.
+  # ---------------------------------------------------------------------------
+  session-store:
+    name: Redis session store
+    needs: static
+    if: ${{ !cancelled() && needs.static.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+    steps:
+      - name: Checkout evals repo
+        uses: actions/checkout@v7
+
+      - name: Bootstrap Python
+        uses: ./.github/actions/bootstrap
+
+      - name: Set up the lane
+        id: lane
+        uses: ./.github/actions/setup-lane
+        with:
+          shopware_repo: ${{ env.SHOPWARE_REPO }}
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
+          event_name: ${{ github.event_name }}
+          app_url: ${{ env.APP_URL }}
+          # Only for the sales-channel key, which setup-lane mints alongside the
+          # UCP config. With the Store suite off there is no key, and
+          # functional.sessions checks admin alone and says so.
+          run_store: ${{ env.RUN_STORE }}
+          dev_tools_ref: ${{ github.event.inputs.dev_tools_ref }}
+          merchant_tools_ref: ${{ github.event.inputs.merchant_tools_ref }}
+          agentic_commerce_ref: ${{ github.event.inputs.agentic_commerce_ref }}
+          plugins_pat: ${{ secrets.PLUGINS_PAT }}
+          github_token: ${{ github.token }}
+          session_store: redis
+          redis_url: redis://localhost:6379/5
+
+      - name: Where the sessions live
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_ACCESS_KEY: ${{ steps.lane.outputs.sw_access_key }}
+          SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
+          SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
+        run: |
+          python -m functional.sessions --redis-url redis://localhost:6379/5 \
+            || { echo "::error::MCP sessions are not (only) in Redis — see the step log for which check failed"; exit 1; }
+
+      # Everything else still has to hold on the other store: toolset
+      # enablement, isolation, ?toolsets= and the tool calls all run through
+      # sessions. Without principals — the allowlist does not depend on where
+      # sessions live, and static already covers it.
+      - name: Functional suite on the Redis store
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_ACCESS_KEY: ${{ steps.lane.outputs.sw_access_key }}
+          SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
+          MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
+          MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+        run: python -m functional.runner --endpoint admin
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: session-store-results
+          # The reports only. `report` merges every artifact into one results/,
+          # and this lane's tool-health-admin.json would overwrite static's —
+          # the one the eval gate is meant to read.
+          path: results/functional-*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Dump symfony server logs on failure
+        if: failure()
+        uses: ./.github/actions/dump-logs
+
+      - name: Stop Shopware
+        if: always()
+        working-directory: shopware
+        run: symfony server:stop 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------
   # 2a. The gating suite. Four arms, two of them advisory.
   # ---------------------------------------------------------------------------
   admin-eval:
@@ -1151,7 +1244,7 @@ jobs:
   # ---------------------------------------------------------------------------
   report:
     name: Report
-    needs: [static, admin-eval, store-eval]
+    needs: [static, session-store, admin-eval, store-eval]
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1390,6 +1483,7 @@ jobs:
           # eval/reconcile.py, which refuses to auto-merge on anything but success.
           STATIC_RESULT: ${{ needs.static.result }}
           ADMIN_EVAL_RESULT: ${{ needs.admin-eval.result }}
+          SESSION_STORE_RESULT: ${{ needs.session-store.result }}
           STORE_SNAPSHOT_RESULT: ${{ needs.static.outputs.store_snapshot }}
           MERGE_TOKEN: ${{ steps.merge_token.outputs.token }}
         run: |
@@ -1561,6 +1655,7 @@ jobs:
           AUTO_MERGE=false
           if python -m eval.reconcile --staged "${STAGED[@]}" "${SNAPSHOTS[@]}" \
                --job "static=${STATIC_RESULT}" --job "admin-eval=${ADMIN_EVAL_RESULT}" \
+               --job "session-store=${SESSION_STORE_RESULT}" \
                --job "store-snapshot=${STORE_SNAPSHOT_RESULT:-missing}" > /tmp/verdict.md; then
             AUTO_MERGE=true
           fi

@@ -28,6 +28,8 @@
 #   UCP_JOURNEY_PROMO_CODE  a promotion code, or discount-apply skips
 #   UCP_JOURNEY_CUSTOMER_EMAIL/_PASSWORD  the account the customer half of the
 #                         journey shops as; registered on first use if absent
+#   MCP_EVALS_REDIS_URL   the Redis pool the lane's MCP sessions use, if it is on
+#                         the Redis store; the session-store checks skip without
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -70,6 +72,13 @@ echo "NOTE: --allow-mutations places a REAL ORDER on ${SW_BASE_URL}."
 echo
 echo "=== static checks (admin)"
 "${PYTHON}" -m functional.runner --endpoint admin --provision-principals || true
+
+# Skips with its reason unless the lane is on the Redis session store and
+# MCP_EVALS_REDIS_URL names the pool, reachable from here. Configuring the lane
+# is not this script's job — setup-lane shows the recipe.
+echo
+echo "=== session store"
+"${PYTHON}" -m functional.sessions || true
 
 if [ "${RUN_EVAL}" != "true" ]; then
   echo
