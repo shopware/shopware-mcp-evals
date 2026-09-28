@@ -104,7 +104,19 @@ def test_wait_gives_up_at_the_deadline_and_says_on_what() -> None:
     code, reason = A.wait(const([]), [LINT], [EVALS], timeout=30, interval=10, sleep=clock.sleep, clock=clock)
 
     assert code == 2
-    assert reason == f"`{LINT}`, `{EVALS}` had not finished on this commit after 30s"
+    assert reason == f"`{LINT}`, `{EVALS}` never started a pull_request run on this commit after 30s"
+
+
+def test_the_deadline_tells_a_run_that_never_started_from_a_slow_one() -> None:
+    """Different fixes: no run at all means the PR's events triggered nothing,
+    a pending one only a slow runner."""
+    clock = Clock()
+    pending = [run(LINT, status="in_progress", conclusion="")]
+
+    code, reason = A.wait(const(pending), [LINT], [EVALS], timeout=30, interval=10, sleep=clock.sleep, clock=clock)
+
+    assert code == 2
+    assert reason == (f"`{EVALS}` never started a pull_request run on this commit; `{LINT}` had not finished after 30s")
 
 
 # ---------------------------------------------------------------------------

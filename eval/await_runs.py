@@ -80,13 +80,33 @@ def wait(
 ) -> tuple[int, str]:
     deadline = clock() + timeout
     while True:
-        result = verdict(fetch(), require, settle)
+        runs = fetch()
+        result = verdict(runs, require, settle)
         if result is not None:
             return (0, "") if result == "" else (1, result)
         if clock() >= deadline:
-            names = ", ".join(f"`{n}`" for n in (*require, *settle))
-            return 2, f"{names} had not finished on this commit after {int(timeout)}s"
+            return 2, _unfinished(runs, (*require, *settle), timeout)
         sleep(interval)
+
+
+def _unfinished(runs: Sequence[Run], names: Sequence[str], timeout: float) -> str:
+    """What was still missing at the deadline, split by cause.
+
+    A run that never registered and one that is still going want different
+    fixes: the first means the PR's events started no workflow at all (a PR
+    opened with a token whose events GitHub does not act on would look exactly
+    like this), the second only a slow runner. One sentence for both would send
+    whoever reads the PR comment after the wrong one.
+    """
+    seen = {run.name for run in runs}
+    never = [f"`{n}`" for n in names if n not in seen]
+    running = [f"`{n}`" for n in names if n in seen]
+    parts: list[str] = []
+    if never:
+        parts.append(f"{', '.join(never)} never started a pull_request run on this commit")
+    if running:
+        parts.append(f"{', '.join(running)} had not finished")
+    return f"{'; '.join(parts)} after {int(timeout)}s"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
