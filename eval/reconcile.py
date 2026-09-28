@@ -45,13 +45,14 @@ from eval.result_schema import Snapshot
 # block the merge.
 MERGEABLE_FILES = frozenset({"shopware.sha", "tool-history/lint-budget.json"})
 
-# What must have succeeded on the commit being pinned. `static` and `admin-eval`
-# are the gates; `store-snapshot` is the step that measures the Store catalogue.
+# What must have succeeded on the commit being pinned. `static`, `admin-eval`
+# and `session-store` are the gates; `store-snapshot` is the step that measures
+# the Store catalogue.
 # It runs continue-on-error and is skipped without the plugin, and in both cases
 # the committed store.json is still on disk — so without this entry the Store
 # comparison would read the baseline against itself and call it "no drift". The
 # Store EVAL is advisory everywhere else, so it gets no veto here.
-REQUIRED = ("static", "admin-eval", "store-snapshot")
+REQUIRED = ("static", "admin-eval", "session-store", "store-snapshot")
 
 
 def blockers(
@@ -120,7 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(
         "**Merged automatically:** only `shopware.sha` moved, both catalogues were measured "
-        "tonight and neither drifted, and `static` and `admin-eval` passed on this Shopware commit."
+        "tonight and neither drifted, and `static`, `admin-eval` and `session-store` passed on this Shopware commit."
     )
     return 0
 

@@ -897,10 +897,12 @@ def _handle_answering_call(
     # empty and only the in-band message exists. Recording just `err` is why
     # every failed attempt in the last run read `tool_error` with error="" —
     # the five gating failures had to be diagnosed from the fixture text.
+    # In-band first, as in check(): with `isError: true` the same body also
+    # arrives as `err`, raw.
     attempt["executed"] = True
     attempt["ok"] = ok
     attempt["reason"] = reason
-    attempt["error"] = (err or inband_error(result_text) or "")[:200]
+    attempt["error"] = (inband_error(result_text) or err or "")[:200]
     st.attempted_tools.append(attempt)
 
     if correct and ok:

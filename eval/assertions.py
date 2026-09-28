@@ -171,7 +171,14 @@ def check(expect: str | ExpectSpec | None, result_text: str | None, error: str |
     # cannot be executed is still exempt, and folded into `error` so it sorts
     # through exactly the same not-found / malformed / environment logic rather
     # than growing a parallel one.
-    error = error or inband_error(result_text)
+    #
+    # The in-band message goes FIRST. Since shopware/shopware#19965 the server
+    # also flags a `{"success": false}` body with `isError: true`, so
+    # mcp_call_error returns that body as raw JSON — and the raw JSON starts
+    # with `{`, not with the code, so the anchored `not_found:` never matched.
+    # It graded every correct get_order pick as tool_error. A JSON-RPC error has
+    # no result text, so the two never compete for the same call.
+    error = inband_error(result_text) or error
 
     if error:
         # Not-found is checked FIRST, before the validation markers, and that
