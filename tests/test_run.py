@@ -395,6 +395,44 @@ def test_run_store_flow_when_ucp_is_on_the_default_surface(monkeypatch: pytest.M
     assert rep.failed == 0, [r for r in rep.records if r["status"] == "fail"]
 
 
+def _store_toolsets_with_ucp() -> list[Toolset]:
+    import ucp
+
+    return [
+        *STORE_TOOLSETS,
+        {
+            "name": "ucp",
+            "title": "UCP",
+            "description": "ucp shopping",
+            "enabled": False,
+            "tools": sorted(ucp.all_classified()),
+        },
+    ]
+
+
+def test_run_store_flow_when_ucp_is_its_own_toolset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """shopware/agentic-commerce#254: the UCP tools sit in a `ucp` toolset and a
+    plain /store-api/_mcp connection advertises only the meta-tools, like admin."""
+    fake = FakeServer(_store_toolsets_with_ucp())
+    _wire(monkeypatch, fake)
+    rep = Reporter("store", color=False)
+    session, _ = fake.init()
+    R.run_store(rep, STORE, session)
+    assert rep.failed == 0, [r for r in rep.records if r["status"] == "fail"]
+
+
+def test_run_store_flow_flags_a_ucp_tool_that_is_deferred_and_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A UCP tool that is in a toolset must not also sit on the default surface:
+    that is a leak, not a published tool."""
+    fake = FakeServer(_store_toolsets_with_ucp(), default_extra=frozenset({"search_catalog"}))
+    _wire(monkeypatch, fake)
+    rep = Reporter("store", color=False)
+    session, _ = fake.init()
+    R.run_store(rep, STORE, session)
+    fails = [r for r in rep.records if r["status"] == "fail"]
+    assert any("unexpected tools advertised: search_catalog" in str(r.get("error", "")) for r in fails), fails
+
+
 def test_run_admin_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeServer(ADMIN_TOOLSETS)
     _wire(monkeypatch, fake)
