@@ -243,6 +243,29 @@ def test_an_alternative_from_acceptable_tools_is_accepted() -> None:
 
 
 @pytest.mark.usefixtures("stub_mcp")
+def test_matching_expected_args_pass() -> None:
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(expected_args={"entity": "product"}), "m", None, 6)
+
+    assert result["passed"] is True
+
+
+@pytest.mark.usefixtures("stub_mcp")
+def test_the_right_tool_with_the_wrong_args_fails_as_wrong_args_not_wrong_tool() -> None:
+    """entity-delete on `product` instead of `product_category` executes as
+    cleanly as the link removal and deletes the product. The tool was right, so
+    `wrong_tool` would misname it; the call was accepted, so no tier catches it."""
+    spec = fixture(expected_args={"entity": "product_category"})
+
+    result = E.run_fixture_discovery("openai", FakeClient(), spec, "m", None, 6)
+
+    assert result["passed"] is False
+    assert result.get("fail_reason") == "wrong_args"
+    assert result.get("first_tool_correct") is True
+    attempt = result.get("attempted_tools", [])[0]
+    assert attempt.get("error") == "entity was 'product', expected 'product_category'"
+
+
+@pytest.mark.usefixtures("stub_mcp")
 def test_no_tool_call_at_all_is_its_own_fail_reason() -> None:
     result = E.run_fixture_discovery("openai", FakeClient(None), fixture(), "m", None, 6)
 

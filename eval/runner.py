@@ -47,7 +47,7 @@ import requests
 import yaml
 
 import lane
-from eval.assertions import check, inband_error
+from eval.assertions import args_mismatch, check, inband_error
 from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
     BOLD,
@@ -899,10 +899,16 @@ def _handle_answering_call(
     # the five gating failures had to be diagnosed from the fixture text.
     # In-band first, as in check(): with `isError: true` the same body also
     # arrives as `err`, raw.
+    # The right tool with the wrong `expected_args` did something else: removing
+    # a product from a category via entity-delete on `product` executes as
+    # cleanly as the mapping-entity delete it should have been.
+    mismatch = args_mismatch(fixture.get("expected_args"), call["input"]) if correct else None
+    if mismatch and ok:
+        ok, reason = False, "wrong_args"
     attempt["executed"] = True
     attempt["ok"] = ok
     attempt["reason"] = reason
-    attempt["error"] = (inband_error(result_text) or err or "")[:200]
+    attempt["error"] = (mismatch or inband_error(result_text) or err or "")[:200]
     st.attempted_tools.append(attempt)
 
     if correct and ok:

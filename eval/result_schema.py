@@ -364,6 +364,8 @@ class Fixture(TypedDict, total=False):
     expected_tool: str
     expected_toolset: str
     acceptable_tools: list[str]
+    # Top-level arguments the answering call must carry, compared exactly.
+    expected_args: JsonObject
     expect_no_tool: bool
     expect_result: "str | ExpectSpec"
     max_steps: int
