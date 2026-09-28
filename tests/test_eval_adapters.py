@@ -740,6 +740,28 @@ def test_an_unsafe_tool_is_graded_on_selection_and_never_called(
     assert (result.get("attempted_tools") or [{}])[0].get("executed") is False
 
 
+@pytest.mark.parametrize(
+    ("expected", "passed"),
+    [({"entity": "product"}, True), ({"entity": "product_category"}, False)],
+)
+def test_expected_args_grade_an_unsafe_tool_without_calling_it(
+    stub_exec: ExecStub, expected: JsonObject, passed: bool
+) -> None:
+    """The unsafe branch returns before execution. The arguments need no call to
+    check, so they are graded there too instead of passing on the name alone."""
+    _, calls = stub_exec
+    spec = fixture(tool="shopware-media-upload", expected_args=expected)
+
+    result = E.run_fixture_discovery("openai", FakeClient("shopware-media-upload"), spec, "m", None, 6)
+
+    assert calls == [], "still never sent to the server"
+    assert result["passed"] is passed
+    if not passed:
+        assert result.get("fail_reason") == "wrong_args"
+        attempt = (result.get("attempted_tools") or [{}])[0]
+        assert attempt.get("error") == "entity was 'product', expected 'product_category'"
+
+
 def test_an_unknown_tool_is_not_executed_either(stub_exec: ExecStub) -> None:
     _, calls = stub_exec
 
