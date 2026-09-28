@@ -252,7 +252,9 @@ def _execute(
     # error, so checking only mcp_call_error would pass every rejected call.
     from eval.assertions import inband_error
 
-    error = mc.mcp_call_error(response) or inband_error(text) or ""
+    # In-band first: an `isError: true` result carries the same body as raw
+    # JSON, and only the parsed form names the code (see check()).
+    error = inband_error(text) or mc.mcp_call_error(response) or ""
     return error, text, elapsed, response
 
 
