@@ -166,6 +166,46 @@ def test_a_missing_suite_prerequisite_fails_without_calling_the_tool(monkeypatch
     assert "probe image not reachable" in rep.records[-1].get("error", "")
 
 
+def _upload_failing_with(monkeypatch: pytest.MonkeyPatch, message: str) -> R.Reporter:
+    def fake_call(_session: str, _tool: str, _args: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:
+        _ = endpoint
+        body = json.dumps({"success": False, "error": f"Upload failed: {message}"})
+        return {"result": {"isError": True, "content": [{"type": "text", "text": body}]}}
+
+    monkeypatch.setattr(R, "mcp_call", fake_call)
+    rep = R.Reporter("test", color=False)
+    R.run_checks(rep, "sid", ADMIN, (by_name("shopware-media-upload"),), FULL_CTX)
+    return rep
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Cannot open source stream to read from https://example.test/probe.png.",
+        'Provided URL "http://localhost:8000/mcp-evals-probe.png" is not allowed.',
+        "The feature to upload a media via URL is disabled.",
+    ],
+)
+def test_a_shop_that_cannot_fetch_the_probe_is_not_a_broken_tool(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
+    """The runner can reach the image while the shop cannot: no egress, URL
+    validation, or URL upload switched off. The download is the shop's, so its
+    failure FAILS the run as a check and leaves the tool out of tool-health."""
+    rep = _upload_failing_with(monkeypatch, message)
+
+    assert rep.failed == 1
+    record = rep.records[-1]
+    assert record.get("tool") == "check"
+    assert "the shop could not fetch the probe image" in record.get("error", "")
+    assert message in record.get("error", ""), "the shop's own words must survive"
+
+
+def test_any_other_upload_failure_still_counts_against_the_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = _upload_failing_with(monkeypatch, 'The file extension "" for file "x" is not supported.')
+
+    assert rep.failed == 1
+    assert rep.records[-1].get("tool") == "shopware-media-upload"
+
+
 def test_skip_labels_name_the_tool_and_the_reason() -> None:
     check = by_name("shopware-order-state")
 

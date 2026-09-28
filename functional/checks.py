@@ -19,6 +19,11 @@ get cart token or customer ID" depending on which prerequisite actually failed.
 `fails_without` has the same shape, but a missing key FAILS the check with its
 reason instead of skipping it. It is for a prerequisite the suite itself is
 responsible for, where a skip would only hide that nobody provided it.
+
+`harness_errors` names error text that, when the call fails with it, says the
+environment failed rather than the tool. Such a failure is still a FAIL, but a
+check failure, so the tool-health map the eval gate reads does not call the
+tool broken.
 """
 
 from __future__ import annotations
@@ -64,6 +69,8 @@ class ToolCheck:
     # that was working.
     requires: tuple[tuple[str, str | Callable[[Context], str]], ...] = ()
     fails_without: tuple[tuple[str, str], ...] = ()
+    # (substring of the error, why that is the environment's failure).
+    harness_errors: tuple[tuple[str, str], ...] = ()
     # Text the response must contain. Without it a check only asserts that the
     # tool answered *something*, which for a reader is satisfied by an empty
     # result — the tool can be pointed at the wrong file, find nothing, and pass.
@@ -88,6 +95,13 @@ class ToolCheck:
         """Why this check fails before it runs, or None. First missing key wins."""
         for key, reason in self.fails_without:
             if not ctx.get(key):
+                return reason
+        return None
+
+    def harness_error(self, error: str) -> str | None:
+        """Why a failure with `error` is the environment's, or None if it is the tool's."""
+        for marker, reason in self.harness_errors:
+            if marker in error:
                 return reason
         return None
 
@@ -198,6 +212,18 @@ CORE_CHECKS: tuple[ToolCheck, ...] = (
                 f"probe image not reachable at {MEDIA_UPLOAD_URL}, so the tool was not called; "
                 "see functional/assets/README.md",
             ),
+        ),
+        # That probe runs HERE; the download runs in the SHOP. A shop that cannot
+        # reach the URL (no egress) or will not fetch it (URL validation, URL
+        # upload switched off) fails with one of FileFetcher's messages, and none
+        # of them is a finding about the tool.
+        harness_errors=tuple(
+            (marker, f"the shop could not fetch the probe image at {MEDIA_UPLOAD_URL}, not a tool failure")
+            for marker in (
+                "Cannot open source stream to read from",
+                "is not allowed.",
+                "The feature to upload a media via URL is disabled.",
+            )
         ),
     ),
     ToolCheck(

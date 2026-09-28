@@ -26,7 +26,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
@@ -127,6 +127,7 @@ def assert_tool(
     args: JsonObject,
     label: str | None = None,
     contains: str = "",
+    harness_error: Callable[[str], str | None] | None = None,
 ) -> JsonObject:
     """Call a tool; pass only if it neither errored nor reported failure in band.
 
@@ -140,13 +141,20 @@ def assert_tool(
     admin checks were green over a mechanism that could not have seen a single
     Store failure. `eval/preflight.py` already had this right; this is the same
     `inband_error` and the same reasoning.
+
+    `harness_error` maps an error to the reason it is the environment's failure
+    (see ToolCheck.harness_errors); such a failure is recorded as a check, not
+    against the tool.
     """
     label = label or tool
     resp = mcp_call(session, tool, args, endpoint=endpoint)
     error = (resp.get("error") or {}).get("message", "")
     content = (resp.get("result") or {}).get("content", [])
     text = mcp_result_text(resp)
-    if error:
+    failure = error or (inband_error(text) if content else "")
+    if failure and harness_error and (why := harness_error(failure)):
+        rep.check_fail(label, f"{why}: {failure}")
+    elif error:
         rep.tool_fail(tool, label, error)
     elif not content:
         rep.tool_fail(tool, label, "empty content in response")
@@ -680,6 +688,7 @@ def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[To
                 # there is nothing known to look for, and demanding it would
                 # fail every shop this suite did not build.
                 contains=check.contains if ctx.get("log_probe", True) else "",
+                harness_error=check.harness_error,
             )
 
 
