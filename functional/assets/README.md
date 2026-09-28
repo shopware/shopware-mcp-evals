@@ -16,10 +16,17 @@ that is two failure modes wearing one hat:
 Neither says anything about `shopware-media-upload`. A check that can only pass
 while a third party keeps a file where it was is not measuring the tool.
 
-So the lane serves it: `.github/actions/setup-lane` copies this file into the
-shop's `public/`, and the workflow points `MCP_MEDIA_UPLOAD_URL` at the shop's
-own URL. The tool fetches the URL server-side, and a server can always reach its
-own `public/` — same question, nothing in the way that we do not control.
+So the check fetches this file, from one of two places we control:
+
+- **By default, from this repository:**
+  `https://raw.githubusercontent.com/shopware/shopware-mcp-evals/main/functional/assets/media-upload-probe.png`.
+  It needs no setup and it is a public URL, which matters: an `APP_ENV=prod` shop
+  validates upload URLs (`shopware.media.enable_url_validation`) and refuses a
+  localhost one, so copying the file into a prod lane's `public/` does not work.
+- **In CI, from the shop itself:** `.github/actions/setup-lane` copies this file
+  into the shop's `public/`, and the workflow points `MCP_MEDIA_UPLOAD_URL` at the
+  shop's own URL. The lane runs `dev`, where that validation is off, and the run
+  needs no network beyond the lane.
 
 **Provenance.** Generated for this repository — a plain geometric pattern, no
 third-party rights, nothing to expire. To regenerate it, or to make one at a
@@ -54,13 +61,12 @@ pathlib.Path("media-upload-probe.png").write_bytes(
 
 ## Running the media-upload check locally
 
-The copy step only runs in CI, so a local run has nothing to fetch. Either put
-the file where your shop serves it:
+Nothing to set up: the default URL is this repository's copy, and the shop only
+needs outbound internet to fetch it. An offline lane can serve the file itself
+and say so with `MCP_MEDIA_UPLOAD_URL` — on a `dev` lane only, see above.
 
-```bash
-cp functional/assets/media-upload-probe.png <your-shopware>/public/
-```
-
-…or point the check somewhere else with `MCP_MEDIA_UPLOAD_URL`. Without either,
-the check **SKIPs** with the reason — an image the lane does not serve is
-missing setup, not evidence that the tool is broken.
+The check does **not** skip when the image is unreachable. It FAILS, naming the
+URL and not calling the tool: the image is committed, so an unreachable one is
+this suite's problem, never a finding about `shopware-media-upload`, and a skip
+is exactly how the trunk lane went without this check unnoticed. Opt out
+explicitly with `--skip-media-upload`.
