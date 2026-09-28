@@ -946,7 +946,9 @@ def _searched(session: str, endpoint: Endpoint) -> set[str]:
 
 def _call_error(resp: McpResponse) -> str:
     """Why a call did not run, including the in-band `{"success": false}` kind."""
-    return mcp_call_error(resp) or inband_error(mcp_result_text(resp)) or ""
+    # In-band first: an `isError: true` result carries the same body as raw
+    # JSON, and only the parsed form names the code (see eval.assertions.check).
+    return inband_error(mcp_result_text(resp)) or mcp_call_error(resp) or ""
 
 
 def _refused_by_allowlist(resp: McpResponse) -> bool:

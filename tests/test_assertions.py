@@ -292,6 +292,30 @@ def test_an_in_band_not_found_still_satisfies_the_accepted_tier() -> None:
     assert A.check("data", body, None) == (False, "not_found")
 
 
+def test_an_is_error_body_is_read_in_band_not_as_raw_json() -> None:
+    """Since shopware/shopware#19965 the server flags a `{"success": false}` body
+    with `isError: true`, so mcp_call_error hands the same body over as raw JSON.
+
+    Measured on the Iteration 3 trunk lane: the guest get_order refusal arrived
+    that way, the anchored `not_found:` never saw the code behind the `{`, and
+    all three correct get_order picks graded as tool_error.
+    """
+    body = json.dumps(
+        {
+            "success": False,
+            "error": {
+                "type": "not_found",
+                "message": 'Order "019f0a186a007d47bafa9bc8bb53c140" is not available to this request.',
+            },
+        }
+    )
+
+    assert A.check("accepted", body, body) == (True, None)
+    assert A.check("data", body, body) == (False, "not_found")
+    # A transport error with no result text is still graded on its own words.
+    assert A.check("accepted", None, "500 Internal Server Error") == (False, "tool_error")
+
+
 def test_a_successful_body_is_untouched() -> None:
     assert A.check("accepted", json.dumps({"success": True, "data": {"id": "x"}}), None) == (True, None)
     assert A.inband_error(json.dumps({"success": True})) is None
