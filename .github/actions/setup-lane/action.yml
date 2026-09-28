@@ -687,7 +687,7 @@ runs:
         if curl -fsS -o /dev/null "${{ inputs.app_url }}/mcp-evals-probe.png"; then
           echo "Serving the media-upload probe at ${{ inputs.app_url }}/mcp-evals-probe.png"
         else
-          echo "::warning::the media-upload probe is not being served; shopware-media-upload will SKIP"
+          echo "::warning::the media-upload probe is not being served; the shopware-media-upload check will FAIL naming this URL"
         fi
 
     # The suite authenticates as the ADMINISTRATOR USER, not as an integration.

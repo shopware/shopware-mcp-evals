@@ -15,6 +15,15 @@ rebuilt per run.
 missing or empty decides the skip, and its reason goes in the label, so
 `merchant-cart-checkout` can report "no storefront sales channel" or "could not
 get cart token or customer ID" depending on which prerequisite actually failed.
+
+`fails_without` has the same shape, but a missing key FAILS the check with its
+reason instead of skipping it. It is for a prerequisite the suite itself is
+responsible for, where a skip would only hide that nobody provided it.
+
+`harness_errors` names error text that, when the call fails with it, says the
+environment failed rather than the tool. Such a failure is still a FAIL, but a
+check failure, so the tool-health map the eval gate reads does not call the
+tool broken.
 """
 
 from __future__ import annotations
@@ -26,7 +35,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from eval.result_schema import JsonObject
-from mcp_client import SW_BASE_URL
 
 # The live ids and flags gather_context assembles, keyed by the names `requires`
 # refers to. Values are heterogeneous (ids are strings, --skip flags are bools),
@@ -60,6 +68,9 @@ class ToolCheck:
     # message, two wrong diagnoses, and it sent us looking at the seeding step
     # that was working.
     requires: tuple[tuple[str, str | Callable[[Context], str]], ...] = ()
+    fails_without: tuple[tuple[str, str], ...] = ()
+    # (substring of the error, why that is the environment's failure).
+    harness_errors: tuple[tuple[str, str], ...] = ()
     # Text the response must contain. Without it a check only asserts that the
     # tool answered *something*, which for a reader is satisfied by an empty
     # result — the tool can be pointed at the wrong file, find nothing, and pass.
@@ -80,19 +91,39 @@ class ToolCheck:
                 return reason(ctx) if callable(reason) else reason
         return None
 
+    def failed_by(self, ctx: Context) -> str | None:
+        """Why this check fails before it runs, or None. First missing key wins."""
+        for key, reason in self.fails_without:
+            if not ctx.get(key):
+                return reason
+        return None
 
-# The image shopware-media-upload fetches. Served by the shop itself, from a file
-# committed at functional/assets/ — see its README.
+    def harness_error(self, error: str) -> str | None:
+        """Why a failure with `error` is the environment's, or None if it is the tool's."""
+        for marker, reason in self.harness_errors:
+            if marker in error:
+                return reason
+        return None
+
+
+# The image shopware-media-upload fetches: the file committed at
+# functional/assets/, see its README.
 #
-# Both previous values were URLs on somebody else's host, and both broke in a way
+# Both earlier values were URLs on somebody else's host, and both broke in a way
 # that read as a tool bug: assets.shopware.com answered 403, then
 # upload.wikimedia.org 404'd once the file was removed and failed the whole static
 # job with 47 of 48 checks passing. Neither said anything about the tool.
 #
-# A local run has to put the file where its shop serves it (the README has the one
-# command) or point MCP_MEDIA_UPLOAD_URL elsewhere. Without either, the check
-# SKIPs rather than failing — see `media_upload_url` below.
-MEDIA_UPLOAD_URL = os.environ.get("MCP_MEDIA_UPLOAD_URL", f"{SW_BASE_URL}/mcp-evals-probe.png")
+# The default is the committed file itself, as this public repository serves it.
+# It is ours, so it does not move unless this repository moves it, and it is a
+# public URL — which matters, because an APP_ENV=prod shop validates upload URLs
+# and refuses a localhost one. That is why the next step, the shop serving the
+# file from its own public/, only works on a dev lane: CI does exactly that
+# (setup-lane copies the file, the workflow sets MCP_MEDIA_UPLOAD_URL) so it needs
+# no network beyond the lane. Any other lane gets the default and no setup.
+MEDIA_UPLOAD_PROBE = "functional/assets/media-upload-probe.png"
+MEDIA_UPLOAD_DEFAULT_URL = f"https://raw.githubusercontent.com/shopware/shopware-mcp-evals/main/{MEDIA_UPLOAD_PROBE}"
+MEDIA_UPLOAD_URL = os.environ.get("MCP_MEDIA_UPLOAD_URL", MEDIA_UPLOAD_DEFAULT_URL)
 
 # The line the lane writes into the server's log during setup, and the thing the
 # log readers are then asked to find. Static on both sides on purpose: a check
@@ -167,13 +198,32 @@ CORE_CHECKS: tuple[ToolCheck, ...] = (
             "fileName": f"mcp-test-{uuid.uuid4().hex[:12]}.png",
         },
         # `media_upload_enabled` is set from --skip-media-upload: this is the only
-        # check that writes a real file. `media_upload_url` is the URL only if
-        # something is actually served there, so an unseeded lane SKIPs with the
-        # reason instead of reporting the tool broken over a 404 it could not have
-        # avoided.
-        (
-            ("media_upload_enabled", "--skip-media-upload"),
-            ("media_upload_url", f"no image served at {MEDIA_UPLOAD_URL}; see functional/assets/README.md"),
+        # check that writes a real file, and the flag is the only way to skip it.
+        (("media_upload_enabled", "--skip-media-upload"),),
+        # `media_upload_url` is the URL only if something is actually served
+        # there. The image is committed, so an unserved one is this suite's own
+        # failure, never missing lane setup: it FAILS, naming the URL rather than
+        # the tool, instead of reporting the tool broken over a 404 it could not
+        # have avoided — or skipping, which is how nobody noticed the local lane
+        # had never run this check.
+        fails_without=(
+            (
+                "media_upload_url",
+                f"probe image not reachable at {MEDIA_UPLOAD_URL}, so the tool was not called; "
+                "see functional/assets/README.md",
+            ),
+        ),
+        # That probe runs HERE; the download runs in the SHOP. A shop that cannot
+        # reach the URL (no egress) or will not fetch it (URL validation, URL
+        # upload switched off) fails with one of FileFetcher's messages, and none
+        # of them is a finding about the tool.
+        harness_errors=tuple(
+            (marker, f"the shop could not fetch the probe image at {MEDIA_UPLOAD_URL}, not a tool failure")
+            for marker in (
+                "Cannot open source stream to read from",
+                "is not allowed.",
+                "The feature to upload a media via URL is disabled.",
+            )
         ),
     ),
     ToolCheck(

@@ -26,7 +26,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
@@ -127,6 +127,7 @@ def assert_tool(
     args: JsonObject,
     label: str | None = None,
     contains: str = "",
+    harness_error: Callable[[str], str | None] | None = None,
 ) -> JsonObject:
     """Call a tool; pass only if it neither errored nor reported failure in band.
 
@@ -140,13 +141,20 @@ def assert_tool(
     admin checks were green over a mechanism that could not have seen a single
     Store failure. `eval/preflight.py` already had this right; this is the same
     `inband_error` and the same reasoning.
+
+    `harness_error` maps an error to the reason it is the environment's failure
+    (see ToolCheck.harness_errors); such a failure is recorded as a check, not
+    against the tool.
     """
     label = label or tool
     resp = mcp_call(session, tool, args, endpoint=endpoint)
     error = (resp.get("error") or {}).get("message", "")
     content = (resp.get("result") or {}).get("content", [])
     text = mcp_result_text(resp)
-    if error:
+    failure = error or (inband_error(text) if content else "")
+    if failure and harness_error and (why := harness_error(failure)):
+        rep.check_fail(label, f"{why}: {failure}")
+    elif error:
         rep.tool_fail(tool, label, error)
     elif not content:
         rep.tool_fail(tool, label, "empty content in response")
@@ -666,11 +674,14 @@ def verify_admin_discovery(rep: Reporter, endpoint: Endpoint, entity_toolset: st
 
 
 def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[ToolCheck, ...], ctx: Context) -> None:
-    """Run a table of checks, skipping any whose prerequisites are missing."""
+    """Run a table of checks, skipping or failing any whose prerequisites are missing."""
     for check in checks:
         reason = check.blocked_by(ctx)
+        failure = None if reason else check.failed_by(ctx)
         if reason:
             rep.skip(check.skip_label(reason))
+        elif failure:
+            rep.check_fail(check.label(ctx), failure)
         else:
             assert_tool(
                 rep,
@@ -683,6 +694,7 @@ def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[To
                 # there is nothing known to look for, and demanding it would
                 # fail every shop this suite did not build.
                 contains=check.contains if ctx.get("log_probe", True) else "",
+                harness_error=check.harness_error,
             )
 
 
@@ -690,8 +702,8 @@ def _served(url: str) -> str:
     """`url` if something is actually served there, else "".
 
     HEAD first, GET as the fallback — a server that answers 405 to HEAD is
-    common enough that treating it as absent would skip the check on a lane
-    that was seeded correctly.
+    common enough that treating it as absent would fail the check on a lane
+    that serves the image correctly.
 
     Probed from HERE, while the tool fetches it from the SHOP. Those are the same
     machine in CI, and on any lane this suite can talk to they agree about the
@@ -729,9 +741,8 @@ def gather_context(session: str, endpoint: Endpoint, args: argparse.Namespace) -
         ),
         # Inverted so the check table can treat it like any other prerequisite.
         "media_upload_enabled": not cast(bool, args.skip_media_upload),
-        # Empty when nothing is served there, which the check declares a
-        # prerequisite: an image the lane never seeded is missing setup, not
-        # evidence that shopware-media-upload is broken.
+        # Empty when nothing is served there, which FAILS the check with that
+        # reason (see its `fails_without`) instead of blaming the tool for a 404.
         "media_upload_url": _served(MEDIA_UPLOAD_URL),
     }
 
