@@ -473,7 +473,7 @@ def run_second_order(rep: Reporter, session: str, endpoint: Endpoint, ctx: Conte
     the row to a new token), so the id `checkout.complete` handed back is already
     retired. The plugin knows the successor and stores it in its session metadata,
     and returns it to nobody. So a returning agent has no correct move: the only
-    id it holds is a dead one. Tracked as O12; agentic-commerce#162 records the
+    id it holds is a dead one. Tracked as O12; agentic-commerce#163 records the
     two designs that failed because they defended the wrong invariant.
 
     Reported as a check rather than as tool assertions on purpose. `checkout-update`

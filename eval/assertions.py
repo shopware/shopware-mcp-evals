@@ -31,7 +31,7 @@ import json
 import re
 from typing import cast
 
-from eval.result_schema import ExpectSpec, as_list, as_object
+from eval.result_schema import ExpectSpec, JsonObject, as_list, as_object
 
 # Substrings that mark a server response as a rejection of the request rather
 # than an answer to it. Matched case-insensitively against the error text.
@@ -230,6 +230,23 @@ def check(expect: str | ExpectSpec | None, result_text: str | None, error: str |
             return False, f"missing_text:{needle}"
 
     return True, None
+
+
+def args_mismatch(expected: JsonObject | None, given: JsonObject) -> str | None:
+    """How `given` misses a fixture's `expected_args`, or None if it matches.
+
+    A subset match on top-level arguments, compared exactly. It exists for the
+    fixtures where the tool alone proves nothing: "take this product out of that
+    category" answered with `entity-delete` on `product` picks the right tool and
+    deletes the product. Only the entity says which, and a dry-run executes
+    either one cleanly, so no result tier can tell them apart.
+    """
+    for key, want in (expected or {}).items():
+        if key not in given:
+            return f"{key} missing, expected {want!r}"
+        if given[key] != want:
+            return f"{key} was {given[key]!r}, expected {want!r}"
+    return None
 
 
 def normalise(expect: str | ExpectSpec | None) -> ExpectSpec:

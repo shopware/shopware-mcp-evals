@@ -880,6 +880,49 @@ fixtures:
       Delete is deferred; nothing on the default surface deletes. The model must
       discover entity-delete (and should later use dryRun first — not graded here).
 
+  # Removing a many-to-many link (shopware/shopware#20869). The tool alone proves
+  # nothing here: entity-delete on `product` is the right tool and deletes the
+  # product, and a dry-run executes either cleanly. `expected_args` is what
+  # grades these. They are also the only fixtures measuring the ~400 tokens of
+  # link guidance #20869 added to the delete, upsert and schema descriptions.
+  # The category and option ids are phantoms on purpose: a dry-run delete of a
+  # mapping row that does not exist is accepted rather than refused.
+  - id: m2m_remove_category
+    category: disambiguation
+    prompt: "Remove product {product_id} from category 019f0a6e3c007a2b9d4e5f6a7b8c9d01. The product itself stays."
+    expected_tool: shopware-entity-delete
+    expected_toolset: entity
+    expected_args:
+      entity: product_category
+    notes: >
+      Canonical. A link removal is a delete on the mapping entity
+      product_category, not on product and not an upsert of the product.
+
+  - id: m2m_unlist_from_category
+    category: disambiguation
+    prompt: "Product {product_id} shouldn't be listed under 019f0a6e3c007a2b9d4e5f6a7b8c9d01 any more — keep selling it everywhere else."
+    expected_tool: shopware-entity-delete
+    expected_toolset: entity
+    expected_args:
+      entity: product_category
+    notes: >
+      Paraphrase: says neither "category", "remove" nor "link". The model has to
+      infer that the id is a category assignment and that the answer is the
+      mapping row.
+
+  - id: m2m_unassign_property_option
+    category: disambiguation
+    prompt: "Unassign property option 019f0a6e3c007a2b9d4e5f6a7b8c9d02 from product {product_id}; leave its other properties as they are."
+    expected_tool: shopware-entity-delete
+    expected_toolset: entity
+    expected_args:
+      entity: product_property
+    notes: >
+      Boundary against entity-upsert: rewriting the product's `properties` looks
+      plausible and cannot remove a link (#20869's upsert description says so).
+      product_property, not product_category, so the model has to read the
+      mapping entity off entity-schema rather than copy the example.
+
   - id: discovery_theme_color
     category: discovery
     prompt: "Change the primary color of the theme for sales channel {sales_channel_id} to #ff0000."

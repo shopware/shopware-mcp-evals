@@ -11,7 +11,7 @@ import json
 import pytest
 
 from eval import assertions as A
-from eval.result_schema import ExpectSpec
+from eval.result_schema import ExpectSpec, JsonObject
 
 
 def payload(**data: object) -> str:
@@ -357,3 +357,23 @@ def test_an_error_without_violations_is_unchanged() -> None:
     body = json.dumps({"success": False, "error": {"type": "not_found", "message": "Cart not found."}})
 
     assert A.inband_error(body) == "not_found: Cart not found."
+
+
+# ---------------------------------------------------------------------------
+# expected_args
+# ---------------------------------------------------------------------------
+def test_expected_args_match_as_a_subset() -> None:
+    given: JsonObject = {"entity": "product_category", "ids": "[...]", "dryRun": True}
+
+    assert A.args_mismatch({"entity": "product_category"}, given) is None
+    assert A.args_mismatch(None, given) is None
+    assert A.args_mismatch({}, given) is None
+
+
+def test_expected_args_name_what_differs() -> None:
+    assert A.args_mismatch({"entity": "product_category"}, {"entity": "product"}) == (
+        "entity was 'product', expected 'product_category'"
+    )
+    assert A.args_mismatch({"entity": "product_category"}, {"ids": "x"}) == (
+        "entity missing, expected 'product_category'"
+    )
