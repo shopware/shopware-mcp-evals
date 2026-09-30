@@ -45,6 +45,14 @@ def test_a_required_run_that_did_not_pass_blocks_with_the_reason(conclusion: str
     )
 
 
+def test_a_run_awaiting_approval_says_so_rather_than_looking_failed() -> None:
+    """#77: a PR pushed as github-actions[bot] parks its runs until approved."""
+    reason = decide(run(LINT, conclusion="action_required"), run(EVALS, conclusion="action_required"))
+    assert reason is not None
+    assert reason.startswith(f"`{LINT}` is waiting for a maintainer to approve its run")
+    assert "concluded" not in reason
+
+
 def test_a_settled_run_may_conclude_anything() -> None:
     """The evals are not what the merge waits on them for — only their ref."""
     assert decide(run(LINT), run(EVALS, conclusion="failure")) == ""
