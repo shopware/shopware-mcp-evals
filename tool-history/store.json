@@ -1,21 +1,8 @@
 {
   "default_tools": [
-    "apply_discount",
-    "cancel_cart",
-    "cancel_checkout",
-    "complete_checkout",
-    "create_cart",
-    "create_checkout",
-    "get_cart",
-    "get_checkout",
-    "get_order",
-    "lookup_catalog",
-    "search_catalog",
     "shopware-tool-search",
     "shopware-toolset-enable",
-    "shopware-toolsets-list",
-    "update_cart",
-    "update_checkout"
+    "shopware-toolsets-list"
   ],
   "server_instructions": "This MCP server exposes Store API capabilities. All operations run in the current sales-channel context and use Store API authentication headers. The advertised tool list is not the full catalogue: if no advertised tool matches the requested action, call shopware-tool-search first instead of assuming the action is unsupported, then use shopware-toolsets-list and shopware-toolset-enable to make a matched tool callable if your client cannot invoke it inline.",
   "tools": [
@@ -316,6 +303,26 @@
       "title": "Store api tools",
       "tools": [
         "shopware-store-api-context"
+      ]
+    },
+    {
+      "description": "Tools explicitly assigned to the \"ucp\" MCP tool group.",
+      "name": "ucp",
+      "title": "Ucp tools",
+      "tools": [
+        "apply_discount",
+        "cancel_cart",
+        "cancel_checkout",
+        "complete_checkout",
+        "create_cart",
+        "create_checkout",
+        "get_cart",
+        "get_checkout",
+        "get_order",
+        "lookup_catalog",
+        "search_catalog",
+        "update_cart",
+        "update_checkout"
       ]
     }
   ]

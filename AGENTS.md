@@ -379,7 +379,8 @@ python -m functional.runner --endpoint store --allow-mutations
 >   error code, so three correct picks graded as `tool_error`. 82% → 89%.
 > - **3 — upstream, in core:** `shopware-toolsets-list` says *"Use this first for
 >   any task: no domain tools are advertised until you enable their toolset"*,
->   which has been false on the Store endpoint since agentic-commerce 1.3.0. The
+>   which was false on the Store endpoint from agentic-commerce 1.3.0 until 1.4.0
+>   moved the UCP tools back behind a toolset. The
 >   model obeys — 36 of 45 fixtures ran the enable ritual for tools already
 >   visible (4.2 steps against 1.5 direct) — then reaches for the one tool the
 >   ritual unlocked, `shopware-store-api-context`, including on both negatives.
@@ -538,15 +539,15 @@ Admin endpoint (`--endpoint admin`, the default): the 3 discovery meta-tools, al
 
 Store API endpoint (`--endpoint store`): the meta-tools, `shopware-store-api-context`
 and the thirteen UCP buyer-journey tools (`create_cart`, `search_catalog`,
-`complete_checkout`, …). Since agentic-commerce 1.3.0 those are advertised on
-the **default surface** rather than deferred behind toolsets, so `store-api` —
-holding `shopware-store-api-context` — is the only toolset on that endpoint.
-That is a plugin workaround, not the design: core means Store to match admin
-(shopware/shopware#18298), and the plugin got there by claiming core's reserved
-`discovery` group. Fix proposed in shopware/agentic-commerce#254 and
-shopware/shopware#20725 — treat the Store default-surface exception in
-`functional/runner.py` and the missing `expected_toolset` on UCP fixtures as
-temporary.
+`complete_checkout`, …). Since agentic-commerce 1.4.0 the Store endpoint works
+like admin (shopware/shopware#18298): a fresh session advertises the meta-tools
+only, the UCP tools are deferred behind the `ucp` toolset and
+`shopware-store-api-context` behind `store-api`, so every UCP fixture carries
+`expected_toolset: ucp`. The plugin's own `/ucp/mcp` proxy pins `ucp` with
+`?toolsets=` (shopware/agentic-commerce#261). 1.3.0 had put the UCP tools on the
+default surface by claiming core's reserved `discovery` group;
+`functional/runner.py` still accepts that layout by reading which UCP tools sit
+in no toolset, and shopware/shopware#20725 (open) is the core guard against it.
 The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
 provisioned state; tool *selection* for those is covered by the LLM eval.
 
