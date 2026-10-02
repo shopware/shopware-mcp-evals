@@ -206,8 +206,9 @@ def verify_default_surface(
     core means the Store endpoint to work the same way (shopware/shopware#18298:
     meta-tools only, everything else discovered). agentic-commerce up to 1.3.0
     puts its thirteen UCP tools into core's reserved `discovery` group, so a plain
-    /store-api/_mcp connection advertises them too. shopware/agentic-commerce#254
-    moves them into a `ucp` toolset that its /ucp/mcp proxy pins via ?toolsets=.
+    /store-api/_mcp connection advertises them too. 1.4.0
+    (shopware/agentic-commerce#261) moves them into a `ucp` toolset that its
+    /ucp/mcp proxy pins via ?toolsets=.
     The Store call site therefore passes only the UCP tools that are in no
     toolset (see `_ucp_default_published`): all thirteen against a plugin that
     still uses `discovery`, none against one that has the fix.
@@ -249,8 +250,8 @@ def _ucp_default_published(session: str, endpoint: Endpoint) -> frozenset[str]:
     """The UCP tools this server publishes on the default surface: the ones in no toolset.
 
     agentic-commerce up to 1.3.0 puts them into core's `discovery` group, which is
-    never listed as a toolset, so all of them count. From
-    shopware/agentic-commerce#254 on they sit in the `ucp` toolset, and none do."""
+    never listed as a toolset, so all of them count. From 1.4.0
+    (shopware/agentic-commerce#261) on they sit in the `ucp` toolset, and none do."""
     in_toolsets = {tool for ts in load_toolsets(session, endpoint) for tool in ts.get("tools", [])}
     return frozenset(ucp.all_classified()) - in_toolsets
 
@@ -1171,8 +1172,8 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     # There used to be several granular UCP toolsets here (cart, checkout,
     # catalog, ...) and this asserted >= 2. agentic-commerce 1.3.0 published the
     # UCP tools on the default surface instead and the UCP toolsets went with
-    # them, so `store-api` holding shopware-store-api-context is the only one
-    # left. The floor is 1 rather than a hardcoded name so a resliced taxonomy
+    # them, so `store-api` holding shopware-store-api-context was the only one
+    # left; 1.4.0 added a single `ucp` toolset back. The floor is 1 rather than a hardcoded name so a resliced taxonomy
     # still reports rather than crashing.
     if toolsets:
         rep.check_pass(f"toolsets-list returns {len(toolsets)} toolset(s): {', '.join(ts['name'] for ts in toolsets)}")
