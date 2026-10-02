@@ -24,6 +24,16 @@
 # Grading executes the call, as on admin: read-only UCP tools run as they are,
 # mutating ones with the dryRun the plugin declares (ucp.py), and the result is
 # asserted.
+#
+# So an id in a prompt is sent to the server, and must be real where the tool
+# would do anything but answer "not found" for it. `{product_id}` is a product a
+# cart accepts. `{cart_id}`, `{line_item_id}` and `{checkout_id}` are one cart
+# and one checkout created at startup under --seed-lane (ucp.seed_lane); without
+# it their fixtures are skipped. The invented ids that replaced cost five
+# fixtures a night: the model read the cart before changing it, got "not
+# found", and was graded for the read. Two invented ids remain on purpose: the
+# second product in `catalog_lookup`, which a lookup answers by omitting, and
+# the order id, which a guest's read is refused for whether it exists or not.
 
 fixtures:
 
@@ -56,20 +66,20 @@ fixtures:
 
   - id: catalog_lookup
     category: disambiguation
-    prompt: "Load the full product details for product IDs 019f04f20e0077ae81f731b2df4fde53 and 0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f from the catalog."
+    prompt: "Load the full product details for product IDs {product_id} and 0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f from the catalog."
     expected_tool: lookup_catalog
     expected_toolset: ucp
     notes: Known IDs → catalog-lookup, not catalog-search (which is a text query).
 
   - id: catalog_lookup_price
     category: unambiguous
-    prompt: "Get the current price and availability for product 019f04f20e0077ae81f731b2df4fde53."
+    prompt: "Get the current price and availability for product {product_id}."
     expected_tool: lookup_catalog
     expected_toolset: ucp
 
   - id: disambig_lookup_vs_search
     category: disambiguation
-    prompt: "Before I add it to my basket, confirm that product 019f04f20e0077ae81f731b2df4fde53 is still in stock."
+    prompt: "Before I add it to my basket, confirm that product {product_id} is still in stock."
     expected_tool: lookup_catalog
     expected_toolset: ucp
     notes: >
@@ -95,7 +105,7 @@ fixtures:
 
   - id: chain_cart_create_then_add
     category: chain
-    prompt: "Create a cart for me and put product 019f04f20e0077ae81f731b2df4fde53 in it."
+    prompt: "Create a cart for me and put product {product_id} in it."
     expected_tool: create_cart
     expected_toolset: ucp
     max_steps: 8
@@ -105,20 +115,20 @@ fixtures:
 
   - id: cart_get
     category: unambiguous
-    prompt: "Show me the current contents of cart 019f95241e00773f88b464388b37965a."
+    prompt: "Show me the current contents of cart {cart_id}."
     expected_tool: get_cart
     expected_toolset: ucp
 
   - id: cart_get_total
     category: unambiguous
-    prompt: "What does cart 019f95241e00773f88b464388b37965a come to in total?"
+    prompt: "What does cart {cart_id} come to in total?"
     expected_tool: get_cart
     expected_toolset: ucp
     notes: Totals are part of the cart payload — a read, not a checkout step.
 
   - id: disambig_cart_get_vs_checkout_get
     category: disambiguation
-    prompt: "What's in my basket right now — 019f95241e00773f88b464388b37965a? I haven't started checking out yet."
+    prompt: "What's in my basket right now — {cart_id}? I haven't started checking out yet."
     expected_tool: get_cart
     expected_toolset: ucp
     notes: >
@@ -127,21 +137,21 @@ fixtures:
 
   - id: cart_update
     category: disambiguation
-    prompt: "Set the quantity of line item 019f95241e007127b923aa3372b2191d in cart 019f95241e00773f88b464388b37965a to 3."
+    prompt: "Set the quantity of line item {line_item_id} in cart {cart_id} to 3."
     expected_tool: update_cart
     expected_toolset: ucp
     notes: Writing new line-item state to an existing cart → cart-update, not cart-get/create.
 
   - id: cart_update_add_more
     category: unambiguous
-    prompt: "Add two more of product 019f04f20e0077ae81f731b2df4fde53 to cart 019f95241e00773f88b464388b37965a."
+    prompt: "Add two more of product {product_id} to cart {cart_id}."
     expected_tool: update_cart
     expected_toolset: ucp
     notes: Adding to an existing cart → cart-update; cart-create would discard it.
 
   - id: cart_update_remove_line
     category: unambiguous
-    prompt: "Take line item 019f95241e007127b923aa3372b2191d out of cart 019f95241e00773f88b464388b37965a."
+    prompt: "Take line item {line_item_id} out of cart {cart_id}."
     expected_tool: update_cart
     expected_toolset: ucp
     notes: >
@@ -150,39 +160,39 @@ fixtures:
 
   - id: cart_cancel
     category: unambiguous
-    prompt: "Discard cart 019f95241e00773f88b464388b37965a, I don't want it anymore."
+    prompt: "Discard cart {cart_id}, I don't want it anymore."
     expected_tool: cancel_cart
     expected_toolset: ucp
 
   - id: cart_cancel_delete
     category: unambiguous
-    prompt: "Empty and abandon cart 019f95241e00773f88b464388b37965a completely."
+    prompt: "Empty and abandon cart {cart_id} completely."
     expected_tool: cancel_cart
     expected_toolset: ucp
 
   - id: disambig_cart_cancel_vs_checkout_cancel
     category: disambiguation
-    prompt: "Throw away the shopping cart 019f95241e00773f88b464388b37965a — I never started a checkout for it."
+    prompt: "Throw away the shopping cart {cart_id} — I never started a checkout for it."
     expected_tool: cancel_cart
     expected_toolset: ucp
     notes: Cart-stage abandon → cart-cancel, not checkout-cancel.
 
   - id: discount_apply
     category: unambiguous
-    prompt: "Apply the discount code SUMMER10 to cart 019f95241e00773f88b464388b37965a."
+    prompt: "Apply the discount code SUMMER10 to cart {cart_id}."
     expected_tool: apply_discount
     expected_toolset: ucp
 
   - id: discount_apply_voucher
     category: unambiguous
-    prompt: "I have a voucher code WELCOME5 — use it on cart 019f95241e00773f88b464388b37965a."
+    prompt: "I have a voucher code WELCOME5 — use it on cart {cart_id}."
     expected_tool: apply_discount
     expected_toolset: ucp
     notes: '"Voucher" rather than "discount code" — vocabulary coverage.'
 
   - id: disambig_discount_vs_cart_update
     category: disambiguation
-    prompt: "Redeem promotion code BLACKFRIDAY on cart 019f95241e00773f88b464388b37965a before I check out."
+    prompt: "Redeem promotion code BLACKFRIDAY on cart {cart_id} before I check out."
     expected_tool: apply_discount
     expected_toolset: ucp
     notes: >
@@ -195,19 +205,19 @@ fixtures:
 
   - id: checkout_create
     category: unambiguous
-    prompt: "Begin checkout for cart 019f95241e00773f88b464388b37965a."
+    prompt: "Begin checkout for cart {cart_id}."
     expected_tool: create_checkout
     expected_toolset: ucp
 
   - id: checkout_create_ready_to_buy
     category: unambiguous
-    prompt: "I'm ready to buy what's in cart 019f95241e00773f88b464388b37965a — take me to checkout."
+    prompt: "I'm ready to buy what's in cart {cart_id} — take me to checkout."
     expected_tool: create_checkout
     expected_toolset: ucp
 
   - id: disambig_checkout_create_vs_complete
     category: disambiguation
-    prompt: "Convert cart 019f95241e00773f88b464388b37965a into a checkout session."
+    prompt: "Convert cart {cart_id} into a checkout session."
     expected_tool: create_checkout
     expected_toolset: ucp
     notes: >
@@ -216,26 +226,26 @@ fixtures:
 
   - id: checkout_get
     category: unambiguous
-    prompt: "What is the current status of checkout session 019f95241e007730893f7d7dd80202ed?"
+    prompt: "What is the current status of checkout session {checkout_id}?"
     expected_tool: get_checkout
     expected_toolset: ucp
 
   - id: checkout_get_paid
     category: unambiguous
-    prompt: "Has checkout 019f95241e007730893f7d7dd80202ed been paid yet?"
+    prompt: "Has checkout {checkout_id} been paid yet?"
     expected_tool: get_checkout
     expected_toolset: ucp
 
   - id: checkout_get_totals
     category: unambiguous
-    prompt: "Fetch the current state of checkout session 019f95241e007730893f7d7dd80202ed including its totals."
+    prompt: "Fetch the current state of checkout session {checkout_id} including its totals."
     expected_tool: get_checkout
     expected_toolset: ucp
     notes: Totals at the checkout stage → checkout-get, not cart-get.
 
   - id: checkout_update
     category: disambiguation
-    prompt: "Set the shipping address on checkout session 019f95241e007730893f7d7dd80202ed to Musterstrasse 1, 48624 Schöppingen, Germany."
+    prompt: "Set the shipping address on checkout session {checkout_id} to Musterstrasse 1, 48624 Schöppingen, Germany."
     expected_tool: update_checkout
     expected_toolset: ucp
     notes: >
@@ -252,13 +262,13 @@ fixtures:
 
   - id: checkout_update_email
     category: unambiguous
-    prompt: "Change the email address on checkout 019f95241e007730893f7d7dd80202ed to buyer@example.com."
+    prompt: "Change the email address on checkout {checkout_id} to buyer@example.com."
     expected_tool: update_checkout
     expected_toolset: ucp
 
   - id: checkout_update_shipping_option
     category: unambiguous
-    prompt: "Pick the express delivery option for checkout session 019f95241e007730893f7d7dd80202ed."
+    prompt: "Pick the express delivery option for checkout session {checkout_id}."
     expected_tool: update_checkout
     expected_toolset: ucp
     notes: >
@@ -274,38 +284,38 @@ fixtures:
 
   - id: checkout_complete
     category: disambiguation
-    prompt: "Everything looks good — place the order for checkout session 019f95241e007730893f7d7dd80202ed."
+    prompt: "Everything looks good — place the order for checkout session {checkout_id}."
     expected_tool: complete_checkout
     expected_toolset: ucp
     notes: Finalizing/placing the order → checkout-complete, not checkout-update.
 
   - id: checkout_complete_confirm_pay
     category: unambiguous
-    prompt: "Confirm and pay for checkout 019f95241e007730893f7d7dd80202ed."
+    prompt: "Confirm and pay for checkout {checkout_id}."
     expected_tool: complete_checkout
     expected_toolset: ucp
 
   - id: checkout_complete_submit
     category: unambiguous
-    prompt: "Submit checkout session 019f95241e007730893f7d7dd80202ed — I authorize the payment."
+    prompt: "Submit checkout session {checkout_id} — I authorize the payment."
     expected_tool: complete_checkout
     expected_toolset: ucp
 
   - id: checkout_cancel
     category: unambiguous
-    prompt: "Cancel checkout session 019f95241e007730893f7d7dd80202ed."
+    prompt: "Cancel checkout session {checkout_id}."
     expected_tool: cancel_checkout
     expected_toolset: ucp
 
   - id: checkout_cancel_abort
     category: unambiguous
-    prompt: "Abort checkout session 019f95241e007730893f7d7dd80202ed."
+    prompt: "Abort checkout session {checkout_id}."
     expected_tool: cancel_checkout
     expected_toolset: ucp
 
   - id: disambig_checkout_cancel_vs_cart_cancel
     category: disambiguation
-    prompt: "Stop the checkout 019f95241e007730893f7d7dd80202ed — I don't want to complete it, but keep my cart."
+    prompt: "Stop the checkout {checkout_id} — I don't want to complete it, but keep my cart."
     expected_tool: cancel_checkout
     expected_toolset: ucp
     notes: >
