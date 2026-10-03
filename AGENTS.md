@@ -414,6 +414,15 @@ created, so they resolve only under `--seed-lane` / `EVAL_SEED_LANE=true` — CI
 sets it because the instance is destroyed with the job; do not set it against a
 shop you care about.
 
+The Store endpoint has neither entity-search nor the merchant tools, so its
+placeholders resolve through UCP instead (`STORE_PLACEHOLDER_RESOLVERS`, logic in
+`ucp.py`). `{product_id}` is a product a dry-run cart accepts, not just one the
+catalogue returns. `{cart_id}`, `{line_item_id}` and `{checkout_id}` are one cart
+and one checkout created under `--seed-lane`. Every UCP mutation the eval executes
+is a dry run, so the fixtures share them safely. A dry-run `complete_checkout`
+answers "incomplete" for an id that does not exist, so an invented checkout id
+passes without proving anything.
+
 The rate is over fixtures that **ran**. Skipped ones (expected tool not
 registered) never gate. Errored ones (server 500, throttling 429) are excluded
 from the rate too — they are missing data, not wrong answers — but

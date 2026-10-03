@@ -19,10 +19,19 @@ The two things this module carries are the ones a caller cannot guess:
   * the execution classification, read off the live catalogue rather than
     inferred from names, and
   * the `UCP-Agent` header, without which every runtime tool rejects the call.
+
+It also carries the lane lookups the Store eval's `{placeholder}`s resolve
+through (`purchasable_product_id`, `seed_lane`), because they are UCP calls.
+They take the tool call as a parameter rather than importing `mcp_client`,
+which imports this module. `eval/runner.py` wires them in, so dropping UCP also
+means deleting its `STORE_*_RESOLVERS` and the `_ucp_*` helpers beside them.
 """
 
 import os
 import uuid
+from collections.abc import Callable
+
+from eval.result_schema import JsonObject, as_list, as_object
 
 # There is no prefix to match on any more. agentic-commerce 1.3.0 (UCP
 # 2026-08-25) renamed every tool to the spec's canonical verb_noun names:
@@ -163,3 +172,81 @@ def call_headers(tool: str) -> dict[str, str]:
 
 def all_classified() -> frozenset[str]:
     return READ_ONLY | DRY_RUNNABLE | UNSAFE
+
+
+# ---------------------------------------------------------------------------
+# Lane lookups for the Store eval's placeholders
+# ---------------------------------------------------------------------------
+# Calls one UCP tool and returns the parsed result body, or {} when there is
+# none to parse. Supplied by the caller: see the module docstring.
+type ToolCall = Callable[[str, JsonObject], JsonObject]
+
+# How many catalogue hits to try before giving up on finding one a cart takes.
+PRODUCT_CANDIDATES = 10
+
+
+def _data(body: JsonObject) -> JsonObject:
+    """The answer inside a UCP result, or {} for a refusal.
+
+    Every UCP tool wraps its answer as `{"success": true, "data": {...}}` and
+    reports a refusal in-band as `success: false` with HTTP 200, so a refusal
+    has to be read here rather than left to look like an empty answer.
+    """
+    if body.get("success") is False:
+        return {}
+    return as_object(body.get("data"))
+
+
+def _line_items(product_id: str) -> list[object]:
+    return [{"item": {"id": product_id}, "quantity": 1}]
+
+
+def purchasable_product_id(call: ToolCall) -> str:
+    """A product a cart on this sales channel accepts, or "".
+
+    Searchable is not enough. The fixtures used to name a product the catalogue
+    returns and a cart refuses ("not purchasable in this sales channel"), so
+    the model built a correct create_cart and was graded `invalid_arguments`.
+    Each candidate is therefore tried with a DRY-RUN create_cart, which writes
+    nothing, and the first one it accepts is the answer.
+    """
+    found = _data(call("search_catalog", {"query": "", "limit": PRODUCT_CANDIDATES}))
+    for row in as_list(found.get("products")):
+        product_id = str(as_object(row).get("id") or "")
+        if product_id and _data(
+            call("create_cart", {"payload": {"line_items": _line_items(product_id)}, "dryRun": True})
+        ):
+            return product_id
+    return ""
+
+
+def seed_lane(call: ToolCall) -> dict[str, str]:
+    """MUTATES: one real cart and one real checkout, as {cart_id, line_item_id, checkout_id}.
+
+    Invented ids cost the Store suite five fixtures a night. update_cart and
+    cancel_cart prompts named a cart that did not exist, so the model read it
+    first, as an agent should, got "not found", and was graded for the read.
+    And a dry-run complete_checkout on an invented checkout id answers
+    "incomplete" rather than "not found", so those fixtures passed without the
+    call proving anything.
+
+    One cart, and its line item, so `{line_item_id}` names a line in the cart
+    `{cart_id}` points at. Every UCP mutation the eval executes is a dry run
+    (DRY_RUNNABLE), so fixtures that cancel this cart or checkout leave it in
+    place for the ones running beside them.
+
+    An id that could not be created comes back as "" and its fixtures are
+    skipped by name.
+    """
+    product_id = purchasable_product_id(call)
+    if not product_id:
+        return {}
+    lines = _line_items(product_id)
+    cart = _data(call("create_cart", {"payload": {"line_items": lines}, "dryRun": False}))
+    first_line = as_object(next(iter(as_list(cart.get("line_items"))), None))
+    checkout = _data(call("create_checkout", {"payload": {"line_items": lines}, "dryRun": False}))
+    return {
+        "cart_id": str(cart.get("id") or ""),
+        "line_item_id": str(first_line.get("id") or ""),
+        "checkout_id": str(checkout.get("id") or ""),
+    }
