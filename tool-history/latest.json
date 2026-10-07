@@ -655,13 +655,9 @@
       "name": "swag-dev-tools-load-skill"
     },
     {
-      "description": "Search a Monolog application log FILE on disk (default: var/log/{env}.log) for entries matching a substring. Optionally narrow by minimum level (DEBUG/INFO/NOTICE/WARNING/ERROR/CRITICAL/ALERT/EMERGENCY) and file name. Scans from the most recent entries backwards. Use for \"find the stack trace for exception X\", \"which log lines mention correlation-id Y?\", \"did we log anything about payment webhook failures?\". DO NOT use this for the log_entry database table \u2014 query that with shopware-entity-search on entity \"log_entry\" plus a ContainsFilter on the message field instead.",
+      "description": "DEMO ONLY: search the synthetic demo log shipped inside this bundle (Monolog line format) for entries matching a substring. It does NOT read the server's real var/log files; that was removed on purpose, because real logs can contain credentials and customer data. Optionally narrow by minimum level (DEBUG/INFO/NOTICE/WARNING/ERROR/CRITICAL/ALERT/EMERGENCY). Scans from the most recent entries backwards. Use this to demonstrate pivoting from an error to its context, e.g. \"find the stack trace for LineItemNotFoundException\" or \"which lines mention correlation id demo-correlation-abc-123?\". DO NOT use this for the log_entry database table; query that with shopware-entity-search on entity \"log_entry\" plus a ContainsFilter on the message field instead.",
       "inputSchema": {
         "properties": {
-          "file": {
-            "default": "",
-            "type": "string"
-          },
           "level": {
             "default": "",
             "type": "string"
@@ -680,13 +676,9 @@
       "name": "swag-dev-tools-log-search"
     },
     {
-      "description": "Read recent entries from a Monolog application log FILE on disk (default: var/log/{env}.log). Contains the full runtime stream: PHP errors, stack traces, deprecation warnings, framework events, and everything bundles write via Monolog handlers. Filter by minimum level (DEBUG/INFO/NOTICE/WARNING/ERROR/CRITICAL/ALERT/EMERGENCY) and ISO-8601 since timestamp. Use this for \"what broke on the server?\", \"show me the last stack trace\", \"any PHP deprecations recently?\". DO NOT use this for the log_entry database table (structured DAL entity for business events / Admin-visible notifications) \u2014 query that with shopware-entity-search on entity \"log_entry\" instead.",
+      "description": "DEMO ONLY: read recent entries from the synthetic demo log shipped inside this bundle (Monolog line format). It does NOT read the server's real var/log files; that was removed on purpose, because real logs can contain credentials and customer data. Filter by minimum level (DEBUG/INFO/NOTICE/WARNING/ERROR/CRITICAL/ALERT/EMERGENCY) and ISO-8601 since timestamp. Use this to demonstrate log triage over MCP. DO NOT use this for the log_entry database table; query that with shopware-entity-search on entity \"log_entry\" instead.",
       "inputSchema": {
         "properties": {
-          "file": {
-            "default": "",
-            "type": "string"
-          },
           "level": {
             "default": "",
             "type": "string"
@@ -705,7 +697,7 @@
       "name": "swag-dev-tools-log-stream"
     },
     {
-      "description": "Poll for Shopware background operation notifications: indexer completions, import/export results. Use after triggering long-running operations like dal:refresh:index or import jobs. Set wait=true to block until a notification arrives \u2014 streams progress updates via SSE up to timeout seconds. Use since=<ISO-8601> for incremental polling; pass the returned timestamp as since on the next call to get only new events. DO NOT use this for runtime PHP errors or stack traces \u2014 use swag-dev-tools-log-stream instead. DO NOT use this for structured business event logs \u2014 query entity \"log_entry\" with shopware-entity-search instead.",
+      "description": "Poll for Shopware background operation notifications: indexer completions, import/export results. Use after triggering long-running operations like dal:refresh:index or import jobs. Set wait=true to block until a notification arrives \u2014 streams progress updates via SSE up to timeout seconds. Use since=<ISO-8601> for incremental polling; pass the returned timestamp as since on the next call to get only new events. DO NOT use this for runtime PHP errors or stack traces \u2014 the server's real log files are not exposed over MCP and must be read on the host (swag-dev-tools-log-stream only reads a synthetic demo log, never real server logs). DO NOT use this for structured business event logs \u2014 query entity \"log_entry\" with shopware-entity-search instead.",
       "inputSchema": {
         "properties": {
           "limit": {
