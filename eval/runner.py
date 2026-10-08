@@ -47,6 +47,7 @@ import requests
 import yaml
 
 import lane
+import ucp
 from eval.assertions import check, inband_error
 from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
@@ -1766,10 +1767,62 @@ SEEDING_RESOLVERS: dict[tuple[str, ...], SeedingResolver] = {
     ("cart_token", "line_item_id"): _seed_cart,
 }
 
-# Every placeholder this runner knows how to fill. Used to tell an unresolved
-# `{cart_token}` (a lane that could not provide one) apart from a stray brace in
-# a prompt, which is nobody's business but the fixture author's.
-KNOWN_PLACEHOLDERS = set(PLACEHOLDER_RESOLVERS) | {k for keys in SEEDING_RESOLVERS for k in keys}
+
+def _ucp_call(endpoint: Endpoint) -> ucp.ToolCall:
+    """A ucp.ToolCall on one fresh session of `endpoint`.
+
+    The session is fresh but the endpoint is not: Store carts and checkouts
+    belong to the endpoint's context token, which every fixture of the run
+    shares, so what is created here is what the fixtures can read.
+    """
+    session_id, _ = mcp_init(endpoint=endpoint)
+
+    def call(tool: str, arguments: JsonObject) -> JsonObject:
+        text = mcp_result_text(mcp_call(session_id, tool, arguments, endpoint=endpoint)) or ""
+        try:
+            return as_object(cast(object, json.loads(text)))
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    return call
+
+
+def _ucp_product_id(endpoint: Endpoint) -> str | None:
+    return ucp.purchasable_product_id(_ucp_call(endpoint)) or None
+
+
+def _ucp_seed(endpoint: Endpoint) -> dict[str, str]:
+    """MUTATES: see ucp.seed_lane."""
+    return ucp.seed_lane(_ucp_call(endpoint))
+
+
+# The Store endpoint has no entity-search and no merchant tools, so the admin
+# resolvers above cannot answer there. Ids on it come from the UCP tools.
+# `{order_id}` is deliberately absent: a guest's order read is refused whether
+# the order exists or not, and a real one would mean placing an order.
+STORE_PLACEHOLDER_RESOLVERS: dict[str, LaneResolver] = {
+    "product_id": _ucp_product_id,
+}
+STORE_SEEDING_RESOLVERS: dict[tuple[str, ...], SeedingResolver] = {
+    ("cart_id", "line_item_id", "checkout_id"): _ucp_seed,
+}
+
+
+def _resolvers_for(endpoint: Endpoint) -> tuple[dict[str, LaneResolver], dict[tuple[str, ...], SeedingResolver]]:
+    if endpoint.name == "store":
+        return STORE_PLACEHOLDER_RESOLVERS, STORE_SEEDING_RESOLVERS
+    return PLACEHOLDER_RESOLVERS, SEEDING_RESOLVERS
+
+
+# Every placeholder this runner knows how to fill, on either endpoint. Used to
+# tell an unresolved `{cart_token}` (a lane that could not provide one) apart
+# from a stray brace in a prompt, which is nobody's business but the fixture
+# author's.
+KNOWN_PLACEHOLDERS = (
+    set(PLACEHOLDER_RESOLVERS)
+    | set(STORE_PLACEHOLDER_RESOLVERS)
+    | {k for table in (SEEDING_RESOLVERS, STORE_SEEDING_RESOLVERS) for keys in table for k in keys}
+)
 
 
 def _referenced(fixtures: list[Fixture], key: str) -> bool:
@@ -1821,7 +1874,8 @@ def resolve_lane_substitutions(fixtures: list[Fixture], endpoint: Endpoint, seed
     graded against a literal `{sales_channel_id}`.
     """
     subs: dict[str, str] = {}
-    for key, resolver in PLACEHOLDER_RESOLVERS.items():
+    reading, seeding = _resolvers_for(endpoint)
+    for key, resolver in reading.items():
         if not _referenced(fixtures, key):
             continue
         value = _resolve_one(key, resolver, endpoint)
@@ -1831,7 +1885,7 @@ def resolve_lane_substitutions(fixtures: list[Fixture], endpoint: Endpoint, seed
         else:
             print(f"::warning::could not resolve {{{key}}} from the lane; fixtures using it will be skipped")
 
-    for keys, resolver in SEEDING_RESOLVERS.items():
+    for keys, resolver in seeding.items():
         wanted = [k for k in keys if _referenced(fixtures, k)]
         if not wanted:
             continue
@@ -1845,7 +1899,7 @@ def resolve_lane_substitutions(fixtures: list[Fixture], endpoint: Endpoint, seed
             if value:
                 subs[key] = value
                 print(f"Lane id (seeded): {key} = {value}")
-    for key in (k for keys in SEEDING_RESOLVERS for k in keys):
+    for key in (k for keys in seeding for k in keys):
         if seed_lane and _referenced(fixtures, key) and key not in subs:
             print(f"::warning::could not seed {{{key}}} on this lane; fixtures using it will be skipped")
     return subs
