@@ -47,10 +47,21 @@ def verdict(runs: Sequence[Run], require: Sequence[str], settle: Sequence[str]) 
         run = latest.get(name)
         if run is None or run.status != "completed":
             return None
-    failed = [
-        f"`{name}` concluded {latest[name].conclusion}" for name in require if latest[name].conclusion != "success"
-    ]
+    failed = [_why(name, latest[name].conclusion) for name in require if latest[name].conclusion != "success"]
     return "; ".join(failed)
+
+
+def _why(name: str, conclusion: str) -> str:
+    """`action_required` is not a failure: the run never started, because GitHub
+    wants a maintainer to approve it — which is what a PR pushed as
+    github-actions[bot] gets. Saying "concluded action_required" sent #77's
+    reader looking for a broken lint."""
+    if conclusion == "action_required":
+        return (
+            f"`{name}` is waiting for a maintainer to approve its run, which GitHub requires when "
+            "github-actions[bot] pushes the PR (was the octo-sts token missing?)"
+        )
+    return f"`{name}` concluded {conclusion}"
 
 
 def fetch_runs(repo: str, sha: str, token: str) -> list[Run]:

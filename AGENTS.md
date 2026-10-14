@@ -379,7 +379,8 @@ python -m functional.runner --endpoint store --allow-mutations
 >   error code, so three correct picks graded as `tool_error`. 82% → 89%.
 > - **3 — upstream, in core:** `shopware-toolsets-list` says *"Use this first for
 >   any task: no domain tools are advertised until you enable their toolset"*,
->   which has been false on the Store endpoint since agentic-commerce 1.3.0. The
+>   which was false on the Store endpoint from agentic-commerce 1.3.0 until 1.4.0
+>   moved the UCP tools back behind a toolset. The
 >   model obeys — 36 of 45 fixtures ran the enable ritual for tools already
 >   visible (4.2 steps against 1.5 direct) — then reaches for the one tool the
 >   ritual unlocked, `shopware-store-api-context`, including on both negatives.
@@ -412,6 +413,15 @@ by name rather than grading them. `{cart_token}` and `{line_item_id}` need a car
 created, so they resolve only under `--seed-lane` / `EVAL_SEED_LANE=true` — CI
 sets it because the instance is destroyed with the job; do not set it against a
 shop you care about.
+
+The Store endpoint has neither entity-search nor the merchant tools, so its
+placeholders resolve through UCP instead (`STORE_PLACEHOLDER_RESOLVERS`, logic in
+`ucp.py`). `{product_id}` is a product a dry-run cart accepts, not just one the
+catalogue returns. `{cart_id}`, `{line_item_id}` and `{checkout_id}` are one cart
+and one checkout created under `--seed-lane`. Every UCP mutation the eval executes
+is a dry run, so the fixtures share them safely. A dry-run `complete_checkout`
+answers "incomplete" for an id that does not exist, so an invented checkout id
+passes without proving anything.
 
 The rate is over fixtures that **ran**. Skipped ones (expected tool not
 registered) never gate. Errored ones (server 500, throttling 429) are excluded
@@ -522,7 +532,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
-| `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static`, `admin-eval` and `session-store` green on that commit. Merges with an octo-sts token (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment. Before merging, `eval/await_runs.py` waits for the PR's own runs to finish and requires lint to pass on them. Merging the moment the PR opened made both runs fail at startup, and moved the pin without lint ever running on the commit |
+| `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static`, `admin-eval` and `session-store` green on that commit. Pushes, opens and merges the PR with an octo-sts token (a PR pushed as `github-actions[bot]` has its runs parked at `action_required` until a maintainer approves them) (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment. Before merging, `eval/await_runs.py` waits for the PR's own runs to finish and requires lint to pass on them. Merging the moment the PR opened made both runs fail at startup, and moved the pin without lint ever running on the commit |
 | `shopware.sha` | Pinned Shopware commit for reproducible CI |
 | `tool-history/latest.json` | Committed drift baseline |
 | `tool-history/lint-budget.json` | Committed ceiling for toollint's two parameter counts; may fall, may not rise |
@@ -538,15 +548,15 @@ Admin endpoint (`--endpoint admin`, the default): the 3 discovery meta-tools, al
 
 Store API endpoint (`--endpoint store`): the meta-tools, `shopware-store-api-context`
 and the thirteen UCP buyer-journey tools (`create_cart`, `search_catalog`,
-`complete_checkout`, …). Since agentic-commerce 1.3.0 those are advertised on
-the **default surface** rather than deferred behind toolsets, so `store-api` —
-holding `shopware-store-api-context` — is the only toolset on that endpoint.
-That is a plugin workaround, not the design: core means Store to match admin
-(shopware/shopware#18298), and the plugin got there by claiming core's reserved
-`discovery` group. Fix proposed in shopware/agentic-commerce#254 and
-shopware/shopware#20725 — treat the Store default-surface exception in
-`functional/runner.py` and the missing `expected_toolset` on UCP fixtures as
-temporary.
+`complete_checkout`, …). Since agentic-commerce 1.4.0 the Store endpoint works
+like admin (shopware/shopware#18298): a fresh session advertises the meta-tools
+only, the UCP tools are deferred behind the `ucp` toolset and
+`shopware-store-api-context` behind `store-api`, so every UCP fixture carries
+`expected_toolset: ucp`. The plugin's own `/ucp/mcp` proxy pins `ucp` with
+`?toolsets=` (shopware/agentic-commerce#261). 1.3.0 had put the UCP tools on the
+default surface by claiming core's reserved `discovery` group;
+`functional/runner.py` still accepts that layout by reading which UCP tools sit
+in no toolset, and shopware/shopware#20725 (open) is the core guard against it.
 The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
 provisioned state; tool *selection* for those is covered by the LLM eval.
 

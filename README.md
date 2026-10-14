@@ -817,16 +817,16 @@ are not installed in CI, so they are outside the tested catalogue.
 The **Store API MCP endpoint** (`/store-api/_mcp`) is covered experimentally: the
 UCP buyer-journey tools (`create_cart`, `search_catalog`, …) and
 `shopware-store-api-context` come from the `shopware/agentic-commerce` plugin.
-For now, unlike admin, the UCP tools are advertised on the default surface
-rather than deferred, so only `shopware-store-api-context` sits behind a
-toolset. That is not the intended design: core means both endpoints to work
-identically ([shopware/shopware#18298](https://github.com/shopware/shopware/pull/18298)),
-and the plugin reached the default surface by claiming core's reserved
-`discovery` group so UCP agents on its `/ucp/mcp` proxy would see its tools.
-The fix is tracked in [shopware/agentic-commerce#254](https://github.com/shopware/agentic-commerce/issues/254)
-and [shopware/shopware#20725](https://github.com/shopware/shopware/issues/20725);
-until it lands the Store suite measures selection among visible tools, not
-discovery. It authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`)
+Since agentic-commerce 1.4.0 it works like admin, as core intends
+([shopware/shopware#18298](https://github.com/shopware/shopware/pull/18298)): a
+fresh session advertises only the meta-tools, the UCP tools are deferred behind
+the `ucp` toolset and `shopware-store-api-context` behind `store-api`, so the
+Store suite measures discovery as well as selection. The plugin's `/ucp/mcp`
+proxy pins `ucp` at connect time
+([shopware/agentic-commerce#261](https://github.com/shopware/agentic-commerce/pull/261)).
+1.3.0 had instead put the UCP tools on the default surface by claiming core's
+reserved `discovery` group; [shopware/shopware#20725](https://github.com/shopware/shopware/issues/20725)
+tracks stopping extensions from doing that. It authenticates with a sales-channel access key (`SW_SC_ACCESS_KEY`)
 plus a context token. Run it with:
 
 ```bash

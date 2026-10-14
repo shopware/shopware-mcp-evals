@@ -1465,8 +1465,14 @@ jobs:
       # cannot be gated on a shell variable of the next one; it is unused
       # otherwise. continue-on-error: without it the reconciliation still runs
       # and leaves the PR for a human, which is the pre-octo-sts behaviour.
-      - name: Token for merging a no-drift reconciliation (nightly only)
-        id: merge_token
+      #
+      # It also pushes the branch and opens the PR, and that is not cosmetic.
+      # A PR that github-actions[bot] opens or pushes to gets its pull_request
+      # runs parked at `action_required` until a maintainer approves them, so
+      # eval.await_runs saw lint "concluded action_required" and no night could
+      # ever merge itself (#77). An app token's events run like anyone's.
+      - name: Token for the reconciliation PR (nightly only)
+        id: app_token
         if: ${{ github.event_name == 'schedule' }}
         continue-on-error: true
         uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # ratchet:octo-sts/action@v1.1.1
@@ -1488,7 +1494,7 @@ jobs:
           ADMIN_EVAL_RESULT: ${{ needs.admin-eval.result }}
           SESSION_STORE_RESULT: ${{ needs.session-store.result }}
           STORE_SNAPSHOT_RESULT: ${{ needs.static.outputs.store_snapshot }}
-          MERGE_TOKEN: ${{ steps.merge_token.outputs.token }}
+          APP_TOKEN: ${{ steps.app_token.outputs.token }}
         run: |
           set -euo pipefail
           # ONE rolling branch, not one per upstream sha. The per-sha name was
@@ -1666,18 +1672,32 @@ jobs:
 
           git commit -q -m "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
                         -m "Opened by the nightly eval run. See the PR body for what moved."
-          git push -f origin "$BRANCH"
+
+          # Pushed and opened as the octo-sts app when there is a token, so the
+          # PR's runs start without an approval (see the token step). The empty
+          # extraheader drops the GITHUB_TOKEN header actions/checkout persisted,
+          # which would otherwise be sent instead. Without a token this falls
+          # back to GITHUB_TOKEN: the PR still opens, its runs wait for a
+          # maintainer, and await_runs says so in the comment.
+          if [ -n "${APP_TOKEN}" ]; then
+            git -c http.https://github.com/.extraheader= push -f \
+              "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
+            WRITE_TOKEN="${APP_TOKEN}"
+          else
+            git push -f origin "$BRANCH"
+            WRITE_TOKEN="${GH_TOKEN}"
+          fi
 
           # --title as well as --body: the title carries the sha, so editing only
           # the body would leave the PR announcing a trunk commit it no longer
           # contains.
           if PR="$(open_pr)" && [ -n "$PR" ]; then
-            gh pr edit "$PR" \
+            GH_TOKEN="${WRITE_TOKEN}" gh pr edit "$PR" \
               --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
               --body-file /tmp/body.md
             echo "Refreshed rolling reconciliation PR #${PR} onto ${SW_SHA:0:12}."
           else
-            gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
+            GH_TOKEN="${WRITE_TOKEN}" gh pr create --base "$GITHUB_REF_NAME" --head "$BRANCH" \
               --title "chore(tool-history): reconcile baseline with trunk ${SW_SHA:0:12}" \
               --body-file /tmp/body.md
           fi
@@ -1703,11 +1723,11 @@ jobs:
             # push to main triggers the usual workflows. No token (octo-sts
             # unreachable, policy not on main yet) or a refused merge leaves the PR
             # open with a comment saying it is safe to merge by hand.
-            if [ -n "${MERGE_TOKEN}" ] && GH_TOKEN="${MERGE_TOKEN}" gh pr merge "$PR" --merge --admin --delete-branch; then
+            if [ -n "${APP_TOKEN}" ] && GH_TOKEN="${APP_TOKEN}" gh pr merge "$PR" --merge --admin --delete-branch; then
               echo "Merged #${PR}: the pin moved to ${SW_SHA:0:12} and nothing else changed."
             else
               gh pr comment "$PR" --body "Every auto-merge condition held, but the merge did not go through (no octo-sts token, or GitHub refused it). This PR only moves \`shopware.sha\` onto a commit tonight's run passed on, so it is safe to merge by hand."
-              if [ -n "${MERGE_TOKEN}" ]; then HAD_TOKEN="present, merge refused"; else HAD_TOKEN="missing"; fi
+              if [ -n "${APP_TOKEN}" ]; then HAD_TOKEN="present, merge refused"; else HAD_TOKEN="missing"; fi
               echo "::warning::Reconciliation PR #${PR} qualified for auto-merge but was not merged (octo-sts token: ${HAD_TOKEN})."
             fi
           fi
