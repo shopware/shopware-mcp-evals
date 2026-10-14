@@ -868,11 +868,8 @@ def _handle_answering_call(
     args, forced = prepare_call(call["name"], call["input"])
     st.dry_run_forced = st.dry_run_forced or forced
 
-    # The right tool with the wrong `expected_args` did something else: removing
-    # a product from a category via entity-delete on `product` executes as
-    # cleanly as the mapping-entity delete it should have been. Checked before
-    # the non-executable branch, which would otherwise pass any arguments on the
-    # tool name alone.
+    # Checked before the non-executable branch, which would otherwise pass any
+    # arguments on the tool name alone.
     mismatch = args_mismatch(fixture.get("expected_args"), call["input"]) if correct else None
 
     if not is_executable(call["name"]):
@@ -911,12 +908,16 @@ def _handle_answering_call(
     # the five gating failures had to be diagnosed from the fixture text.
     # In-band first, as in check(): with `isError: true` the same body also
     # arrives as `err`, raw.
-    if mismatch and ok:
+    server_text = inband_error(result_text) or err or ""
+    if mismatch:
+        # Missed arguments win over the server's verdict, refused or not, and the
+        # server's text stays next to the mismatch so neither is lost.
         ok, reason = False, "wrong_args"
     attempt["executed"] = True
     attempt["ok"] = ok
     attempt["reason"] = reason
-    attempt["error"] = (mismatch or inband_error(result_text) or err or "")[:200]
+    error = f"{mismatch}; server: {server_text}" if mismatch and server_text else mismatch or server_text
+    attempt["error"] = error[:200]
     st.attempted_tools.append(attempt)
 
     if correct and ok:

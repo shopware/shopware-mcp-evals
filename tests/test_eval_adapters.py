@@ -265,6 +265,39 @@ def test_the_right_tool_with_the_wrong_args_fails_as_wrong_args_not_wrong_tool()
     assert attempt.get("error") == "entity was 'product', expected 'product_category'"
 
 
+@pytest.mark.usefixtures("stub_exec")
+def test_a_refused_call_that_also_misses_the_args_records_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mismatch names the reason, and the server's refusal stays next to it
+    instead of being dropped."""
+    monkeypatch.setattr(E, "mcp_call", const(reply("", "Entity product is read-only")))
+    spec = fixture(expected_args={"entity": "product_category"})
+
+    result = E.run_fixture_discovery("openai", FakeClient(), spec, "m", None, 6)
+
+    attempt = result.get("attempted_tools", [])[0]
+    assert attempt.get("reason") == "wrong_args"
+    assert attempt.get("error") == (
+        "entity was 'product', expected 'product_category'; server: Entity product is read-only"
+    )
+    assert result.get("fail_reason") == "wrong_args"
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_a_model_recovers_from_wrong_args_on_the_next_call() -> None:
+    """A `wrong_args` attempt hands the server's reply back like any failed call,
+    so the model can correct the arguments and still pass."""
+    client = ScriptedClient([(TOOL, {"entity": "product"}), (TOOL, {"entity": "product_category"})])
+    spec = fixture(expected_args={"entity": "product_category"})
+
+    result = E.run_fixture_discovery("openai", client, spec, "m", None, 6)
+
+    assert result["passed"] is True
+    assert result.get("first_tool_correct") is True
+    attempts = result.get("attempted_tools", [])
+    assert [a.get("reason") for a in attempts][0] == "wrong_args"
+    assert attempts[-1].get("ok") is True
+
+
 @pytest.mark.usefixtures("stub_mcp")
 def test_no_tool_call_at_all_is_its_own_fail_reason() -> None:
     result = E.run_fixture_discovery("openai", FakeClient(None), fixture(), "m", None, 6)
