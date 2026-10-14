@@ -572,7 +572,11 @@ runs:
         # Not env-scoped, unlike the rate-limit override above, so it applies to
         # whatever env the server runs.
         if [ "$SESSION_STORE" = "redis" ]; then
-          php -m | grep -qix redis \
+          # Ask PHP directly. `php -m | grep -q` is a race under the step's
+          # `pipefail`: grep exits on the first match, php dies of SIGPIPE
+          # writing the rest of the list, and the pipeline fails with redis
+          # loaded. It did, on the 2026-10-14 nightly.
+          php -r 'exit(extension_loaded("redis") ? 0 : 1);' \
             || { echo "::error::session_store=redis needs the PHP redis extension; this PHP has none"; exit 1; }
           cat > config/packages/zz-mcp-evals-redis-sessions.yaml <<YAML
         mcp:
@@ -620,9 +624,11 @@ runs:
         # the difference shows before a request is made. Both servers, because
         # the recipe configures each separately.
         if [ "$SESSION_STORE" = "redis" ]; then
+          # Capture first, then match: piping into `grep -q` races under
+          # `pipefail` (see the redis extension check above).
           for server in admin store_api; do
-            bin/console debug:container "mcp.server.${server}.session.store" --no-ansi 2>&1 \
-              | grep -q 'Mcp\\Server\\Session\\Psr16SessionStore' \
+            definition=$(bin/console debug:container "mcp.server.${server}.session.store" --no-ansi 2>&1) || true
+            grep -q 'Mcp\\Server\\Session\\Psr16SessionStore' <<<"$definition" \
               || { echo "::error::mcp.server.${server}.session.store is not Psr16SessionStore — the Redis session recipe did not apply"; exit 1; }
           done
           echo "::notice::MCP session store: Redis (${REDIS_URL}) for admin and store_api"
