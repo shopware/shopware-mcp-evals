@@ -615,7 +615,8 @@ decides urgency, count decides whether it is a description to rewrite (3/3) or
 one awkward prompt (1/3).
 
 `fail_reason` shows in the Note column only when the picked columns can't convey
-it (`no_tool_call`, `step_cap`); `wrong_tool` is already implied by the picks.
+it (`no_tool_call`, `step_cap`, `wrong_args`); `wrong_tool` is already implied by
+the picks, while a `wrong_args` row picked the expected tool and looks right without it.
 Run `eval/summary.py` locally against a `results/rows/` directory to preview it.
 
 ### Discovery metrics
@@ -637,7 +638,7 @@ Per fixture (in the JSON report and the console summary):
 | `tokens` | `{input, cached_input, output}` summed across turns |
 | `payload_bytes` | tool-result bytes the model was made to read — a tool that answers correctly but returns 40k of JSON is expensive for every client |
 | `surface_tokens` / `_peak` | the advertised tool list at turn one, and at its largest. The gap is the discovery layer's context bill |
-| `fail_reason` | `wrong_tool`, `no_tool_call`, `step_cap`, `invalid_arguments`, `tool_error`, or an assertion code |
+| `fail_reason` | `wrong_tool`, `wrong_args`, `no_tool_call`, `step_cap`, `invalid_arguments`, `tool_error`, or an assertion code |
 
 Aggregated per run: `first_try_rate`, `recovery_rate` (over the fixtures that
 *missed* first, so a mostly-first-try suite does not dilute it), `avg_wrong_calls`.
@@ -728,8 +729,13 @@ that work for a single lucky wording and no other.
 
 Add more by appending with the required fields: `id`, `category`, `prompt`,
 `expected_tool`; optional: `expected_toolset` (for deferred tools),
-`acceptable_tools`, `max_steps`, `expect_result`, `notes`. Negative fixtures set
-`expect_no_tool: true` and carry no `expected_tool`.
+`acceptable_tools`, `expected_args`, `max_steps`, `expect_result`, `notes`. Negative
+fixtures set `expect_no_tool: true` and carry no `expected_tool`.
+
+`expected_args` lists top-level arguments the answering call must carry. It is a
+subset match, compared exactly, and only applied when the model picked a terminal
+tool (`expected_tool` or one of `acceptable_tools`). A miss fails the fixture as
+`wrong_args`, even when the call executed cleanly.
 
 `tests/test_fixtures.py` enforces the invariants without needing a server —
 unique ids and prompts, known categories, `expected_toolset` present on

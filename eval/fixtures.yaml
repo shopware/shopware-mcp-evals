@@ -887,6 +887,11 @@ fixtures:
   # link guidance #20869 added to the delete, upsert and schema descriptions.
   # The category and option ids are phantoms on purpose: a dry-run delete of a
   # mapping row that does not exist is accepted rather than refused.
+  # With phantom ids only the entity is graded, not the key: a product_category
+  # delete with productId and categoryId swapped matches no row either and is
+  # accepted (a wrong key name is refused, so the names are covered, the pairing
+  # is not). These fixtures measure whether the guidance leads to the mapping
+  # entity, not whether models build the composite key correctly.
   - id: m2m_remove_category
     category: disambiguation
     prompt: "Remove product {product_id} from category 019f0a6e3c007a2b9d4e5f6a7b8c9d01. The product itself stays."
@@ -909,6 +914,10 @@ fixtures:
       Paraphrase: says neither "category", "remove" nor "link". The model has to
       infer that the id is a category assignment and that the answer is the
       mapping row.
+      Expected to pass through recovery: reading entity-schema first is the path
+      #20869 prescribes, but only the three meta-tools are non-answering, so the
+      run records first_tool_correct: false and the scorecard lists entity-delete
+      as confused with entity-schema. That confusion is intended.
 
   - id: m2m_unassign_property_option
     category: disambiguation
@@ -922,6 +931,9 @@ fixtures:
       plausible and cannot remove a link (#20869's upsert description says so).
       product_property, not product_category, so the model has to read the
       mapping entity off entity-schema rather than copy the example.
+      Expected to pass through recovery, like m2m_unlist_from_category: the
+      entity-schema read counts as the first answer, so the scorecard confusion
+      of entity-delete with entity-schema is intended.
 
   - id: discovery_theme_color
     category: discovery

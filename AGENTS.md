@@ -598,7 +598,10 @@ Add entries to `eval/fixtures.yaml`. Required fields: `id`, `category`,
 `prompt`, `expected_tool`. Optional: `expect_result` (assertion tier — defaults
 to `accepted`; see the header of fixtures.yaml for why everything is on that
 default for now), `expected_toolset` (for deferred tools —
-grades whether the right toolset was enabled), `max_steps` (per-fixture
+grades whether the right toolset was enabled), `expected_args` (top-level
+arguments the answering call must carry: a subset match, compared exactly, and
+only applied when the model picked a terminal tool, so `expected_tool` or one of
+`acceptable_tools`; a miss fails as `wrong_args`), `max_steps` (per-fixture
 discovery step cap), `notes`. Categories:
 
 - `unambiguous` — one obvious tool; sanity check
