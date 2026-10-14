@@ -529,6 +529,13 @@ def test_note_distinguishes_the_two_models_when_only_one_stalled() -> None:
     assert C._note("step_cap", "no_tool_call") == "primary: step_cap, second: no_tool_call"
 
 
+def test_note_names_wrong_args_because_the_picked_columns_look_right() -> None:
+    """A `wrong_args` row picked the expected tool, so without the note the
+    both-fail table shows the expected tool three times and nothing else."""
+    assert C._note("wrong_args", "wrong_args") == "both: wrong_args"
+    assert C._note("wrong_args", "wrong_tool") == "primary: wrong_args"
+
+
 def test_detail_block_reports_the_category_and_toolset_when_known() -> None:
     a = report("strong", [("f1", False, "wanted", False)])
     amend(

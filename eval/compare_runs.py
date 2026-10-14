@@ -295,9 +295,10 @@ def _note(primary_reason: str | None, second_reason: str | None) -> str:
     `wrong_tool` is the default failure and is fully described by the two
     picked columns, so printing it in every row is noise. `step_cap` and
     `no_tool_call` are different failures — the model never settled, or never
-    called anything — and those the columns cannot show.
+    called anything — and those the columns cannot show. Neither can they show
+    `wrong_args`: its picked tool is the expected one by construction.
     """
-    interesting = {"step_cap", "no_tool_call"}
+    interesting = {"step_cap", "no_tool_call", "wrong_args"}
     p = primary_reason if primary_reason in interesting else None
     s = second_reason if second_reason in interesting else None
     if p and p == s:
