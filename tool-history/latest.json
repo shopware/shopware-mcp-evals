@@ -312,17 +312,20 @@
       "name": "shopware-entity-aggregate"
     },
     {
-      "description": "Delete Shopware entities by their UUIDs. Always use dryRun=true (default) first to preview cascade effects and dependent entity deletions, then set dryRun=false to execute. Returns {success, data: {deleted, notFound}, _meta: {dryRun}}.",
+      "description": "Delete Shopware entities by their UUIDs. Also the way to REMOVE a many-to-many link without deleting either side: delete the mapping entity, e.g. entity \"product_category\" with ids [{\"productId\":\"...\",\"categoryId\":\"...\"}] removes a category from a product, \"product_property\" with [{\"productId\":\"...\",\"optionId\":\"...\"}] removes a property option. shopware-entity-upsert can only add such links. Always use dryRun=true (default) first to preview cascade effects, then set dryRun=false to execute. Returns each affected entity with its operation: delete, or update for the entities a removed link belonged to.",
       "inputSchema": {
         "properties": {
           "dryRun": {
             "default": true,
+            "description": "Preview without deleting. Leave true first, then call again with false to delete.",
             "type": "boolean"
           },
           "entity": {
+            "description": "Entity name to delete from, e.g. \"product\", or a mapping entity such as \"product_category\" to remove a many-to-many link. See the shopware://entities resource for the full list.",
             "type": "string"
           },
           "ids": {
+            "description": "What to delete. For normal entities: a JSON array of UUIDs ([\"...\"]) or a comma-separated list. For mapping entities with a composite primary key: a JSON array of objects naming every key field, e.g. [{\"productId\":\"...\",\"categoryId\":\"...\"}]. shopware-entity-schema lists the key fields.",
             "type": "string"
           }
         },
@@ -361,7 +364,7 @@
       "name": "shopware-entity-read"
     },
     {
-      "description": "Get the field and association schema of a Shopware entity definition: field names, types, and associations for building shopware-entity-search criteria. Returns {success, data: {fields: [...], associations: [...]}}. See shopware://entities resource for all available entity names.",
+      "description": "Get the field and association schema of a Shopware entity definition: field names, types, and associations for building shopware-entity-search criteria. Many-to-many associations name their mappingEntity (e.g. \"product_category\"), which shopware-entity-delete uses to remove a link. Returns {success, data: {fields: [...], associations: [...]}}. See shopware://entities resource for all available entity names.",
       "inputSchema": {
         "properties": {
           "entity": {
@@ -412,7 +415,7 @@
       "name": "shopware-entity-search"
     },
     {
-      "description": "Create or update Shopware entity data. Always use dryRun=true (default) first to validate, then set dryRun=false to persist. If you don't already know the required fields, shopware-entity-schema will tell you. Returns validation result in dryRun mode, or the written entity data on commit.",
+      "description": "Create or update Shopware entity data. Always use dryRun=true (default) first to validate, then set dryRun=false to persist. If you don't already know the required fields, shopware-entity-schema will tell you. Returns validation result in dryRun mode, or the written entity data on commit. Many-to-many links (e.g. product categories) can only be added here. To remove one, use shopware-entity-delete on the mapping entity; a \"remove\" flag inside \"categories\" would be written to the category itself.",
       "inputSchema": {
         "properties": {
           "dryRun": {

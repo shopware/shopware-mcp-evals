@@ -48,7 +48,7 @@ import yaml
 
 import lane
 import ucp
-from eval.assertions import check, inband_error
+from eval.assertions import args_mismatch, check, inband_error
 from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
     BOLD,
@@ -868,16 +868,24 @@ def _handle_answering_call(
     args, forced = prepare_call(call["name"], call["input"])
     st.dry_run_forced = st.dry_run_forced or forced
 
+    # Checked before the non-executable branch, which would otherwise pass any
+    # arguments on the tool name alone.
+    mismatch = args_mismatch(fixture.get("expected_args"), call["input"]) if correct else None
+
     if not is_executable(call["name"]):
         # Nothing safe to do with it — no dryRun to hide behind, or a tool the
         # snapshot has never seen. Graded on selection alone, which is where the
-        # whole suite used to be.
+        # whole suite used to be — plus the arguments, which need no call.
         attempt["executed"] = False
+        if mismatch:
+            attempt["ok"], attempt["reason"], attempt["error"] = False, "wrong_args", mismatch[:200]
         st.attempted_tools.append(attempt)
         st.execution = "skipped_unsafe" if classify(call["name"]) else "skipped_unclassified"
         if not correct:
             st.fail_reason = "wrong_tool"
-        st.resolved = correct
+        elif mismatch:
+            st.fail_reason = "wrong_args"
+        st.resolved = correct and not mismatch
         st.stop = True
         return True
 
@@ -900,10 +908,16 @@ def _handle_answering_call(
     # the five gating failures had to be diagnosed from the fixture text.
     # In-band first, as in check(): with `isError: true` the same body also
     # arrives as `err`, raw.
+    server_text = inband_error(result_text) or err or ""
+    if mismatch:
+        # Missed arguments win over the server's verdict, refused or not, and the
+        # server's text stays next to the mismatch so neither is lost.
+        ok, reason = False, "wrong_args"
     attempt["executed"] = True
     attempt["ok"] = ok
     attempt["reason"] = reason
-    attempt["error"] = (inband_error(result_text) or err or "")[:200]
+    error = f"{mismatch}; server: {server_text}" if mismatch and server_text else mismatch or server_text
+    attempt["error"] = error[:200]
     st.attempted_tools.append(attempt)
 
     if correct and ok:

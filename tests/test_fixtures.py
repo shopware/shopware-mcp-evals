@@ -444,3 +444,18 @@ def test_the_admin_cart_token_fixtures_still_exist() -> None:
     ids = {f["id"] for f in ADMIN}
 
     assert ADMIN_CART_TOKEN_FIXTURES <= ids, f"stale ids: {sorted(ADMIN_CART_TOKEN_FIXTURES - ids)}"
+
+
+def test_expected_args_name_parameters_the_tool_has() -> None:
+    """A typo in an `expected_args` key passes every other static check and then
+    fails every paid run as `<key> missing`. The snapshot knows each tool's
+    parameters, so the typo can be caught here instead."""
+    params = {t["name"]: set(as_object(as_object(t.get("inputSchema")).get("properties"))) for t in _snapshot["tools"]}
+    unknown = [
+        (f["id"], key)
+        for f in ADMIN
+        for key in f.get("expected_args", {})
+        if key not in params.get(f.get("expected_tool", ""), set())
+    ]
+
+    assert not unknown, f"expected_args naming no parameter of the tool: {unknown}"

@@ -243,6 +243,62 @@ def test_an_alternative_from_acceptable_tools_is_accepted() -> None:
 
 
 @pytest.mark.usefixtures("stub_mcp")
+def test_matching_expected_args_pass() -> None:
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(expected_args={"entity": "product"}), "m", None, 6)
+
+    assert result["passed"] is True
+
+
+@pytest.mark.usefixtures("stub_mcp")
+def test_the_right_tool_with_the_wrong_args_fails_as_wrong_args_not_wrong_tool() -> None:
+    """entity-delete on `product` instead of `product_category` executes as
+    cleanly as the link removal and deletes the product. The tool was right, so
+    `wrong_tool` would misname it; the call was accepted, so no tier catches it."""
+    spec = fixture(expected_args={"entity": "product_category"})
+
+    result = E.run_fixture_discovery("openai", FakeClient(), spec, "m", None, 6)
+
+    assert result["passed"] is False
+    assert result.get("fail_reason") == "wrong_args"
+    assert result.get("first_tool_correct") is True
+    attempt = result.get("attempted_tools", [])[0]
+    assert attempt.get("error") == "entity was 'product', expected 'product_category'"
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_a_refused_call_that_also_misses_the_args_records_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mismatch names the reason, and the server's refusal stays next to it
+    instead of being dropped."""
+    monkeypatch.setattr(E, "mcp_call", const(reply("", "Entity product is read-only")))
+    spec = fixture(expected_args={"entity": "product_category"})
+
+    result = E.run_fixture_discovery("openai", FakeClient(), spec, "m", None, 6)
+
+    attempt = result.get("attempted_tools", [])[0]
+    assert attempt.get("reason") == "wrong_args"
+    assert attempt.get("error") == (
+        "entity was 'product', expected 'product_category'; server: Entity product is read-only"
+    )
+    assert result.get("fail_reason") == "wrong_args"
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_a_model_recovers_from_wrong_args_on_the_next_call() -> None:
+    """A `wrong_args` attempt hands the server's reply back like any failed call,
+    so the model can correct the arguments and still pass."""
+    client = ScriptedClient([(TOOL, {"entity": "product"}), (TOOL, {"entity": "product_category"})])
+    spec = fixture(expected_args={"entity": "product_category"})
+
+    result = E.run_fixture_discovery("openai", client, spec, "m", None, 6)
+
+    assert result["passed"] is True
+    assert result.get("first_tool_correct") is True
+    attempts = result.get("attempted_tools", [])
+    assert [a.get("reason") for a in attempts][0] == "wrong_args"
+    assert attempts[-1].get("ok") is True
+
+
+@pytest.mark.usefixtures("stub_mcp")
 def test_no_tool_call_at_all_is_its_own_fail_reason() -> None:
     result = E.run_fixture_discovery("openai", FakeClient(None), fixture(), "m", None, 6)
 
@@ -715,6 +771,28 @@ def test_an_unsafe_tool_is_graded_on_selection_and_never_called(
     assert result.get("execution") == "skipped_unsafe"
     assert result["passed"] is True, "graded on selection, as before"
     assert (result.get("attempted_tools") or [{}])[0].get("executed") is False
+
+
+@pytest.mark.parametrize(
+    ("expected", "passed"),
+    [({"entity": "product"}, True), ({"entity": "product_category"}, False)],
+)
+def test_expected_args_grade_an_unsafe_tool_without_calling_it(
+    stub_exec: ExecStub, expected: JsonObject, passed: bool
+) -> None:
+    """The unsafe branch returns before execution. The arguments need no call to
+    check, so they are graded there too instead of passing on the name alone."""
+    _, calls = stub_exec
+    spec = fixture(tool="shopware-media-upload", expected_args=expected)
+
+    result = E.run_fixture_discovery("openai", FakeClient("shopware-media-upload"), spec, "m", None, 6)
+
+    assert calls == [], "still never sent to the server"
+    assert result["passed"] is passed
+    if not passed:
+        assert result.get("fail_reason") == "wrong_args"
+        attempt = (result.get("attempted_tools") or [{}])[0]
+        assert attempt.get("error") == "entity was 'product', expected 'product_category'"
 
 
 def test_an_unknown_tool_is_not_executed_either(stub_exec: ExecStub) -> None:
