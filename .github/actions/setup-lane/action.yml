@@ -563,11 +563,12 @@ runs:
 
         # The Redis session store, as products/tools/mcp-server/configuration.md
         # in shopware/docs configures it for production: both servers on
-        # `store: cache` over one Redis pool, and both active-session registries
-        # moved onto that pool too — they sit on the per-machine cache.system
-        # otherwise (shopware/shopware#19980). One file rather than the docs'
-        # three: a `services:` block is honoured from any config file, and it
-        # means nothing here has to merge into a services.yaml it did not write.
+        # `store: cache` over one Redis pool. The active-session registries this
+        # also used to move onto the pool are gone: shopware/shopware#21295
+        # replaced them with list versions in the database. One file rather
+        # than the docs' separate ones: a `services:` block is honoured from any
+        # config file, and it means nothing here has to merge into a
+        # services.yaml it did not write.
         #
         # Not env-scoped, unlike the rate-limit override above, so it applies to
         # whatever env the server runs.
@@ -600,12 +601,6 @@ runs:
 
         services:
             mcp.session.cache_psr16:
-                class: Symfony\Component\Cache\Psr16Cache
-                arguments: ['@cache.mcp_sessions']
-            shopware.mcp.session_registry_cache:
-                class: Symfony\Component\Cache\Psr16Cache
-                arguments: ['@cache.mcp_sessions']
-            mcp.store_api.session_registry_cache:
                 class: Symfony\Component\Cache\Psr16Cache
                 arguments: ['@cache.mcp_sessions']
         YAML

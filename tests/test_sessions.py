@@ -36,9 +36,6 @@ class FakeRedis:
     def ttl(self, key: str) -> int:
         return self.ttls.get(key, -2)
 
-    def get(self, key: str) -> str | None:
-        return self.values.get(key)
-
     def delete(self, key: str) -> int:
         self.ttls.pop(key, None)
         return 1 if self.values.pop(key, None) is not None else 0
@@ -60,7 +57,6 @@ class FakeLane:
 
     redis           sessions live in the store under mcp-<server>-<id>
     ttl             the TTL each session key gets (-1: none)
-    shared_registry the active-session registry is in the store too
     one_namespace   both servers read the same sessions (a shared prefix)
     local_copy      the server keeps a copy it answers from after Redis loses it
     """
@@ -71,14 +67,12 @@ class FakeLane:
         *,
         redis: bool = True,
         ttl: int = 3600,
-        shared_registry: bool = True,
         one_namespace: bool = False,
         local_copy: bool = False,
     ) -> None:
         self.store: FakeRedis = store
         self.redis: bool = redis
         self.ttl: int = ttl
-        self.shared_registry: bool = shared_registry
         self.one_namespace: bool = one_namespace
         self.local_copy: bool = local_copy
         self.local: set[tuple[str, str]] = set()
@@ -94,11 +88,6 @@ class FakeLane:
         if self.redis:
             self.store.values[self.key(server, session)] = "{}"
             self.store.ttls[self.key(server, session)] = self.ttl
-        if self.shared_registry:
-            registry = f"{NS}:" + (
-                "shopware.mcp.active_session_ids" if server == "admin" else "shopware.mcp.store_api.active_session_ids"
-            )
-            self.store.values[registry] = self.store.values.get(registry, "") + f's:{len(session)}:"{session}";'
         return session, ""
 
     def known(self, server: str, session: str) -> bool:
@@ -147,12 +136,12 @@ def test_a_lane_really_on_redis_passes_every_check(monkeypatch: pytest.MonkeyPat
     rep, _ = run(monkeypatch)
 
     assert failed(rep) == []
-    assert rep.passed == 14
+    assert rep.passed == 12
 
 
 def test_the_file_store_fails_the_first_check_and_names_the_cause(monkeypatch: pytest.MonkeyPatch) -> None:
     """Nothing after it can run — every later check reads or deletes the key."""
-    rep, _ = run(monkeypatch, redis=False, shared_registry=False)
+    rep, _ = run(monkeypatch, redis=False)
 
     assert failed(rep) == ["admin: session written to Redis", "store_api: session written to Redis"]
     assert rep.passed == 0
@@ -163,15 +152,6 @@ def test_a_session_without_its_ttl_fails(monkeypatch: pytest.MonkeyPatch) -> Non
     rep, _ = run(monkeypatch, ttl=-1)
 
     assert failed(rep) == ["admin: session key TTL", "store_api: session key TTL"]
-
-
-def test_a_local_registry_fails_and_points_at_the_core_issue(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The documented recipe without the registry override: sessions shared,
-    broadcasts not."""
-    rep, _ = run(monkeypatch, shared_registry=False)
-
-    assert failed(rep) == ["admin: active-session registry", "store_api: active-session registry"]
-    assert "#19980" in str(rep.records[2].get("error"))
 
 
 def test_one_session_namespace_for_both_servers_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -254,13 +234,13 @@ def test_probe_reports_a_transport_error_without_a_response(monkeypatch: pytest.
 def test_find_key_matches_under_the_pool_namespace_only() -> None:
     store = FakeRedis()
     store.values = {
-        "ns:shopware.mcp.active_session_ids": "",
-        "ns:shopware.mcp.store_api.active_session_ids": "",
-        "ns:xshopware.mcp.active_session_ids": "",
+        "ns:mcp-admin-sid-1": "",
+        "ns:mcp-store_api-sid-1": "",
+        "ns:xmcp-admin-sid-1": "",
     }
 
-    assert S.find_key(store, "shopware.mcp.active_session_ids") == "ns:shopware.mcp.active_session_ids"
-    assert S.find_key(store, "shopware.mcp.store_api.active_session_ids") is not None
+    assert S.find_key(store, "mcp-admin-sid-1") == "ns:mcp-admin-sid-1"
+    assert S.find_key(store, "mcp-store_api-sid-1") is not None
     assert S.find_key(store, "absent") is None
 
 
@@ -341,5 +321,5 @@ def test_without_a_sales_channel_key_only_admin_is_checked_and_the_rest_is_skipp
     S.run(rep, store, ttl=3600, with_store_api=False)
 
     assert failed(rep) == []
-    assert rep.passed == 6
+    assert rep.passed == 5
     assert rep.skipped == 2

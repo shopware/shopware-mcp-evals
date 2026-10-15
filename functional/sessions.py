@@ -9,10 +9,6 @@ store. Each check is one the file store would fail:
 
   written      a key `<pool>:mcp-<server>-<session id>` appears on `initialize`
   expiring     it carries the session TTL, not the pool's or none
-  registry     the active-session registry (what app-driven tools/list_changed
-               broadcasts fan out to) is in the shared pool too. It is not by
-               default — shopware/shopware#19980 — and the lane overrides it the
-               way the docs describe, so this checks the documented workaround
   separate     the id is refused on the other endpoint. The two servers share one
                pool under different prefixes; a shared prefix would make a
                session minted on one valid on the other
@@ -21,6 +17,11 @@ store. Each check is one the file store would fail:
                session. Without this, "a key appeared" only proves the server
                writes to Redis, not that it reads from there rather than a
                local fallback
+
+There used to be one more: that the active-session registry app-driven
+tools/list_changed broadcasts fanned out to sat in the shared pool too.
+shopware/shopware#21295 removed the registry. Each session now compares list
+versions kept in the database, so there is nothing per machine left to share.
 
 Needs Redis access (`--redis-url`), because the property under test is where
 state lives. Without it every check is skipped with that reason — a lane on the
@@ -67,20 +68,15 @@ class Server:
 
     name: str
     endpoint: Endpoint
-    registry_key: str
 
 
 def servers() -> tuple[Server, Server]:
-    return (
-        Server("admin", ADMIN, "shopware.mcp.active_session_ids"),
-        Server("store_api", STORE, "shopware.mcp.store_api.active_session_ids"),
-    )
+    return (Server("admin", ADMIN), Server("store_api", STORE))
 
 
 class KeyStore(Protocol):
     def keys(self, pattern: str) -> list[str]: ...
     def ttl(self, key: str) -> int: ...
-    def get(self, key: str) -> str | None: ...
     def delete(self, key: str) -> int: ...
 
 
@@ -124,16 +120,6 @@ def verify_server(rep: Reporter, store: KeyStore, server: Server, other: Server 
         rep.check_pass(f"{server.name}: session key expires with the session TTL ({remaining}s)")
     else:
         rep.check_fail(f"{server.name}: session key TTL", f"TTL {remaining}, expected 1..{ttl}")
-
-    registry = find_key(store, server.registry_key)
-    if registry is not None and session in (store.get(registry) or ""):
-        rep.check_pass(f"{server.name}: active-session registry is in the shared pool")
-    else:
-        rep.check_fail(
-            f"{server.name}: active-session registry",
-            f"session not listed under {server.registry_key} in Redis — the registry is still local, so "
-            "app-driven tools/list_changed broadcasts reach only this server's sessions (shopware/shopware#19980)",
-        )
 
     status, body = probe(session, server.endpoint)
     if status != 200:

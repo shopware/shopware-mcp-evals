@@ -61,6 +61,10 @@ NOT_FOUND_MARKERS = (
     "unknown id",
     "no entity",
     "404",
+    # shopware-entity-delete since shopware/shopware#20869: a delete whose ids
+    # all miss is an error now, not a success with a notFound list. Phrased as
+    # rows that do not "exist", so "does not exist" above never matched it.
+    "none of these rows exist",
 )
 
 # UCP's error CODE, which prefixes every UCP error as `code: message`. The prose
