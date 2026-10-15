@@ -1,12 +1,12 @@
-"""The four Redis commands the session-store checks need, over a plain socket.
+"""The three Redis commands the session-store checks need, over a plain socket.
 
 A client library would be one more runtime dependency, with its own stub
-surface for basedpyright, to send SCAN, TTL, GET and DEL. RESP is small enough
+surface for basedpyright, to send SCAN, TTL and DEL. RESP is small enough
 that writing it out is shorter than justifying the dependency.
 
 Only what the checks read is decoded: bulk strings, integers, arrays, nil and
-errors. Bulk strings are decoded as latin-1 so a serialized PHP value round-trips
-byte for byte — the registry check looks for a session id inside one.
+errors. Bulk strings are decoded as latin-1, which cannot fail on any byte, so
+a key holding a serialized PHP value cannot crash a SCAN.
 """
 
 from __future__ import annotations
@@ -96,10 +96,6 @@ class Redis:
     def ttl(self, key: str) -> int:
         reply = self.command("TTL", key)
         return reply if isinstance(reply, int) else -2
-
-    def get(self, key: str) -> str | None:
-        reply = self.command("GET", key)
-        return reply if isinstance(reply, str) else None
 
     def delete(self, key: str) -> int:
         reply = self.command("DEL", key)

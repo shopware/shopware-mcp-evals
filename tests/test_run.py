@@ -85,6 +85,49 @@ def test_assert_tool_fail_on_protocol_error(monkeypatch: pytest.MonkeyPatch) -> 
     assert rep.failed == 1
 
 
+NOTHING_DELETED = {"success": False, "error": 'Nothing was deleted, none of these rows exist: ["' + "0" * 32 + '"]'}
+
+
+def test_assert_tool_passes_not_found_for_a_phantom_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """shopware-entity-delete's answer to a dry-run delete of ZERO_UUID since
+    shopware/shopware#20869. It failed the admin functional suite on trunk."""
+    monkeypatch.setattr(R, "mcp_call", const(call_resp(NOTHING_DELETED)))
+    rep = Reporter("t", color=False)
+
+    R.assert_tool(rep, "s", ADMIN, "tool", {}, "label", not_found_passes=True)
+
+    assert (rep.passed, rep.failed) == (1, 0)
+
+
+def test_assert_tool_still_fails_not_found_without_the_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check that sends a real id must not pass on "not found"."""
+    monkeypatch.setattr(R, "mcp_call", const(call_resp(NOTHING_DELETED)))
+    rep = Reporter("t", color=False)
+
+    R.assert_tool(rep, "s", ADMIN, "tool", {}, "label")
+
+    assert (rep.passed, rep.failed) == (0, 1)
+
+
+def test_assert_tool_opt_in_does_not_excuse_other_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(R, "mcp_call", const(call_resp({"success": False, "error": "Value is not a valid UUID"})))
+    rep = Reporter("t", color=False)
+
+    R.assert_tool(rep, "s", ADMIN, "tool", {}, "label", not_found_passes=True)
+
+    assert (rep.passed, rep.failed) == (0, 1)
+
+
+def test_only_the_phantom_id_delete_check_accepts_not_found() -> None:
+    """The opt-in is safe only where the payload names an id that cannot exist."""
+    from functional.checks import CORE_CHECKS, ZERO_UUID
+
+    opted_in = [check for check in CORE_CHECKS if check.not_found_passes]
+
+    assert [check.tool for check in opted_in] == ["shopware-entity-delete"]
+    assert ZERO_UUID in json.dumps(opted_in[0].args({}))
+
+
 def test_assert_tool_fail_on_empty_content(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(R, "mcp_call", const(raw_resp({"result": {"content": []}})))
     rep = Reporter("t", color=False)

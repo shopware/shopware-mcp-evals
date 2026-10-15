@@ -35,7 +35,7 @@ import requests
 
 import lane
 import ucp
-from eval.assertions import inband_error
+from eval.assertions import inband_error, is_not_found
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
 from functional.checks import (
     CORE_CHECKS,
@@ -128,6 +128,7 @@ def assert_tool(
     label: str | None = None,
     contains: str = "",
     harness_error: Callable[[str], str | None] | None = None,
+    not_found_passes: bool = False,
 ) -> JsonObject:
     """Call a tool; pass only if it neither errored nor reported failure in band.
 
@@ -145,6 +146,9 @@ def assert_tool(
     `harness_error` maps an error to the reason it is the environment's failure
     (see ToolCheck.harness_errors); such a failure is recorded as a check, not
     against the tool.
+
+    `not_found_passes` is for a payload that names a phantom id (see
+    ToolCheck.not_found_passes): "not found" is then the right answer.
     """
     label = label or tool
     resp = mcp_call(session, tool, args, endpoint=endpoint)
@@ -152,7 +156,9 @@ def assert_tool(
     content = (resp.get("result") or {}).get("content", [])
     text = mcp_result_text(resp)
     failure = error or (inband_error(text) if content else "")
-    if failure and harness_error and (why := harness_error(failure)):
+    if failure and not_found_passes and is_not_found(failure):
+        rep.tool_pass(tool, label, f"not found, as expected for a phantom id: {failure[:80]}")
+    elif failure and harness_error and (why := harness_error(failure)):
         rep.check_fail(label, f"{why}: {failure}")
     elif error:
         rep.tool_fail(tool, label, error)
@@ -696,6 +702,7 @@ def run_checks(rep: Reporter, session: str, endpoint: Endpoint, checks: tuple[To
                 # fail every shop this suite did not build.
                 contains=check.contains if ctx.get("log_probe", True) else "",
                 harness_error=check.harness_error,
+                not_found_passes=check.not_found_passes,
             )
 
 
