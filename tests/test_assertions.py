@@ -184,6 +184,17 @@ def test_an_id_that_does_not_resolve_is_accepted(error: str) -> None:
     assert A.check("accepted", None, error) == (True, None)
 
 
+def test_an_entity_delete_that_matches_no_rows_is_not_found() -> None:
+    """shopware/shopware#20869 turned a delete of ids that all miss from a
+    success with a notFound list into this error. Unmatched, it graded every
+    delete fixture as tool_error, which failed the second validator's core gate
+    on the nightly of 2026-10-15."""
+    error = 'Nothing was deleted, none of these rows exist: [{"id":"019efaa55600747b89ba85246b03de71"}]'
+    assert A.is_not_found(error) is True
+    assert A.check("accepted", None, error) == (True, None)
+    assert A.check("data", None, error) == (False, "not_found")
+
+
 def test_the_data_tier_still_fails_on_not_found() -> None:
     """`data` claims the call returned something; not-found is not something."""
     assert A.check("data", None, "Checkout not found") == (False, "not_found")

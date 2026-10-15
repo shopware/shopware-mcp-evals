@@ -449,17 +449,14 @@ functional suite on it. What it took to get right:
   Redis, not that it reads from there. The refusal is HTTP 404 with
   `Session not found or has expired.`, and the check matches that message.
   An unrelated 404 must not pass.
-- **Sharing the sessions does not share the registry.** App-driven
-  `tools/list_changed` broadcasts go to the sessions listed in a registry on
-  `cache.system`, which is local to each machine (shopware/shopware#19980). The
-  lane overrides `shopware.mcp.session_registry_cache` and
-  `mcp.store_api.session_registry_cache` the way the docs describe, and a check
-  fails if the registry isn't in Redis. When core fixes the default, drop the
-  override from setup-lane and keep the check.
-- The registry is written without a TTL, so it gets the pool's
-  `default_lifetime`. That is safe only because every MCP response carries
-  `Mcp-Session-Id` and rewrites the registry. A pool lifetime shorter than
-  `session.ttl` would drop live sessions from it.
+- **There is no session registry to share any more.** App-driven
+  `tools/list_changed` broadcasts used to go to the sessions listed in a
+  registry on the per-machine `cache.system` (shopware/shopware#19980), so the
+  lane moved it onto Redis and a check required it there. shopware/shopware#21295
+  removed the registry: an app change bumps a per-list version in the database,
+  and each Admin API request compares it with the versions in the session's
+  own data. The override and the check went with it. The nightly builds
+  against trunk, so it was the first to fail, on 2026-10-15.
 
 ## Auth
 
@@ -509,7 +506,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
 | `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
-| `functional/sessions.py` | Where the sessions live: Redis keys, TTL, registry, endpoint separation, `DELETE`, and refusal once the key is gone. Needs `--redis-url` / `MCP_EVALS_REDIS_URL`, skips without. See [Session store](#session-store) |
+| `functional/sessions.py` | Where the sessions live: Redis keys, TTL, endpoint separation, `DELETE`, and refusal once the key is gone. Needs `--redis-url` / `MCP_EVALS_REDIS_URL`, skips without. See [Session store](#session-store) |
 | `functional/resp.py` | The four Redis commands `sessions.py` needs, over a socket, so the check needs no Redis client library |
 | `functional/principals.py` | The allowlist matrix's throwaway integrations, users and ACL role, created through the Admin API with the suite's own key (`client_credentials` accepts `SWUA…`) and deleted in a `finally`. Behind `--provision-principals` |
 | `functional/customer.py` | Logs the customer half in, registering the account through the Store API on first use. The context token is only in the `sw-context-token` header, and `storefrontUrl` has to come from the sales channel — both cost a debugging round to find |

@@ -95,15 +95,13 @@ def test_a_malformed_scan_reply_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         _ = redis.keys("*")
 
 
-def test_ttl_get_delete_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
-    redis, sock = connect(monkeypatch, b":3600\r\n$2\r\nhi\r\n:1\r\n+OK\r\n$-1\r\n+OK\r\n")
+def test_ttl_delete_and_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis, sock = connect(monkeypatch, b":3600\r\n:1\r\n+OK\r\n$-1\r\n")
 
     assert redis.ttl("k") == 3600
-    assert redis.get("k") == "hi"
     assert redis.delete("k") == 1
-    # A reply of the wrong type reads as "absent", not as a crash.
+    # A reply of the wrong type, or nil, reads as "absent", not as a crash.
     assert redis.ttl("k") == -2
-    assert redis.get("k") is None
     assert redis.delete("k") == 0
     redis.close()
     assert sock.closed
