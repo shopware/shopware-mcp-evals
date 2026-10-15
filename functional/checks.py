@@ -76,6 +76,11 @@ class ToolCheck:
     # result — the tool can be pointed at the wrong file, find nothing, and pass.
     # With it, the check proves the tool returned the thing we know is there.
     contains: str = ""
+    # The payload names an id that cannot exist (ZERO_UUID), so "not found" is
+    # the correct answer and proves the call was well-formed. For the same
+    # reason the eval's `accepted` tier passes it. Never set it on a check that
+    # sends a real id: there, not-found is a bug.
+    not_found_passes: bool = False
 
     def label(self, ctx: Context) -> str:
         detail = self.detail(ctx) if callable(self.detail) else self.detail
@@ -166,6 +171,12 @@ CORE_CHECKS: tuple[ToolCheck, ...] = (
         "shopware-entity-delete",
         "(dryRun)",
         lambda c: {"entity": "product", "ids": json.dumps([ZERO_UUID]), "dryRun": True},
+        # A phantom id rather than a real product: if dryRun ever broke, a real
+        # id would delete a product from whatever shop this suite runs against.
+        # Since shopware/shopware#20869 a delete whose ids all miss answers
+        # "Nothing was deleted, none of these rows exist" instead of a success
+        # with a notFound list, so the not-found answer has to pass.
+        not_found_passes=True,
     ),
     ToolCheck("shopware-system-config-read", "", lambda c: {"key": "core.basicInformation"}),
     ToolCheck(
