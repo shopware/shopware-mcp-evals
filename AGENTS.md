@@ -169,6 +169,11 @@ sequenceDiagram
   it is **visibility only**: the allowlist and per-tool ACL still apply.
   `Endpoint.with_toolsets()` builds a pinned clone that keeps the credentials,
   which matters on store where rebuilding would mint a different cart token.
+  `shopware-toolsets-list` must report the pinned toolsets as `enabled`, or a
+  model enables tools it already has. Before shopware/shopware#21772 it listed
+  them disabled; the functional check records that exact symptom as a skip
+  naming the PR (`PINNED_REPORTED_DISABLED`) until `shopware.sha` carries the
+  fix, then the tolerance goes.
 - **A tool can fail while the transport succeeds.** UCP reports every failure as
   HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
   asserting on a tool call must go through `eval/assertions.py:inband_error`, or
