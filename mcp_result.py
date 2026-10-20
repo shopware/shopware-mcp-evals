@@ -53,8 +53,9 @@ type Shape = Literal["protocol_error", "legacy", "spec", "plain"]
 class ToolError:
     """A failed call, in the server's terms.
 
-    `code` is None when the server sent none — a protocol error, a plugin tool
-    that predates the codes, or a server older than #20948. Callers that grade on
+    `code` is None when the server sent none — a plugin tool that predates the
+    codes, or a server older than #20948. A protocol error carries its JSON-RPC
+    code as a string (`-32602`), which is a code like any other. Callers that grade on
     the code fall back to the message then, and that None is how they know to.
     """
 
@@ -279,8 +280,11 @@ def _envelope(data: object, error: ToolError | None, meta: JsonObject) -> JsonOb
 def read_result(resp: McpResponse) -> ToolOutcome:
     """Read one tools/call reply into a ToolOutcome."""
     if "error" in resp:
-        message = str(as_object(resp.get("error")).get("message") or "unknown error")
-        return ToolOutcome(shape="protocol_error", error=ToolError(message))
+        error = as_object(resp.get("error"))
+        message = str(error.get("message") or "unknown error")
+        rpc_code = error.get("code")
+        code = str(rpc_code) if isinstance(rpc_code, int) and not isinstance(rpc_code, bool) else None
+        return ToolOutcome(shape="protocol_error", error=ToolError(message, code))
 
     result = as_object(resp.get("result"))
     content = as_list(result.get("content"))

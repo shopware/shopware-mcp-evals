@@ -84,11 +84,20 @@ UCP_NOT_FOUND = re.compile(r"^\s*not_found\s*:")
 
 TIERS = ("data", "accepted", "none")
 
-# The codes that decide a verdict on their own (shopware/shopware#20948). Not
-# `tool_error`: it is the server's default for an error that names no code, and
-# under the 6.8 format it is what every plugin error that predates the codes
-# arrives as, so trusting it would turn UCP's `not_found:` into a tool failure.
-DECISIVE_CODES = frozenset({"not_found", "invalid_arguments", "missing_privilege"})
+# The codes that decide a verdict on their own, and what each one means. Core's
+# three (shopware/shopware#20948), UCP's name for a schema violation, and the
+# JSON-RPC invalid-params refusal the SDK sends when the arguments do not match
+# the input schema at all. Not `tool_error`: it is the server's default for an
+# error that names no code, and under the 6.8 format it is what every plugin
+# error that predates the codes arrives as, so trusting it would turn UCP's
+# `not_found:` into a tool failure.
+CODE_KINDS: dict[str, "ErrorKind"] = {
+    "not_found": "not_found",
+    "invalid_arguments": "invalid_arguments",
+    "missing_privilege": "missing_privilege",
+    "invalid_request": "invalid_arguments",
+    "-32602": "invalid_arguments",
+}
 
 type ErrorKind = Literal["not_found", "invalid_arguments", "missing_privilege", "tool_error"]
 type GradedBy = Literal["code", "prose"]
@@ -102,12 +111,8 @@ def classify_error(outcome: ToolOutcome) -> tuple[ErrorKind, GradedBy]:
     report: every `prose` is a tool still to move to coded errors.
     """
     code = outcome.error.code if outcome.error else None
-    if code == "not_found":
-        return "not_found", "code"
-    if code == "invalid_arguments":
-        return "invalid_arguments", "code"
-    if code == "missing_privilege":
-        return "missing_privilege", "code"
+    if code in CODE_KINDS:
+        return CODE_KINDS[code], "code"
     message = outcome.failure
     if is_not_found(message):
         return "not_found", "prose"

@@ -168,6 +168,12 @@ in it carried a decisive code:
 So core is on the list too, not only the plugins: `entity-delete` answers a
 missing row with the default `tool_error` code.
 
+The store eval on the same lane (98%, 44/45) showed two codes the first cut did
+not know. UCP sends `invalid_request` for a schema violation, and the SDK
+refuses arguments that do not match the input schema with JSON-RPC `-32602`,
+whose code `read_result` used to drop. Both now count as `invalid_arguments`,
+graded on the code.
+
 ## Phase 4: next-major lane (`v6.8.0.0`) (built, not yet run in CI)
 
 1. `setup-lane` gets a `feature_flags` input written to `.env.local` and to the

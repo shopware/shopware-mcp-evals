@@ -37,12 +37,12 @@ def result(
 # ---------------------------------------------------------------------------
 # Protocol errors
 # ---------------------------------------------------------------------------
-def test_a_json_rpc_error_is_a_failure_with_no_code_and_no_envelope() -> None:
+def test_a_json_rpc_error_is_a_failure_with_its_code_and_no_envelope() -> None:
     outcome = read_result({"error": {"code": -32601, "message": "Tool not found"}})
 
     assert outcome.shape == "protocol_error"
     assert outcome.failure == "Tool not found"
-    assert outcome.error == ToolError("Tool not found")
+    assert outcome.error == ToolError("Tool not found", "-32601")
     assert outcome.envelope == {} and outcome.text == ""
 
 
@@ -375,3 +375,8 @@ def test_a_not_found_grades_the_same_on_every_shape(shape: str) -> None:
 
     assert A.check("accepted", outcome) == (True, None)
     assert A.check("data", outcome) == (False, "not_found")
+
+
+def test_a_json_rpc_error_without_a_numeric_code_has_none() -> None:
+    assert read_result({"error": {"message": "x"}}).error == ToolError("x")
+    assert read_result({"error": {"code": True, "message": "x"}}).error == ToolError("x")

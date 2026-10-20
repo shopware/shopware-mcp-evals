@@ -7,6 +7,7 @@ pass as long as the tool name was right.
 """
 
 import json
+from typing import cast
 
 import pytest
 
@@ -434,6 +435,8 @@ def coded(message: str, code: str | None) -> ToolOutcome:
         ("Invalid or unknown id", "not_found", ("not_found", "code")),
         ("Entity product not found in the schema", "invalid_arguments", ("invalid_arguments", "code")),
         ("Missing privilege: product:read", "missing_privilege", ("missing_privilege", "code")),
+        # UCP's name for a schema violation, measured on agentic-commerce 1.4.0.
+        ('Validation failed for schema "cart.create.request"', "invalid_request", ("invalid_arguments", "code")),
         # No code, or the server's uninformative default: the prose decides.
         ('not_found: Order "o1" is not available to this request', "tool_error", ("not_found", "prose")),
         ("Validation failed for schema", None, ("invalid_arguments", "prose")),
@@ -442,6 +445,33 @@ def coded(message: str, code: str | None) -> ToolOutcome:
 )
 def test_an_error_is_classified_by_its_code_first(message: str, code: str | None, expected: tuple[str, str]) -> None:
     assert A.classify_error(coded(message, code)) == expected
+
+
+def test_a_json_rpc_invalid_params_refusal_is_coded_invalid_arguments() -> None:
+    """The SDK refuses arguments that do not match the input schema before the
+    tool runs, as JSON-RPC -32602. Measured on the trunk lane with `create_cart`."""
+    refusal = read_result(
+        cast(
+            McpResponse,
+            cast(
+                object,
+                {
+                    "error": {
+                        "code": -32602,
+                        "message": "Invalid parameters for tool 'create_cart': Property '/payload'",
+                    }
+                },
+            ),
+        )
+    )
+
+    assert A.classify_error(refusal) == ("invalid_arguments", "code")
+
+
+def test_another_json_rpc_error_still_falls_back_to_the_message() -> None:
+    unknown = read_result(cast(McpResponse, cast(object, {"error": {"code": -32601, "message": "Tool not found"}})))
+
+    assert A.classify_error(unknown) == ("not_found", "prose")
 
 
 def test_a_coded_not_found_passes_the_accepted_tier_whatever_the_message_says() -> None:
