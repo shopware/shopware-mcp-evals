@@ -1016,7 +1016,9 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
         else:
             rep.check_fail(f"allowlist: {who}", f"expected it {claim}, but {detail}")
 
-    endpoint = admin_endpoint(principal.access_key, principal.secret_key, base_url=suite.base_url)
+    endpoint = admin_endpoint(principal.access_key, principal.secret_key, base_url=suite.base_url).with_protocol(
+        suite.protocol_version
+    )
     try:
         session, _ = mcp_init(endpoint=endpoint)
     except (RuntimeError, requests.exceptions.RequestException) as exc:
@@ -1307,10 +1309,10 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     # order-get returns an order at all, and its fixtures would be graded on a
     # tool that has only ever said no.
     rep.section("UCP buyer journey — authenticated customer")
-    run_customer_journey(rep, allow_mutations)
+    run_customer_journey(rep, endpoint, allow_mutations)
 
 
-def run_customer_journey(rep: Reporter, allow_mutations: bool) -> None:
+def run_customer_journey(rep: Reporter, endpoint: Endpoint, allow_mutations: bool) -> None:
     """The journey again, logged in as a real customer.
 
     A failure to provision is reported against `order-get` specifically, not
@@ -1333,7 +1335,9 @@ def run_customer_journey(rep: Reporter, allow_mutations: bool) -> None:
     rep.info(f"  shopping as {email}")
     # A second endpoint rather than a mutated one: the guest journey's cart lives
     # on the process-wide token, and rebuilding that would silently abandon it.
-    customer_endpoint = store_endpoint(context_token=context_token)
+    # On the suite's revision: a rebuilt endpoint starts at the default, and the
+    # customer half of a 2024-11-05 job would quietly run at 2025-11-25.
+    customer_endpoint = store_endpoint(context_token=context_token).with_protocol(endpoint.protocol_version)
     session, _ = mcp_init(endpoint=customer_endpoint)
     enable_all_toolsets(session, endpoint=customer_endpoint)
 

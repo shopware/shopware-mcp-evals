@@ -344,3 +344,27 @@ def test_the_spec_format_without_an_expiry_is_named(revision: str) -> None:
     problems = L.offload_problems(read_result(offloaded_spec(revision, expiry=False)), revision)
 
     assert problems == [f"no shopware/expiresAt in the result _meta on {revision}"]
+
+
+def test_the_second_principal_reads_on_the_suites_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The offload pins each revision itself; everything after it, including the
+    rebuilt endpoint of the second principal, stays on the caller's revision."""
+    server = FakeServer()
+    seen: list[str] = []
+    inner = server.init
+
+    def init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
+        seen.append(endpoint.protocol_version)
+        return inner(endpoint)
+
+    monkeypatch.setattr(L, "mcp_init", init)
+    monkeypatch.setattr(L, "mcp_call", server.call)
+    monkeypatch.setattr(L, "mcp_read_resource", server.read)
+    monkeypatch.setattr(L, "AdminApi", no_api)
+    monkeypatch.setattr(L, "another_principal", other_principal)
+    rep = Reporter("test", color=False)
+
+    L.verify_large_results(rep, ADMIN.with_protocol("2025-06-18"), provision=True)
+
+    assert rep.failed == 0
+    assert seen == ["2024-11-05", "2025-06-18", "2025-06-18", "2025-06-18"]

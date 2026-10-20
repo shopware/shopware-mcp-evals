@@ -387,3 +387,23 @@ def test_a_role_refusal_without_the_code_fails(monkeypatch: pytest.MonkeyPatch, 
         + f"but the call answered {answer}"
         + (": Missing privilege: product:read" if code else ": ")
     ]
+
+
+def test_the_principal_endpoint_negotiates_the_suites_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rebuilt endpoint starts at the default revision. Under a 2024-11-05 job
+    the principals would otherwise be checked at 2025-11-25."""
+    fake = FakeServer()
+    seen: list[str] = []
+    inner = fake.init
+
+    def init(endpoint: Endpoint | None = None) -> tuple[str, str]:
+        assert endpoint is not None
+        seen.append(endpoint.protocol_version)
+        return inner(endpoint)
+
+    fake.init = init
+    _ = wire(monkeypatch, fake)
+    R.verify_allowlist_matrix(Reporter("admin", color=False), SUITE.with_protocol("2024-11-05"), provision=True)
+
+    assert seen
+    assert set(seen) == {"2024-11-05"}

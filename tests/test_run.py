@@ -738,3 +738,22 @@ def test_an_older_revision_records_one_skip_instead_of_repeating_them(
     assert "in the 2025-11-25 suite" in str(skip)
     assert "at 2024-11-05" in str(skip)
     assert rep.failed == 0
+
+
+def test_the_customer_journey_negotiates_the_suites_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The customer half rebuilds its endpoint for the context token. Rebuilt
+    from scratch it would start at the default revision, so a 2024-11-05 job
+    would run its authenticated journey at 2025-11-25 and report otherwise."""
+    seen: list[str] = []
+
+    def init(endpoint: Endpoint) -> tuple[str, str]:
+        seen.append(endpoint.protocol_version)
+        raise RuntimeError("stop after the handshake")
+
+    monkeypatch.setattr(R, "provision", const(("buyer@example.invalid", "ctx-token")))
+    monkeypatch.setattr(R, "mcp_init", init)
+
+    with pytest.raises(RuntimeError, match="stop after the handshake"):
+        R.run_customer_journey(Reporter("store", color=False), STORE.with_protocol("2024-11-05"), True)
+
+    assert seen == ["2024-11-05"]

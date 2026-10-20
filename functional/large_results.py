@@ -193,7 +193,9 @@ def verify_pointer_binding(rep: Reporter, endpoint: Endpoint, uri: str, provisio
             endpoint.base_url, endpoint.auth_headers["sw-access-key"], endpoint.auth_headers["sw-secret-access-key"]
         )
         with another_principal(api) as other:
-            theirs = admin_endpoint(other.access_key, other.secret_key, base_url=endpoint.base_url)
+            theirs = admin_endpoint(other.access_key, other.secret_key, base_url=endpoint.base_url).with_protocol(
+                endpoint.protocol_version
+            )
             session, _ = mcp_init(endpoint=theirs)
             _report(rep, label, refused_problem(mcp_read_resource(session, uri, theirs)))
     except ProvisioningFailed as exc:
