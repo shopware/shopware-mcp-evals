@@ -289,6 +289,27 @@ def test_a_server_older_than_the_renderer_is_one_skip_with_the_reason(monkeypatc
     assert rep.records[0].get("tool") == "check"
 
 
+@pytest.mark.parametrize(
+    "replies",
+    [
+        pytest.param("all-refused", id="every-probe-refused"),
+        pytest.param("mixed", id="unstamped-and-refused"),
+    ],
+)
+def test_a_refused_call_is_no_evidence_of_an_old_server(monkeypatch: pytest.MonkeyPatch, replies: str) -> None:
+    """A JSON-RPC refusal never reached the renderer, so it cannot show the
+    server predates it. The probes fail instead of the section being skipped."""
+    refused: McpResponse = {"error": {"code": -32602, "message": "Tool is not enabled in your MCP allowlist."}}
+    unstamped: McpResponse = {"result": {"content": [{"type": "text", "text": '{"success": true, "data": {}}'}]}}
+    first = refused if replies == "all-refused" else unstamped
+    server = FakeServer({"shopware-toolsets-list": first, "shopware-entity-schema": refused})
+    rep = run(monkeypatch, server)
+
+    assert server.opened == list(R.FORMAT_REVISIONS)
+    assert not [r for r in rep.records if r.get("reason") == R.PREDATES_RENDERER]
+    assert rep.failed == len(R.FORMAT_REVISIONS) * 2
+
+
 def test_a_session_that_will_not_open_fails_that_revision_only(monkeypatch: pytest.MonkeyPatch) -> None:
     rep = run(monkeypatch, FakeServer(refuse="2025-06-18"))
 

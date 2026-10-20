@@ -965,9 +965,11 @@ jobs:
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
           INCOMPATIBLE: ${{ steps.lane.outputs.incompatible_plugins }}
         # The plugins setup-lane deactivated are skips naming that, not failures.
+        # The principals cover missing_privilege and pointer isolation under
+        # the 6.8 result format.
         run: |
           python -m functional.runner --endpoint admin --protocol-version 2025-11-25 \
-            --deactivated-plugins "${INCOMPATIBLE}"
+            --deactivated-plugins "${INCOMPATIBLE}" --provision-principals
 
       # The UCP journey commits, as in static: a rolled-back cart cannot be the
       # next step's precondition, and this instance dies with the job. Its one

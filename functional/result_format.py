@@ -168,7 +168,15 @@ def verify_result_format(
         # One stamp anywhere means the renderer is there. None at all, on the
         # first revision tried, means the server is older than the feature —
         # recorded once, with the reason, rather than failed probe by probe.
-        if revision == revisions[0] and not any(o.generated_at for _, o in outcomes if o.shape != "protocol_error"):
+        # Only when every probe reached the renderer: a call refused before the
+        # tool ran says nothing about the server's age, and fails below.
+        rendered = [o for _, o in outcomes if o.shape != "protocol_error"]
+        if (
+            revision == revisions[0]
+            and rendered
+            and len(rendered) == len(outcomes)
+            and not any(o.generated_at for o in rendered)
+        ):
             rep.check_skip("result format", PREDATES_RENDERER)
             return
 
