@@ -8,6 +8,7 @@ cost again, so the test asserts the mapping rather than just that it runs.
 import pytest
 
 from eval import preflight
+from eval.result_schema import JsonObject
 from tests.stubs import const, raiser
 
 
@@ -270,15 +271,15 @@ def test_first_product_name_is_empty_when_the_shape_is_unexpected() -> None:
 def test_a_real_product_id_is_taken_from_the_search_result() -> None:
     """catalog-lookup is probed with the id search returned, not an invented one,
     so the id is one UCP itself can resolve (see functional/journeys.py)."""
-    text = '{"data": {"products": [{"id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9", "title": "Thing"}]}}'
+    envelope: JsonObject = {"data": {"products": [{"id": "0a1b2c3d4e5f60718293a4b5c6d7e8f9", "title": "Thing"}]}}
 
-    assert preflight._product_id_from_search(text) == "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+    assert preflight._product_id_from_search(envelope) == "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
 
 
 def test_no_product_id_degrades_so_the_lookup_probe_is_skipped() -> None:
     """A malformed or empty search result yields "", and run() then skips the
     lookup rather than sending an id nothing can resolve."""
-    assert preflight._product_id_from_search("not json") == ""
-    assert preflight._product_id_from_search('{"data": {"products": []}}') == ""
-    assert preflight._product_id_from_search('{"data": {}}') == ""
-    assert preflight._product_id_from_search('{"data": {"products": [{"noId": 1}]}}') == ""
+    assert preflight._product_id_from_search({}) == ""
+    assert preflight._product_id_from_search({"data": {"products": []}}) == ""
+    assert preflight._product_id_from_search({"data": {}}) == ""
+    assert preflight._product_id_from_search({"data": {"products": [{"noId": 1}]}}) == ""

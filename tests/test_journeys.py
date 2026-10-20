@@ -16,7 +16,7 @@ from eval.result_schema import JsonObject, McpResponse, as_list, as_object
 from functional import journeys
 from functional.reporting import Reporter
 from mcp_client import Endpoint, store_endpoint
-from tests.stubs import const
+from tests.stubs import const, reads_text
 
 # A real Endpoint pointing nowhere: every call below is stubbed, so only its
 # identity and its url (which the reporter prints) matter.
@@ -252,7 +252,7 @@ def _stub_transport(monkeypatch: pytest.MonkeyPatch, responses: dict[str, JsonOb
         return blocks[0].get("text", "") if blocks else ""
 
     monkeypatch.setattr(journeys, "mcp_call", fake_call)
-    monkeypatch.setattr(journeys, "mcp_result_text", result_text)
+    monkeypatch.setattr(journeys, "read_result", reads_text(result_text))
     return seen
 
 
@@ -536,7 +536,7 @@ def test_the_promo_code_comes_from_the_environment(monkeypatch: pytest.MonkeyPat
 def test_an_unreadable_response_fails_rather_than_passing_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     reply: McpResponse = {"result": {"content": [{"text": "not json"}]}}
     monkeypatch.setattr(journeys, "mcp_call", const(reply))
-    monkeypatch.setattr(journeys, "mcp_result_text", const("not json"))
+    monkeypatch.setattr(journeys, "read_result", reads_text(const("not json")))
     rep = _reporter()
 
     journeys.run_ucp_journey(rep, "sid", STORE, allow_mutations=True)

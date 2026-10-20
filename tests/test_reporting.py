@@ -60,6 +60,16 @@ def test_write_report_roundtrip(tmp_path: Path) -> None:
     assert report["health"] == {}
 
 
+def test_the_report_names_the_protocol_revision_it_ran_on(tmp_path: Path) -> None:
+    """Two runs on different revisions are different measurements; a report that
+    cannot say which one it is cannot be compared with anything."""
+    rep = Reporter("srv", color=False, protocol_version="2025-11-25")
+    out = tmp_path / "report.json"
+    rep.write_report(out)
+
+    assert cast(JsonObject, cast(object, json.loads(out.read_text())))["protocol_version"] == "2025-11-25"
+
+
 def test_tool_health_takes_the_worst_status_per_tool() -> None:
     """A tool asserted several times is healthy only if every assertion held. The
     gate asks "is there any reason not to trust this tool", not "did it ever work

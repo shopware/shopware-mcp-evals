@@ -27,11 +27,11 @@ real failure; the second is the data's, and failing it would turn this into a
 test of the seed.
 """
 
-import json
 import re
 from typing import cast
 
-from eval.result_schema import ExpectSpec, JsonObject, as_list, as_object
+from eval.result_schema import ExpectSpec, JsonObject, as_object
+from mcp_result import ToolOutcome
 
 # Substrings that mark a server response as a rejection of the request rather
 # than an answer to it. Matched case-insensitively against the error text.
@@ -106,13 +106,6 @@ def is_not_found(error: str | None) -> bool:
     return bool(UCP_NOT_FOUND.match(lowered)) or any(marker in lowered for marker in NOT_FOUND_MARKERS)
 
 
-def _payload(result_text: str | None) -> object:
-    try:
-        return cast(object, json.loads(result_text)) if result_text else None
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
 def _resolve(payload: object, path: str) -> tuple[bool, object]:
     """Walk a dotted path. Returns (found, value) so a real null is not confused
     with an absent key — a tool returning `{"data": null}` has answered, and it
@@ -126,42 +119,12 @@ def _resolve(payload: object, path: str) -> tuple[bool, object]:
     return True, current
 
 
-def inband_error(result_text: str | None) -> str | None:
-    """The message from a `{"success": false}` body, or None if there is none.
-
-    UCP tools answer a rejected request with HTTP 200 and an MCP result that
-    carries `success: false` — there is no transport error at all, so
-    `mcp_call_error` returns "" and the call looks clean. Without this the
-    `accepted` tier passed every one of them: the entire Store suite would have
-    gone green while not a single tool did anything, which is a worse outcome
-    than the failure it replaced.
-    """
-    body = as_object(_payload(result_text))
-    if body.get("success") is not False:
-        return None
-    raw_err = body.get("error")
-    err = as_object(raw_err)
-    if isinstance(raw_err, dict):
-        # `type` carries the classification the server already made — keeping it
-        # in the string lets the markers below sort it without a second scheme.
-        message = f"{err.get('type', '')!s}: {err.get('message', '')!s}".strip(": ").strip()
-        # `violations` is where the answer actually is. UCP's schema errors say
-        # only 'Validation failed for schema "checkout.create.request"' in the
-        # message, and carry `["$.line_items is required"]` alongside it — the
-        # difference between a dead end and a fix. Dropping it cost several
-        # rounds of guessing payload shapes by hand.
-        violations = as_list(err.get("violations"))
-        if violations:
-            message += f" ({'; '.join(str(v) for v in violations)})"
-        return message
-    return str(raw_err) if raw_err else "the tool reported success: false"
-
-
-def check(expect: str | ExpectSpec | None, result_text: str | None, error: str | None) -> tuple[bool, str | None]:
+def check(expect: str | ExpectSpec | None, outcome: ToolOutcome) -> tuple[bool, str | None]:
     """Evaluate one fixture's expectation. Returns (passed, failure_reason).
 
     `expect` is the fixture's `expect_result`: a tier name, or a mapping with a
-    `tier` key plus predicates.
+    `tier` key plus predicates. `outcome` is the reply as mcp_result read it, so
+    the predicates mean the same thing on every protocol revision and format.
     """
     # The mapping branch aliases rather than copies the caller's spec — nothing
     # here mutates it, so a defensive copy would only cost an allocation.
@@ -171,18 +134,16 @@ def check(expect: str | ExpectSpec | None, result_text: str | None, error: str |
     if tier == "none":
         return True, None
 
-    # An in-band failure is a failure. Checked after `none` so a tool that
-    # cannot be executed is still exempt, and folded into `error` so it sorts
-    # through exactly the same not-found / malformed / environment logic rather
-    # than growing a parallel one.
+    # Every way to fail arrives as one message: a JSON-RPC error, `isError`, or
+    # an in-band `{"success": false}` with HTTP 200 and no flag at all — how the
+    # UCP and merchant tools answer. Checked after `none` so a tool that cannot
+    # be executed is still exempt.
     #
-    # The in-band message goes FIRST. Since shopware/shopware#19965 the server
-    # also flags a `{"success": false}` body with `isError: true`, so
-    # mcp_call_error returns that body as raw JSON — and the raw JSON starts
-    # with `{`, not with the code, so the anchored `not_found:` never matched.
-    # It graded every correct get_order pick as tool_error. A JSON-RPC error has
-    # no result text, so the two never compete for the same call.
-    error = inband_error(result_text) or error
+    # The message is the one mcp_result DESCRIBED, never the raw body. With
+    # `isError: true` the raw body is JSON starting with `{`, so the anchored
+    # `not_found:` never matched it, and every correct get_order pick graded as
+    # tool_error.
+    error = outcome.failure
 
     if error:
         # Not-found is checked FIRST, before the validation markers, and that
@@ -209,7 +170,7 @@ def check(expect: str | ExpectSpec | None, result_text: str | None, error: str |
     if tier == "accepted":
         return True, None
 
-    payload = _payload(result_text)
+    payload = outcome.payload
     if payload is None:
         return False, "unreadable_result"
 
@@ -230,7 +191,7 @@ def check(expect: str | ExpectSpec | None, result_text: str | None, error: str |
             return False, f"too_few:{path}<{wanted}"
 
     for needle in spec.get("contains", []):
-        if needle not in (result_text or ""):
+        if needle not in outcome.text:
             return False, f"missing_text:{needle}"
 
     return True, None

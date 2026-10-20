@@ -35,8 +35,9 @@ class _Palette:
 class Reporter:
     """Collects pass/fail/skip results for one functional run."""
 
-    def __init__(self, server: str, *, color: bool | None = None):
+    def __init__(self, server: str, *, color: bool | None = None, protocol_version: str | None = None):
         self.server: str = server
+        self.protocol_version: str | None = protocol_version
         self.passed: int = 0
         self.failed: int = 0
         self.skipped: int = 0
@@ -142,14 +143,20 @@ class Reporter:
 
     def write_report(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        report = FunctionalReport(
-            timestamp=datetime.now(UTC).isoformat(),
-            server=self.server,
-            total=self.total,
-            tools=self.records,
-            health=self.tool_health(),
-            **{"pass": self.passed, "fail": self.failed, "skip": self.skipped},
-        )
+        # A literal, not the keyword form: `pass` is a keyword, and splatting it in
+        # from a dict of ints stops type-checking once the record has a str field.
+        report: FunctionalReport = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "server": self.server,
+            "pass": self.passed,
+            "fail": self.failed,
+            "skip": self.skipped,
+            "total": self.total,
+            "tools": self.records,
+            "health": self.tool_health(),
+        }
+        if self.protocol_version:
+            report["protocol_version"] = self.protocol_version
         path.write_text(json.dumps(report, indent=2))
         print(f"Report: {path}")
 

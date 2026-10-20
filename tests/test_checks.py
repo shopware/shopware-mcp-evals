@@ -17,7 +17,7 @@ from functional import checks as K
 from functional import runner as R
 from functional.checks import Context, ToolCheck
 from mcp_client import ADMIN, Endpoint
-from tests.stubs import const
+from tests.stubs import const, reads_text
 
 
 def by_name(name: str) -> ToolCheck:
@@ -315,7 +315,7 @@ def _log_reply(files: list[str]) -> str:
 def _pick(monkeypatch: pytest.MonkeyPatch, files: list[str]) -> str:
     monkeypatch.delenv(R.LOG_FILE_ENV, raising=False)
     monkeypatch.setattr(R, "mcp_call", const(cast(McpResponse, cast(object, {}))))
-    monkeypatch.setattr(R, "mcp_result_text", const(_log_reply(files)))
+    monkeypatch.setattr(R, "read_result", reads_text(const(_log_reply(files))))
     chosen, reason = R.newest_log_file("sid", ADMIN)
     assert not reason, f"a file was chosen, so there is nothing to explain: {reason}"
     return chosen
@@ -370,7 +370,7 @@ def test_a_changed_error_format_says_so_rather_than_blaming_the_instance(
     honest report is that no filename could be read, not that none exists."""
     monkeypatch.delenv(R.LOG_FILE_ENV, raising=False)
     monkeypatch.setattr(R, "mcp_call", const(cast(McpResponse, cast(object, {}))))
-    monkeypatch.setattr(R, "mcp_result_text", const(json.dumps({"success": True, "data": []})))
+    monkeypatch.setattr(R, "read_result", reads_text(const(json.dumps({"success": True, "data": []}))))
 
     _file, reason = R.newest_log_file("sid", ADMIN)
 
@@ -383,7 +383,7 @@ def test_an_empty_file_list_is_the_one_case_that_is_the_instance(monkeypatch: py
     failed: it says nothing about whether the tool works."""
     monkeypatch.delenv(R.LOG_FILE_ENV, raising=False)
     monkeypatch.setattr(R, "mcp_call", const(cast(McpResponse, cast(object, {}))))
-    monkeypatch.setattr(R, "mcp_result_text", const(_log_reply([])))
+    monkeypatch.setattr(R, "read_result", reads_text(const(_log_reply([]))))
 
     file, reason = R.newest_log_file("sid", ADMIN)
 
@@ -498,7 +498,7 @@ def cart_server(monkeypatch: pytest.MonkeyPatch) -> _CartServer:
         return json.dumps({"success": True, "data": payload})
 
     monkeypatch.setattr(lane, "mcp_call", call)
-    monkeypatch.setattr(lane, "mcp_result_text", result_text)
+    monkeypatch.setattr(lane, "read_result", reads_text(result_text))
     return server
 
 

@@ -171,9 +171,21 @@ sequenceDiagram
   which matters on store where rebuilding would mint a different cart token.
 - **A tool can fail while the transport succeeds.** UCP reports every failure as
   HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
-  asserting on a tool call must go through `eval/assertions.py:inband_error`, or
-  it is blind to the entire Store failure mode — which is exactly what happened
-  to 27 admin checks for months.
+  asserting on a tool call must read it through `mcp_result.read_result` and its
+  `failure`, or it is blind to the entire Store failure mode — which is exactly
+  what happened to 27 admin checks for months.
+- **Never parse the first text block yourself.** A result arrives in one of three
+  shapes: the legacy `{"success", "data", "_meta"}` text, the `v6.8.0.0` format
+  (plain data first, metadata in blocks of its own), or plain text — plus
+  `structuredContent` and `resource_link` blocks from protocol 2025-06-18 on
+  (shopware/shopware#20948, #20951). `read_result` knows all of them, and
+  `ToolOutcome.envelope` is the legacy-shaped view the fixtures' `data.…` paths
+  are written against.
+- **The protocol revision is an endpoint property.** Sessions ask for
+  `DEFAULT_PROTOCOL_VERSION` (2024-11-05, what every gate was measured on);
+  `Endpoint.with_protocol()` and `--protocol-version` on both runners pick
+  another, and `mcp_init` fails if the server negotiates anything else. See
+  `docs/plans/protocol-eras.md` for the matrix this is building towards.
 
 ## UCP: six gates before a tool runs
 
@@ -502,7 +514,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 
 | File | Purpose |
 |---|---|
-| `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
+| `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE`, the protocol revisions |
+| `mcp_result.py` | **The only reader of tool results.** Legacy envelope, 6.8 spec format, plain text, `structuredContent`, `resource_link`, error codes |
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
 | `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |

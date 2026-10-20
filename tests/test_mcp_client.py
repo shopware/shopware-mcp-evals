@@ -247,56 +247,97 @@ def test_init_tolerates_a_server_that_sends_no_instructions(monkeypatch: pytest.
 
 
 # ---------------------------------------------------------------------------
-# Result / error extraction
+# Protocol revision
 # ---------------------------------------------------------------------------
-def test_result_text_takes_the_first_text_block() -> None:
-    resp = reply({"result": {"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}})
+def recording_server(
+    monkeypatch: pytest.MonkeyPatch, negotiated: str | None = None
+) -> list[tuple[JsonObject, dict[str, str]]]:
+    """A fake server answering initialize with `negotiated` (or the requested
+    revision), and recording every request body and its headers."""
+    sent: list[tuple[JsonObject, dict[str, str]]] = []
 
-    assert C.mcp_result_text(resp) == "first"
+    def post(_url: str, **kwargs: object) -> FakeResp:
+        body = cast(JsonObject, kwargs["json"])
+        sent.append((body, cast(dict[str, str], kwargs["headers"])))
+        if body["method"] == "initialize":
+            asked = cast(JsonObject, body["params"])["protocolVersion"]
+            result: JsonObject = {"protocolVersion": negotiated or asked}
+            return json_resp({"jsonrpc": "2.0", "id": 1, "result": result}, headers={"Mcp-Session-Id": "s"})
+        return json_resp({"jsonrpc": "2.0", "id": body["id"], "result": {"tools": []}})
 
-
-def test_result_text_skips_a_non_text_block() -> None:
-    resp = reply({"result": {"content": [{"type": "image", "data": "..."}, {"type": "text", "text": "wanted"}]}})
-
-    assert C.mcp_result_text(resp) == "wanted"
-
-
-def test_result_text_treats_a_block_without_a_type_as_text() -> None:
-    assert C.mcp_result_text(reply({"result": {"content": [{"text": "implicit"}]}})) == "implicit"
-
-
-def test_result_text_of_an_empty_response_is_empty() -> None:
-    assert C.mcp_result_text(reply({})) == ""
-    assert C.mcp_result_text(reply({"result": {"content": []}})) == ""
-
-
-def test_result_meta_defaults_to_a_dict_even_when_null() -> None:
-    assert C.mcp_result_meta(reply({"result": {"_meta": None}})) == {}
-    assert C.mcp_result_meta(reply({"result": {"_meta": {"listChanged": True}}})) == {"listChanged": True}
+    monkeypatch.setattr(C.requests, "post", post)
+    return sent
 
 
-def test_call_error_reports_a_protocol_error() -> None:
-    assert C.mcp_call_error(reply({"error": {"message": "Tool not found"}})) == "Tool not found"
+def test_a_session_asks_for_the_oldest_revision_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The revision every gate was measured on: legacy text and nothing else."""
+    sent = recording_server(monkeypatch)
+
+    _ = C.mcp_init(C.admin_endpoint())
+
+    assert cast(JsonObject, sent[0][0]["params"])["protocolVersion"] == "2024-11-05"
 
 
-def test_call_error_names_an_unlabelled_protocol_error() -> None:
-    assert C.mcp_call_error(reply({"error": {}})) == "unknown error"
+def test_a_session_asks_for_the_endpoints_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = recording_server(monkeypatch)
+
+    _ = C.mcp_init(C.admin_endpoint().with_protocol("2025-11-25"))
+
+    assert cast(JsonObject, sent[0][0]["params"])["protocolVersion"] == "2025-11-25"
 
 
-def test_call_error_reports_a_tool_level_error_from_the_text_block() -> None:
-    """isError puts the message in the content, not in error.message — missing
-    this reads a failed tool call as a success."""
-    resp = reply({"result": {"isError": True, "content": [{"type": "text", "text": "entity not found"}]}})
+def test_a_downgraded_session_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server answering an older revision than asked would make every
+    per-revision check report a revision it never measured."""
+    _ = recording_server(monkeypatch, negotiated="2025-03-26")
 
-    assert C.mcp_call_error(resp) == "entity not found"
-
-
-def test_call_error_falls_back_when_an_is_error_response_has_no_text() -> None:
-    assert C.mcp_call_error(reply({"result": {"isError": True, "content": []}})) == "tool error"
+    with pytest.raises(RuntimeError, match="for protocol 2025-11-25, it negotiated 2025-03-26"):
+        _ = C.mcp_init(C.admin_endpoint().with_protocol("2025-11-25"))
 
 
-def test_call_error_of_a_successful_response_is_empty() -> None:
-    assert C.mcp_call_error(reply({"result": {"content": [{"type": "text", "text": "ok"}]}})) == ""
+@pytest.mark.parametrize(
+    ("revision", "header"),
+    [("2024-11-05", None), ("2025-03-26", None), ("2025-06-18", "2025-06-18"), ("2025-11-25", "2025-11-25")],
+)
+def test_the_protocol_header_follows_initialize_from_2025_06_18(
+    monkeypatch: pytest.MonkeyPatch, revision: str, header: str | None
+) -> None:
+    """The 2025-06-18 transport requires it on every later request; a server that
+    gets none assumes 2025-03-26. Older revisions never had it."""
+    sent = recording_server(monkeypatch)
+    endpoint = C.admin_endpoint().with_protocol(revision)
+
+    session, _ = C.mcp_init(endpoint)
+    _ = C.mcp_tools_list_all(session, endpoint=endpoint)
+
+    init_headers, list_headers = sent[0][1], sent[1][1]
+    assert C.PROTOCOL_HEADER not in init_headers, "initialize is what negotiates it"
+    assert list_headers.get(C.PROTOCOL_HEADER) == header
+
+
+def test_an_unknown_revision_is_refused_when_the_endpoint_is_built() -> None:
+    """The stateless 2026-07-28 revision included: it has no initialize, and this
+    client would send one."""
+    with pytest.raises(ValueError, match="unknown protocol revision '2026-07-28'"):
+        _ = C.admin_endpoint().with_protocol("2026-07-28")
+
+
+def test_a_revision_clone_keeps_credentials_and_pinned_toolsets() -> None:
+    """On store, rebuilding would mint a new context token: a different cart."""
+    base = C.store_endpoint(context_token="tok").with_toolsets("ucp")
+
+    clone = base.with_protocol("2025-06-18")
+
+    assert clone.auth_headers == base.auth_headers
+    assert clone.toolsets == ("ucp",)
+    assert clone.url == base.url
+    assert clone.protocol_version == "2025-06-18"
+
+
+def test_a_toolset_clone_keeps_the_revision() -> None:
+    clone = C.admin_endpoint().with_protocol("2025-11-25").with_toolsets("order")
+
+    assert clone.protocol_version == "2025-11-25"
 
 
 # ---------------------------------------------------------------------------

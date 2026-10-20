@@ -35,7 +35,7 @@ import requests
 
 import lane
 import ucp
-from eval.assertions import inband_error, is_not_found
+from eval.assertions import is_not_found
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
 from functional.checks import (
     CORE_CHECKS,
@@ -53,7 +53,9 @@ from functional.reporting import Reporter
 from mcp_client import (
     ALL_TOOLSETS,
     BASE,
+    DEFAULT_PROTOCOL_VERSION,
     META_TOOLS,
+    PROTOCOL_REVISIONS,
     SW_ACCESS_KEY,
     SW_BASE_URL,
     SW_SC_ACCESS_KEY,
@@ -64,14 +66,13 @@ from mcp_client import (
     enable_toolset,
     endpoint_by_name,
     mcp_call,
-    mcp_call_error,
     mcp_init,
     mcp_list_names,
-    mcp_result_text,
     mcp_tools_list_all,
     mcp_toolsets_list,
     store_endpoint,
 )
+from mcp_result import read_result
 
 # No extra default-surface tools. A named constant because basedpyright rejects
 # a frozenset() call in a parameter default (reportCallInDefaultInitializer).
@@ -140,8 +141,7 @@ def assert_tool(
     error and some content", which is blind to the way UCP reports every failure:
     HTTP 200, no JSON-RPC error, and `{"success": false}` in the body. All 27
     admin checks were green over a mechanism that could not have seen a single
-    Store failure. `eval/preflight.py` already had this right; this is the same
-    `inband_error` and the same reasoning.
+    Store failure. `mcp_result` reads every failure the same way for both.
 
     `harness_error` maps an error to the reason it is the environment's failure
     (see ToolCheck.harness_errors); such a failure is recorded as a check, not
@@ -151,28 +151,27 @@ def assert_tool(
     ToolCheck.not_found_passes): "not found" is then the right answer.
     """
     label = label or tool
-    resp = mcp_call(session, tool, args, endpoint=endpoint)
-    error = (resp.get("error") or {}).get("message", "")
-    content = (resp.get("result") or {}).get("content", [])
-    text = mcp_result_text(resp)
-    failure = error or (inband_error(text) if content else "")
+    outcome = read_result(mcp_call(session, tool, args, endpoint=endpoint))
+    text = outcome.text
+    # A JSON-RPC error, `isError`, and an in-band `{"success": false}` alike.
+    # `isError` with plain text used to pass here: no JSON-RPC error, no envelope
+    # to find `success: false` in, and some content, so the tool was green.
+    failure = outcome.failure
     if failure and not_found_passes and is_not_found(failure):
         rep.tool_pass(tool, label, f"not found, as expected for a phantom id: {failure[:80]}")
     elif failure and harness_error and (why := harness_error(failure)):
         rep.check_fail(label, f"{why}: {failure}")
-    elif error:
-        rep.tool_fail(tool, label, error)
-    elif not content:
+    elif failure:
+        rep.tool_fail(tool, label, failure)
+    elif not outcome.texts and not outcome.links:
         rep.tool_fail(tool, label, "empty content in response")
-    elif in_band := inband_error(text):
-        rep.tool_fail(tool, label, in_band)
-    elif contains and contains not in (text or ""):
+    elif contains and contains not in text:
         # The tool answered, and answered with the wrong thing. A reader pointed
         # at the wrong file returns an empty result and would otherwise pass.
         rep.tool_fail(tool, label, f"response did not contain {contains!r}")
     else:
         rep.tool_pass(tool, label, text[:120])
-        return _payload(resp)
+        return outcome.envelope
     return {}
 
 
@@ -181,20 +180,12 @@ def assert_tool_error(
 ) -> None:
     """Call a tool and expect it to FAIL (protocol error, isError, or a
     {"success": false} payload), optionally containing `expected`."""
-    resp = mcp_call(session, tool, args, endpoint=endpoint)
-    msg = (resp.get("error") or {}).get("message", "")
-    result = resp.get("result") or {}
-    text = mcp_result_text(resp)
-    is_error = bool(msg) or bool(result.get("isError"))
-    if not is_error:
-        try:
-            is_error = as_object(cast(object, json.loads(text))).get("success") is False
-        except (ValueError, TypeError):
-            pass
-    if not is_error:
+    outcome = read_result(mcp_call(session, tool, args, endpoint=endpoint))
+    said = f"{outcome.failure} {outcome.text}".strip()
+    if outcome.ok:
         rep.check_fail(label, "expected an error response, got: NO_ERROR")
-    elif expected and expected not in (msg + text):
-        rep.check_fail(label, f"expected an error response, got: WRONG_ERROR:{(msg + ' ' + text)[:120]}")
+    elif expected and expected not in said:
+        rep.check_fail(label, f"expected an error response, got: WRONG_ERROR:{said[:120]}")
     else:
         rep.check_pass(label)
 
@@ -446,12 +437,8 @@ def _search_payload_tools(session: str, endpoint: Endpoint) -> list[JsonObject]:
     """
     seen: dict[str, JsonObject] = {}
     for query in ("list", "skills", "search", "config", "order", "product"):
-        payload = mcp_result_text(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint))
-        try:
-            data = as_list(as_object(cast(object, json.loads(payload))).get("data"))
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            continue
-        for row in data:
+        envelope = read_result(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint)).envelope
+        for row in as_list(envelope.get("data")):
             tool = as_object(as_object(row).get("tool"))
             name = str(tool.get("name", ""))
             if name:
@@ -799,7 +786,7 @@ def newest_log_file(session: str, endpoint: Endpoint) -> tuple[str, str]:
         # the reader to the seeding step, which is fine.
         return "", f"swag-dev-tools-log-search is not callable: {error}"
 
-    text = mcp_result_text(reply)
+    text = read_result(reply).text
     marker = "Available files:"
     if marker not in (text or ""):
         # The tool answered, and not with the list this parse depends on. Naming
@@ -831,15 +818,15 @@ def find_log_probe(session: str, endpoint: Endpoint, files_hint: str) -> tuple[s
     else's shop has no probe and demanding it would fail every instance this
     suite did not build.
     """
-    probe = mcp_result_text(
+    probe = read_result(
         mcp_call(
             session,
             "swag-dev-tools-log-search",
             {"query": LOG_PROBE_TEXT, "limit": 1, "file": files_hint},
             endpoint=endpoint,
         )
-    )
-    if LOG_PROBE_TEXT in (probe or ""):
+    ).text
+    if LOG_PROBE_TEXT in probe:
         return files_hint, True
     return files_hint, False
 
@@ -965,15 +952,14 @@ def _searched(session: str, endpoint: Endpoint) -> set[str]:
 
 def _call_error(resp: McpResponse) -> str:
     """Why a call did not run, including the in-band `{"success": false}` kind."""
-    # In-band first: an `isError: true` result carries the same body as raw
-    # JSON, and only the parsed form names the code (see eval.assertions.check).
-    return inband_error(mcp_result_text(resp)) or mcp_call_error(resp) or ""
+    return read_result(resp).failure
 
 
 def _refused_by_allowlist(resp: McpResponse) -> bool:
     # Named, not just "errored": an argument-validation error is also an error,
     # and counting it as a refusal would pass a server that enforces nothing.
-    return "allowlist" in ((resp.get("error") or {}).get("message", "") + mcp_result_text(resp)).lower()
+    outcome = read_result(resp)
+    return "allowlist" in f"{outcome.failure} {outcome.text}".lower()
 
 
 def _names(items: set[str]) -> str:
@@ -1306,6 +1292,12 @@ def require(name: str, value: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Shopware MCP functional test runner")
     parser.add_argument("--endpoint", choices=["admin", "store"], default="admin")
+    parser.add_argument(
+        "--protocol-version",
+        choices=PROTOCOL_REVISIONS,
+        default=DEFAULT_PROTOCOL_VERSION,
+        help=f"MCP revision the suite's sessions negotiate (default {DEFAULT_PROTOCOL_VERSION}).",
+    )
     parser.add_argument("--skip-media-upload", action="store_true")
     parser.add_argument("--skip-dev-tools", action="store_true")
     parser.add_argument(
@@ -1329,16 +1321,16 @@ def main() -> int:
     endpoint_name = cast(str, args.endpoint)
 
     require("SW_BASE_URL", SW_BASE_URL)
-    endpoint = endpoint_by_name(endpoint_name)
+    endpoint = endpoint_by_name(endpoint_name).with_protocol(cast(str, args.protocol_version))
     if endpoint_name == "admin":
         require("SW_ACCESS_KEY", SW_ACCESS_KEY)
         require("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)
     else:
         require("SW_SC_ACCESS_KEY (sales-channel access key)", SW_SC_ACCESS_KEY)
 
-    rep = Reporter(SW_BASE_URL)
+    rep = Reporter(SW_BASE_URL, protocol_version=endpoint.protocol_version)
     rep.banner(f"Shopware MCP Functional Tests — {endpoint_name} (v2 discovery)")
-    rep.info(f"Endpoint: {endpoint.url}\n")
+    rep.info(f"Endpoint: {endpoint.url} (MCP {endpoint.protocol_version})\n")
     rep.info("Initializing MCP session...")
     try:
         session, _ = mcp_init(endpoint=endpoint)

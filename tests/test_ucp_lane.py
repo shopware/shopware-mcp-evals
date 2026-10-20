@@ -5,7 +5,7 @@ Each test hands `ucp` a fake ToolCall that answers the way the plugin does —
 so what is under test is how the answers are read, not the server.
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import cast
 
 import pytest
@@ -14,7 +14,7 @@ import ucp
 from eval import runner as E
 from eval.result_schema import Fixture, JsonObject, McpResponse, as_list, as_object
 from mcp_client import Endpoint, store_endpoint
-from tests.stubs import const
+from tests.stubs import const, reads_text
 
 UNPURCHASABLE = "p-not-in-channel"
 EMPTY_RESPONSE: McpResponse = {}
@@ -102,8 +102,8 @@ def fx(fid: str, prompt: str) -> Fixture:
     return cast(Fixture, cast(object, base))
 
 
-def replies(*texts: str) -> object:
-    """mcp_result_text, answering each call with the next of `texts`."""
+def replies(*texts: str) -> Callable[[McpResponse], str]:
+    """The text of each successive reply: the next of `texts`."""
     it: Iterator[str] = iter(texts)
 
     def stub(_resp: McpResponse) -> str:
@@ -145,8 +145,12 @@ def test_the_runner_reads_the_ucp_answer_off_one_session(monkeypatch: pytest.Mon
     monkeypatch.setattr(E, "mcp_call", const(EMPTY_RESPONSE))
     monkeypatch.setattr(
         E,
-        "mcp_result_text",
-        replies('{"success": true, "data": {"products": [{"id": "p-ok"}]}}', '{"success": true, "data": {"id": "c"}}'),
+        "read_result",
+        reads_text(
+            replies(
+                '{"success": true, "data": {"products": [{"id": "p-ok"}]}}', '{"success": true, "data": {"id": "c"}}'
+            )
+        ),
     )
 
     assert E._ucp_product_id(STORE) == "p-ok"
@@ -156,6 +160,6 @@ def test_the_runner_reads_the_ucp_answer_off_one_session(monkeypatch: pytest.Mon
 def test_an_unreadable_ucp_answer_reads_as_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(E, "mcp_init", const(("sid", "")))
     monkeypatch.setattr(E, "mcp_call", const(EMPTY_RESPONSE))
-    monkeypatch.setattr(E, "mcp_result_text", const("not json"))
+    monkeypatch.setattr(E, "read_result", reads_text(const("not json")))
 
     assert E._ucp_product_id(STORE) is None

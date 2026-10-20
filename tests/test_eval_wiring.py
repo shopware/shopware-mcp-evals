@@ -18,7 +18,7 @@ import yaml
 from eval import runner as E
 from eval.result_schema import Fixture, FixtureResult, JsonObject, McpResponse, PromptInventory
 from mcp_client import Endpoint
-from tests.stubs import const, never, raiser
+from tests.stubs import const, never, raiser, reads_text
 
 # Any endpoint: every lane call below is stubbed, so only its identity matters.
 EP: Endpoint = E.ADMIN
@@ -171,7 +171,7 @@ def _fake_lane(monkeypatch: pytest.MonkeyPatch, payload: object) -> None:
     text = payload if isinstance(payload, str) else json.dumps(payload)
     monkeypatch.setattr(E, "mcp_init", session)
     monkeypatch.setattr(E, "mcp_call", const(cast(McpResponse, cast(object, {}))))
-    monkeypatch.setattr(E, "mcp_result_text", const(text))
+    monkeypatch.setattr(E, "read_result", reads_text(const(text)))
 
 
 def test_first_sales_channel_prefers_the_storefront_channel(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -217,7 +217,7 @@ def test_the_entity_resolvers_ask_core_entity_search(monkeypatch: pytest.MonkeyP
         return json.dumps({"data": [{"id": f"{entity}-1"}]})
 
     monkeypatch.setattr(E.lane, "mcp_call", call)
-    monkeypatch.setattr(E.lane, "mcp_result_text", result_text)
+    monkeypatch.setattr(E.lane, "read_result", reads_text(result_text))
 
     assert E.PLACEHOLDER_RESOLVERS["product_id"](EP) == "product-1"
     assert E.PLACEHOLDER_RESOLVERS["customer_id"](EP) == "customer-1"
@@ -229,7 +229,7 @@ def test_an_entity_resolver_returns_none_on_an_empty_shop(monkeypatch: pytest.Mo
     fixtures are skipped instead of grading against a literal brace string."""
     monkeypatch.setattr(E, "mcp_init", session)
     monkeypatch.setattr(E.lane, "mcp_call", const(cast(McpResponse, cast(object, {}))))
-    monkeypatch.setattr(E.lane, "mcp_result_text", const(json.dumps({"data": []})))
+    monkeypatch.setattr(E.lane, "read_result", reads_text(const(json.dumps({"data": []}))))
 
     assert E.PLACEHOLDER_RESOLVERS["product_id"](EP) is None
 
@@ -456,6 +456,15 @@ def test_report_records_the_discovery_mode() -> None:
 
     assert set(report["modes"]) == {"discovery"}
     assert "discovery_summary" in report
+
+
+def test_report_records_the_protocol_revision() -> None:
+    """Older reports lack the key and were all on 2024-11-05, so the default is
+    that revision rather than an absence a reader would have to interpret."""
+    assert E.build_report("openai", "m", [], None, True, 6)["protocol_version"] == "2024-11-05"
+    assert E.build_report("openai", "m", [], None, True, 6, protocol_version="2025-06-18")["protocol_version"] == (
+        "2025-06-18"
+    )
 
 
 def test_report_counts_passes_failures_and_skips_separately() -> None:

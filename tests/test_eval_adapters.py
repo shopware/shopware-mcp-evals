@@ -24,6 +24,7 @@ import pytest
 
 from eval import runner as E
 from eval.result_schema import Fixture, FixtureResult, JsonObject, McpResponse, TokenCounts, ToolDef, as_object
+from mcp_result import from_text
 from tests.stubs import const
 
 TOOL = "shopware-entity-read"
@@ -101,29 +102,12 @@ def dispatch_turn(
     return fake_turn(client, model, system_prompt, messages, tools)
 
 
-# The stubbed MCP layer hands its reply back through the response envelope rather
-# than a closure, so mcp_result_text can be one shared stub for every fixture
-# below instead of one per test.
-REPLY_KEY = "_reply"
-
-
 def reply(text: str, error: str = "") -> McpResponse:
-    envelope: JsonObject = {REPLY_KEY: text}
-    if error:
-        envelope["_err"] = error
-    return cast(McpResponse, cast(object, envelope))
-
-
-def replied_text(resp: McpResponse) -> str:
-    return str(cast(JsonObject, cast(object, resp)).get(REPLY_KEY, ""))
-
-
-def replied_error(resp: McpResponse) -> str:
-    return str(cast(JsonObject, cast(object, resp)).get("_err", ""))
-
-
-def no_error(_resp: McpResponse) -> str:
-    return ""
+    """A tools/call reply: a JSON-RPC error when there is only an error, else one
+    text block, flagged `isError` when there is an error as well."""
+    if error and not text:
+        return {"error": {"code": -32603, "message": error}}
+    return {"result": {"content": [{"type": "text", "text": text}], "isError": bool(error)}}
 
 
 @pytest.fixture(autouse=True)
@@ -155,8 +139,6 @@ def stub_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(E, "mcp_init", init)
     monkeypatch.setattr(E, "mcp_tools_list_all", list_all)
     monkeypatch.setattr(E, "mcp_call", call)
-    monkeypatch.setattr(E, "mcp_call_error", no_error)
-    monkeypatch.setattr(E, "mcp_result_text", replied_text)
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +336,7 @@ def test_an_error_record_for_another_mode_omits_the_discovery_fields() -> None:
 # these assert on `_search_rows`' `tool` — there used to be a
 # `_search_result_tools` wrapper that only these tests called.
 def _tool_names(text: str) -> list[str]:
-    rows, _ = E._search_rows(text)
+    rows, _ = E._search_rows(from_text(text).envelope)
     return [row["tool"]["name"] for row in rows]
 
 
@@ -400,7 +382,7 @@ def test_search_rows_carry_rank_score_and_pool_size() -> None:
         }
     )
 
-    rows, candidates = E._search_rows(text)
+    rows, candidates = E._search_rows(from_text(text).envelope)
 
     assert [(r["tool"]["name"], r["rank"]) for r in rows] == [("first", 1), ("second", 2)]
     assert rows[0]["score"] == 9.5
@@ -413,7 +395,7 @@ def test_search_rows_rank_by_server_order_not_by_score() -> None:
     relevance instead of the one the model was actually shown."""
     text = json.dumps({"data": [{"tool": {"name": "low"}, "score": 1}, {"tool": {"name": "high"}, "score": 99}]})
 
-    rows, _ = E._search_rows(text)
+    rows, _ = E._search_rows(from_text(text).envelope)
 
     assert [r["tool"]["name"] for r in rows] == ["low", "high"]
     assert [r["rank"] for r in rows] == [1, 2]
@@ -425,15 +407,15 @@ def test_search_rows_skip_unusable_entries_without_shifting_later_ranks() -> Non
     better than it did."""
     text = json.dumps({"data": [{"tool": {"description": "nameless"}}, {"tool": {"name": "real"}}]})
 
-    rows, _ = E._search_rows(text)
+    rows, _ = E._search_rows(from_text(text).envelope)
 
     assert [(r["tool"]["name"], r["rank"]) for r in rows] == [("real", 2)]
 
 
 def test_search_rows_of_an_unparseable_or_empty_body() -> None:
-    assert E._search_rows("not json") == ([], None)
-    assert E._search_rows("{}") == ([], None)
-    assert E._search_rows('{"data": [], "_meta": "not a dict"}') == ([], None)
+    assert E._search_rows(from_text("not json").envelope) == ([], None)
+    assert E._search_rows(from_text("{}").envelope) == ([], None)
+    assert E._search_rows(from_text('{"data": [], "_meta": "not a dict"}').envelope) == ([], None)
 
 
 # ---------------------------------------------------------------------------
@@ -496,8 +478,6 @@ def stub_search(monkeypatch: pytest.MonkeyPatch, stub_mcp: None) -> list[str]:
         return reply(replies.pop(0) if replies else "{}")
 
     monkeypatch.setattr(E, "mcp_call", call)
-    monkeypatch.setattr(E, "mcp_call_error", no_error)
-    monkeypatch.setattr(E, "mcp_result_text", replied_text)
     return replies
 
 
@@ -666,8 +646,6 @@ def stub_exec(monkeypatch: pytest.MonkeyPatch, stub_mcp: None) -> ExecStub:
         return reply(replies.get(name, '{"data": [{"id": "x"}]}'))
 
     monkeypatch.setattr(E, "mcp_call", call)
-    monkeypatch.setattr(E, "mcp_call_error", replied_error)
-    monkeypatch.setattr(E, "mcp_result_text", replied_text)
     return replies, calls
 
 
@@ -1086,8 +1064,6 @@ def stub_preloaded(monkeypatch: pytest.MonkeyPatch) -> Wire:
     monkeypatch.setattr(E, "mcp_init", init)
     monkeypatch.setattr(E, "mcp_tools_list_all", list_all)
     monkeypatch.setattr(E, "mcp_call", call)
-    monkeypatch.setattr(E, "mcp_call_error", no_error)
-    monkeypatch.setattr(E, "mcp_result_text", replied_text)
     monkeypatch.setattr(E, "enable_toolset", enable)
     monkeypatch.setattr(E, "enable_all_toolsets", enable)
     return wire
