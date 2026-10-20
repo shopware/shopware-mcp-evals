@@ -870,7 +870,9 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
-        run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}"
+        # With the principals, as static: what each allowlist state reaches is
+        # read through tools/list, toolsets and calls, all at this revision.
+        run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals
 
       # Commits like static's store step, and warns like it: the second order
       # (agentic-commerce#163) fails on every revision, which would otherwise

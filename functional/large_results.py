@@ -87,6 +87,12 @@ def offload_problems(outcome: ToolOutcome, revision: str) -> list[str]:
     # `v6.8.0.0` flag) does not: McpToolResultParser promotes it to the result's
     # expiry, which only the result `_meta` carries, on every revision.
     spec = outcome.shape == "spec"
+    # The pointer itself stays in the text in both formats: the parser removes
+    # only `note` and `expiresAt`. Without this, a reply carrying the link block
+    # alone would pass on 2025-06-18 and later.
+    text_uri = outcome.meta.get("resourceUri")
+    if text_uri is None:
+        problems.append("no resourceUri next to the pointer in the text")
     if not spec and outcome.meta.get("expiresAt") is None:
         problems.append("no expiresAt next to the pointer in the text")
     has_block = any(lk.source == "resource_link" for lk in outcome.links)
@@ -95,7 +101,6 @@ def offload_problems(outcome: ToolOutcome, revision: str) -> list[str]:
     if (spec or revision >= LINK_SINCE) and META_PREFIX + "expiresAt" not in outcome.result_meta:
         problems.append(f"no shopware/expiresAt in the result _meta on {revision}")
     if revision >= LINK_SINCE:
-        text_uri = outcome.meta.get("resourceUri")
         if has_block and text_uri is not None and text_uri != link.uri:
             problems.append("the resource_link block and the text name different pointers")
     elif has_block:

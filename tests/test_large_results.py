@@ -368,3 +368,19 @@ def test_the_second_principal_reads_on_the_suites_revision(monkeypatch: pytest.M
 
     assert rep.failed == 0
     assert seen == ["2024-11-05", "2025-06-18", "2025-06-18", "2025-06-18"]
+
+
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_a_link_block_without_the_text_pointer_is_a_problem(revision: str) -> None:
+    """Core's parser removes only `note` and `expiresAt` from the metadata, so
+    the text keeps the pointer on every revision. A renderer that drops it must
+    not pass on the link block alone."""
+    meta: JsonObject = {"expiresAt": EXPIRES}
+    content: list[object] = [
+        {"type": "text", "text": json.dumps({"success": True, "data": None, "_meta": meta})},
+        {"type": "resource_link", "uri": URI, "name": "tool-result"},
+    ]
+    result_meta: JsonObject = {**STAMP, "shopware/expiresAt": EXPIRES}
+    reply = read_result(response({"content": content, "isError": False, "_meta": result_meta}))
+
+    assert L.offload_problems(reply, revision) == ["no resourceUri next to the pointer in the text"]
