@@ -152,3 +152,18 @@ def test_throttled_fixtures_are_counted(capsys: pytest.CaptureFixture[str]) -> N
 
     assert row["throttled"] == 1
     assert "hit provider rate limits" in capsys.readouterr().out
+
+
+def test_offloaded_fixtures_are_named_in_a_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    graded = [_record("big", passed=True, offloaded=True), _record("small", passed=True)]
+    _ = E.write_summary_row("openai", "gpt-4o", graded, 1.0, True, args())
+
+    out = capsys.readouterr().out
+    assert "::warning::1 fixture(s) were answered with a result stored behind a pointer" in out
+    assert ": big." in out
+
+
+def test_no_warning_without_an_offloaded_fixture(capsys: pytest.CaptureFixture[str]) -> None:
+    _ = E.write_summary_row("openai", "gpt-4o", results(2), 1.0, True, args())
+
+    assert "stored behind a pointer" not in capsys.readouterr().out

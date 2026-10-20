@@ -406,3 +406,15 @@ def test_expected_args_name_what_differs() -> None:
     assert A.args_mismatch({"entity": "product_category"}, {"ids": "x"}) == (
         "entity missing, expected 'product_category'"
     )
+
+
+OFFLOADED = '{"success": true, "data": null, "_meta": {"resourceUri": "shopware://tool-result/abc", "note": "big"}}'
+
+
+def test_an_offloaded_result_fails_the_data_tier_as_offloaded() -> None:
+    assert check({"tier": "data", "has_keys": ["data"]}, OFFLOADED, None) == (False, "offloaded")
+
+
+def test_an_offloaded_result_still_passes_the_accepted_tier() -> None:
+    """The call ran and the server took it; only reading the data is impossible."""
+    assert check("accepted", OFFLOADED, None) == (True, None)

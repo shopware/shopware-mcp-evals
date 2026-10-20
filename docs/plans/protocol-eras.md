@@ -1,8 +1,7 @@
 # Plan: test every MCP protocol revision, era and result format
 
 Status: in progress since 2026-10-20. Phases 0, 1 and 2 are built and pass on the
-local trunk lane at shopware 7a96f6086ec (2026-10-20). Phase 2's eval-side offload check is
-still open, as are Phases 3 to 6.
+local trunk lane at shopware 7a96f6086ec (2026-10-20). Phases 3 to 6 are open.
 
 ## Why
 
@@ -115,7 +114,9 @@ As built, in `functional/large_results.py`:
   wait for a Store tool that can return a large result.
 - The legacy plain-id fallback is not checked. A server older than #20951 is
   recorded as one skip naming the PR.
-- The eval-side check for offloaded fixture results (item 5) is not built yet.
+- Eval side (item 5): an answer stored behind a pointer fails a `data` fixture as
+  `offloaded`, is recorded as `offloaded` on the result, and is named in a warning at
+  the end of the run. The `accepted` tier still passes, because the call ran.
 - Passes live on the local trunk lane. On 2025-06-18 the reply carries a
   `resource_link` block with a signed URI, and on 2024-11-05 it does not.
 

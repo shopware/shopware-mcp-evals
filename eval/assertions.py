@@ -170,6 +170,13 @@ def check(expect: str | ExpectSpec | None, outcome: ToolOutcome) -> tuple[bool, 
     if tier == "accepted":
         return True, None
 
+    # Stored behind a pointer (shopware/shopware#20951): the reply carries a
+    # preview and a URI, and the model is offered no resources/read to expand it.
+    # Grading the preview would report `missing:data.…`, which reads as a tool
+    # returning the wrong thing rather than as a result too large to deliver.
+    if outcome.links:
+        return False, "offloaded"
+
     payload = outcome.payload
     if payload is None:
         return False, "unreadable_result"

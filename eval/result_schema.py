@@ -85,6 +85,9 @@ class FixtureResult(TypedDict, total=False):
     latency_s: float
     tokens: "TokenCounts"
     payload_bytes: int
+    # The answer was stored behind a pointer the model cannot read. Absent on
+    # reports from before shopware/shopware#20951 was graded; read with .get().
+    offloaded: bool
     surface_tokens: int
     surface_tokens_peak: int
 
@@ -144,6 +147,7 @@ class AttemptRecord(TypedDict, total=False):
     step: Required[int]
     executed: bool
     ok: bool
+    offloaded: bool
     reason: str | None
     error: str
 

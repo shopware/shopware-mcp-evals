@@ -529,6 +529,8 @@ class DiscoveryState:
     # answers correctly but returns 40k of JSON is expensive for every client,
     # and nothing else in the suite would notice.
     payload_bytes: int = 0
+    # An answering call came back as a pointer to a stored result.
+    offloaded: bool = False
     steps: int = 0
     surface_tokens: int = 0
     surface_tokens_peak: int = 0
@@ -631,6 +633,7 @@ class DiscoveryState:
             "latency_s": latency,
             "tokens": self.tokens,
             "payload_bytes": self.payload_bytes,
+            "offloaded": self.offloaded,
             "surface_tokens": self.surface_tokens,
             "surface_tokens_peak": self.surface_tokens_peak,
             "notes": fixture.get("notes", ""),
@@ -907,6 +910,9 @@ def _handle_answering_call(
         # server's text stays next to the mismatch so neither is lost.
         ok, reason = False, "wrong_args"
     attempt["executed"] = True
+    if outcome.links:
+        attempt["offloaded"] = True
+        st.offloaded = True
     attempt["ok"] = ok
     attempt["reason"] = reason
     error = f"{mismatch}; server: {server_text}" if mismatch and server_text else mismatch or server_text
@@ -1169,6 +1175,12 @@ def write_summary_row(
 
     if throttled:
         print(f"\n::warning::{throttled} fixture(s) hit provider rate limits — results are understated.")
+    if offloaded := [r["id"] for r in graded if r.get("offloaded")]:
+        print(
+            f"\n::warning::{len(offloaded)} fixture(s) were answered with a result stored behind a pointer, which "
+            f"the model cannot read (no resources/read is offered): {', '.join(offloaded)}. Tighten the fixture, "
+            "or the tool's default limit, rather than grading a preview."
+        )
     return row
 
 

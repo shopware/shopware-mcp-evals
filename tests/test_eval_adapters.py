@@ -1138,3 +1138,32 @@ def test_only_the_production_arms_are_offered_as_a_pass() -> None:
     under --triage; a whole pass under one would grade meta-fixtures as misses."""
     assert set(E.PASS_ARMS) == {"discovery", "preloaded"}
     assert not set(E.PASS_ARMS) & E.DIAGNOSTIC_ARMS
+
+
+OFFLOADED = json.dumps(
+    {
+        "success": True,
+        "data": None,
+        "_meta": {"resourceUri": "shopware://tool-result/" + "a" * 32 + ".1760000000.sig", "note": "Too large."},
+    }
+)
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_an_offloaded_answer_fails_a_data_fixture_by_name_and_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(E, "mcp_call", const(reply(OFFLOADED)))
+    spec = fixture(expect_result={"tier": "data", "has_keys": ["data"]})
+
+    result = E.run_fixture_discovery("openai", FakeClient(), spec, "m", None, 1)
+
+    assert result.get("offloaded") is True
+    attempt = result.get("attempted_tools", [])[0]
+    assert (attempt.get("offloaded"), attempt.get("reason")) == (True, "offloaded")
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_an_inline_answer_is_not_offloaded() -> None:
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 6)
+
+    assert result.get("offloaded") is False
+    assert "offloaded" not in result.get("attempted_tools", [])[0]
