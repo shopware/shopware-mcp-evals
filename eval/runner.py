@@ -48,7 +48,7 @@ import yaml
 
 import lane
 import ucp
-from eval.assertions import args_mismatch, check
+from eval.assertions import args_mismatch, check, classify_error
 from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
     BOLD,
@@ -82,6 +82,7 @@ from eval.result_schema import (
 from eval.scoring import (
     count_rate_limited,
     discovery_summary,
+    error_grading,
     executed,
     gate_verdict,
     is_correct,
@@ -913,6 +914,9 @@ def _handle_answering_call(
     if outcome.links:
         attempt["offloaded"] = True
         st.offloaded = True
+    if outcome.error is not None:
+        attempt["error_code"] = outcome.error.code
+        attempt["graded_by"] = classify_error(outcome)[1]
     attempt["ok"] = ok
     attempt["reason"] = reason
     error = f"{mismatch}; server: {server_text}" if mismatch and server_text else mismatch or server_text
@@ -2043,6 +2047,7 @@ def build_report(
     # via the CLI, but an empty table is the honest answer rather than a crash for
     # a direct caller.
     report["by_tier"] = breakdown(executed(discovery or []))
+    report["error_grading"] = error_grading(discovery or [])
     # What this run cost, in dollars and in the volume behind them. Recorded in
     # the report rather than only printed so cost_drift.py can compare a run
     # against its predecessor without re-deriving anything.
@@ -2078,6 +2083,17 @@ def print_gate(verdict: GateVerdict, args: argparse.Namespace) -> None:
         print(f"  {RED}core below threshold{RESET}; failing: {', '.join(core_failed)}")
     if not verdict["run_valid"]:
         print("  too many fixtures errored to trust this run — fix the server/provider, then re-run.")
+
+
+def print_error_grading(results: list[FixtureResult]) -> None:
+    """Which owners' tools answered an error without a code that says what kind,
+    so the message was read instead. Counts errored calls, passing or not: a
+    not-found told in prose passes the accepted tier and still counts here.
+    Silent when every error carried a code."""
+    prose = {owner: counts["prose"] for owner, counts in error_grading(results).items() if counts["prose"]}
+    if prose:
+        listed = ", ".join(f"{owner} {n}" for owner, n in sorted(prose.items()))
+        print(f"  Errored calls told apart by their message, not an error code: {listed}")
 
 
 def run_suite(args: argparse.Namespace) -> int:
@@ -2207,6 +2223,7 @@ def run_suite(args: argparse.Namespace) -> int:
         max_error_rate=cast(float, args.max_error_rate),
     )
     print_gate(verdict, args)
+    print_error_grading(results_discovery or [])
     write_summary_row(provider, model, results_discovery, verdict["rate"], verdict["ok"], args)
     return 0 if verdict["ok"] else 1
 

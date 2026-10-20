@@ -598,3 +598,32 @@ def test_a_config_error_still_exits_one(monkeypatch: pytest.MonkeyPatch, capsys:
 
     assert E.main() == 1
     assert "nope" in capsys.readouterr().err
+
+
+def test_errors_told_apart_by_prose_are_listed_per_owner(capsys: pytest.CaptureFixture[str]) -> None:
+    record = cast(
+        FixtureResult,
+        cast(
+            object,
+            {
+                "id": "f",
+                "passed": False,
+                "attempted_tools": [
+                    {"tool": "get_order", "correct": True, "step": 1, "graded_by": "prose"},
+                    {"tool": "shopware-entity-read", "correct": True, "step": 2, "graded_by": "code"},
+                ],
+            },
+        ),
+    )
+
+    E.print_error_grading([record])
+    E.print_error_grading([])
+
+    assert (
+        capsys.readouterr().out
+        == "  Errored calls told apart by their message, not an error code: agentic-commerce 1\n"
+    )
+
+
+def test_the_report_carries_the_error_grading() -> None:
+    assert E.build_report("openai", "m", [], [], True, 6).get("error_grading") == {}

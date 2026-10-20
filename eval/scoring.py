@@ -15,6 +15,7 @@ eval/summary.py and eval/compare_runs.py are the best-tested code here.
 from eval.cost import EMPTY_TOKENS, add_tokens
 from eval.result_schema import (
     DiscoverySummary,
+    ErrorGrading,
     Fixture,
     FixtureResult,
     GateVerdict,
@@ -23,7 +24,7 @@ from eval.result_schema import (
     Score,
     TokenCounts,
 )
-from ownership import core_rate
+from ownership import core_rate, owner_of
 
 
 def is_negative(fixture: Fixture) -> bool:
@@ -74,6 +75,20 @@ def executed(results: list[FixtureResult]) -> list[FixtureResult]:
     against the run separately, via the error budget in the gate.
     """
     return [r for r in scored(results) if not r.get("error")]
+
+
+def error_grading(results: list[FixtureResult]) -> dict[str, ErrorGrading]:
+    """Errored calls per owning repository, split by whether a code or the prose
+    said what kind of error each was. Owners with no errored call are left out."""
+    out: dict[str, ErrorGrading] = {}
+    for result in results:
+        for attempt in result.get("attempted_tools", []):
+            graded_by = attempt.get("graded_by")
+            if graded_by not in ("code", "prose"):
+                continue
+            bucket = out.setdefault(owner_of(attempt["tool"]), ErrorGrading(code=0, prose=0))
+            bucket["code" if graded_by == "code" else "prose"] += 1
+    return out
 
 
 def score(results: list[FixtureResult]) -> Score:

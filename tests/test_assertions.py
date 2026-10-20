@@ -12,7 +12,7 @@ import pytest
 
 from eval import assertions as A
 from eval.result_schema import ExpectSpec, JsonObject, McpResponse
-from mcp_result import from_text, read_result
+from mcp_result import ToolOutcome, from_text, read_result
 
 
 def payload(**data: object) -> str:
@@ -418,3 +418,43 @@ def test_an_offloaded_result_fails_the_data_tier_as_offloaded() -> None:
 def test_an_offloaded_result_still_passes_the_accepted_tier() -> None:
     """The call ran and the server took it; only reading the data is impossible."""
     assert check("accepted", OFFLOADED, None) == (True, None)
+
+
+def coded(message: str, code: str | None) -> ToolOutcome:
+    envelope: JsonObject = {"success": False, "error": message}
+    if code is not None:
+        envelope["code"] = code
+    return from_text(json.dumps(envelope), is_error=True)
+
+
+@pytest.mark.parametrize(
+    ("message", "code", "expected"),
+    [
+        # The code wins over prose that says something else.
+        ("Invalid or unknown id", "not_found", ("not_found", "code")),
+        ("Entity product not found in the schema", "invalid_arguments", ("invalid_arguments", "code")),
+        ("Missing privilege: product:read", "missing_privilege", ("missing_privilege", "code")),
+        # No code, or the server's uninformative default: the prose decides.
+        ('not_found: Order "o1" is not available to this request', "tool_error", ("not_found", "prose")),
+        ("Validation failed for schema", None, ("invalid_arguments", "prose")),
+        ("Cart is empty", None, ("tool_error", "prose")),
+    ],
+)
+def test_an_error_is_classified_by_its_code_first(message: str, code: str | None, expected: tuple[str, str]) -> None:
+    assert A.classify_error(coded(message, code)) == expected
+
+
+def test_a_coded_not_found_passes_the_accepted_tier_whatever_the_message_says() -> None:
+    assert A.check("accepted", coded("Invalid or unknown checkout id", "not_found")) == (True, None)
+
+
+def test_a_coded_validation_error_fails_even_when_the_prose_reads_as_not_found() -> None:
+    assert A.check("accepted", coded("Field not found: limit", "invalid_arguments")) == (False, "invalid_arguments")
+
+
+def test_a_missing_privilege_is_its_own_reason() -> None:
+    """The lane's role refused it; not the model's arguments and not a broken tool."""
+    assert A.check("accepted", coded("Missing privilege: product:read", "missing_privilege")) == (
+        False,
+        "missing_privilege",
+    )

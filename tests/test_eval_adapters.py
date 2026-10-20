@@ -1167,3 +1167,35 @@ def test_an_inline_answer_is_not_offloaded() -> None:
 
     assert result.get("offloaded") is False
     assert "offloaded" not in result.get("attempted_tools", [])[0]
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_a_failed_call_records_its_code_and_what_graded_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    refusal = json.dumps({"success": False, "error": "Missing privilege: product:read", "code": "missing_privilege"})
+    monkeypatch.setattr(E, "mcp_call", const(reply(refusal, "x")))
+
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 1)
+
+    attempt = result.get("attempted_tools", [])[0]
+    assert (attempt.get("error_code"), attempt.get("graded_by"), attempt.get("reason")) == (
+        "missing_privilege",
+        "code",
+        "missing_privilege",
+    )
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_a_call_without_a_code_records_the_prose_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(E, "mcp_call", const(reply('{"success": false, "error": "Cart is empty"}')))
+
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 1)
+
+    attempt = result.get("attempted_tools", [])[0]
+    assert (attempt.get("error_code"), attempt.get("graded_by")) == (None, "prose")
+
+
+@pytest.mark.usefixtures("stub_exec")
+def test_a_passing_call_records_no_grading_source() -> None:
+    result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 6)
+
+    assert "graded_by" not in result.get("attempted_tools", [])[0]

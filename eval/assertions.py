@@ -28,7 +28,7 @@ test of the seed.
 """
 
 import re
-from typing import cast
+from typing import Literal, cast
 
 from eval.result_schema import ExpectSpec, JsonObject, as_object
 from mcp_result import ToolOutcome
@@ -83,6 +83,37 @@ NOT_FOUND_MARKERS = (
 UCP_NOT_FOUND = re.compile(r"^\s*not_found\s*:")
 
 TIERS = ("data", "accepted", "none")
+
+# The codes that decide a verdict on their own (shopware/shopware#20948). Not
+# `tool_error`: it is the server's default for an error that names no code, and
+# under the 6.8 format it is what every plugin error that predates the codes
+# arrives as, so trusting it would turn UCP's `not_found:` into a tool failure.
+DECISIVE_CODES = frozenset({"not_found", "invalid_arguments", "missing_privilege"})
+
+type ErrorKind = Literal["not_found", "invalid_arguments", "missing_privilege", "tool_error"]
+type GradedBy = Literal["code", "prose"]
+
+
+def classify_error(outcome: ToolOutcome) -> tuple[ErrorKind, GradedBy]:
+    """What kind of failure `outcome` is, and whether its code or its prose said so.
+
+    The code first, when it is one that decides anything. Otherwise the message,
+    matched as it always was. The second half is what tells the two apart in a
+    report: every `prose` is a tool still to move to coded errors.
+    """
+    code = outcome.error.code if outcome.error else None
+    if code == "not_found":
+        return "not_found", "code"
+    if code == "invalid_arguments":
+        return "invalid_arguments", "code"
+    if code == "missing_privilege":
+        return "missing_privilege", "code"
+    message = outcome.failure
+    if is_not_found(message):
+        return "not_found", "prose"
+    if is_validation_error(message):
+        return "invalid_arguments", "prose"
+    return "tool_error", "prose"
 
 
 def is_validation_error(error: str | None) -> bool:
@@ -143,9 +174,7 @@ def check(expect: str | ExpectSpec | None, outcome: ToolOutcome) -> tuple[bool, 
     # `isError: true` the raw body is JSON starting with `{`, so the anchored
     # `not_found:` never matched it, and every correct get_order pick graded as
     # tool_error.
-    error = outcome.failure
-
-    if error:
+    if outcome.error is not None:
         # Not-found is checked FIRST, before the validation markers, and that
         # ordering is deliberate.
         #
@@ -161,11 +190,14 @@ def check(expect: str | ExpectSpec | None, outcome: ToolOutcome) -> tuple[bool, 
         # plenty of not-found messages ("Invalid or unknown checkout id"), and
         # of the two ways to be wrong, wrongly failing a fixture is worse: it
         # sends someone off to rewrite a description that was fine.
-        if is_not_found(error):
+        #
+        # A coded error is graded on its code (see classify_error), and the order
+        # above only matters for the prose fallback. `missing_privilege` is the
+        # lane's role, not the model's choice, and is named as such.
+        kind, _ = classify_error(outcome)
+        if kind == "not_found":
             return (True, None) if tier == "accepted" else (False, "not_found")
-        if is_validation_error(error):
-            return False, "invalid_arguments"
-        return False, "tool_error"
+        return False, kind
 
     if tier == "accepted":
         return True, None

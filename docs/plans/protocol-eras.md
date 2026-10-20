@@ -1,7 +1,7 @@
 # Plan: test every MCP protocol revision, era and result format
 
-Status: in progress since 2026-10-20. Phases 0, 1 and 2 are built and pass on the
-local trunk lane at shopware 7a96f6086ec (2026-10-20). Phases 3 to 6 are open.
+Status: in progress since 2026-10-20. Phases 0 to 3 are built and pass on the
+local trunk lane at shopware 7a96f6086ec (2026-10-20). Phases 4 to 6 are open.
 
 ## Why
 
@@ -142,7 +142,7 @@ As built, in `functional/large_results.py`:
    quietly grading a truncated answer. Exposing `resources/read` to the model is
    a separate decision and out of scope.
 
-## Phase 3: grade on error codes
+## Phase 3: grade on error codes (built)
 
 1. `inband_error` and `mcp_call_error` return the code next to the message.
 2. `assertions.check` decides `not_found` and `invalid_arguments` from the code
@@ -150,6 +150,21 @@ As built, in `functional/large_results.py`:
    that send no code (merchant tools, agentic-commerce).
 3. Count how often the fallback fires per owner (`ownership.py`). That number is
    the list of plugins still to migrate to coded errors, and it should only fall.
+
+Built as `classify_error` in `eval/assertions.py`. Each errored attempt records
+`error_code` and `graded_by`, and the report gains `error_grading` per owner.
+The paired run on the trunk lane told every error apart by its message. No error
+in it carried a decisive code:
+
+| owner | tool | message | what the code should be |
+|---|---|---|---|
+| core | `shopware-entity-delete` | `Nothing was deleted, none of these rows exist` | `not_found` |
+| core | `shopware-entity-delete` | `… has a composite primary key. Pass ids as …` | `invalid_arguments` |
+| merchant-tools | `merchant-customer-lookup` | `Customer not found.` | `not_found` |
+| dev-tools | `swag-dev-tools-load-skill` | `Skill "…" not found.` | `not_found` |
+
+So core is on the list too, not only the plugins: `entity-delete` answers a
+missing row with the default `tool_error` code.
 
 ## Phase 4: next-major lane (`v6.8.0.0`)
 

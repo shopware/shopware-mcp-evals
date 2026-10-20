@@ -148,6 +148,10 @@ class AttemptRecord(TypedDict, total=False):
     executed: bool
     ok: bool
     offloaded: bool
+    # On a failed call: the server's error code, or None when it sent none, and
+    # whether the verdict came from that code or from matching the message.
+    error_code: str | None
+    graded_by: str
     reason: str | None
     error: str
 
@@ -273,7 +277,18 @@ class Report(TypedDict, total=False):
     discovery_summary: JsonObject
     skipped_fixtures: list[SkippedFixture]
     by_tier: dict[str, TierBucket]
+    # Per owning repository: how many failed calls were graded on the server's
+    # error code and how many on matching its message. The `prose` column is the
+    # list of codebases still to move to coded errors, and it should only fall.
+    error_grading: dict[str, "ErrorGrading"]
     cost: CostBlock
+
+
+class ErrorGrading(TypedDict):
+    """One owner's failed calls, by what decided their verdict."""
+
+    code: int
+    prose: int
 
 
 class ToolDef(TypedDict, total=False):
