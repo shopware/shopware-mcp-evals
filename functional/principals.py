@@ -50,6 +50,9 @@ TIMEOUT_S = 30
 PROBE_TOOL = "shopware-entity-search"
 PROBE_ARGS: JsonObject = {"entity": "currency", "limit": 1}
 PROBE_PRIVILEGES = ["currency:read"]
+# The same tool on an entity the role does not grant: allowed by the allowlist,
+# refused by ACL, which is what `missing_privilege` exists to say.
+UNPRIVILEGED_ARGS: JsonObject = {"entity": "product", "limit": 1}
 
 Expect = Literal["blocked", "all", "partial"]
 
@@ -66,6 +69,8 @@ class Principal:
     access_key: str
     secret_key: str
     expect: Expect
+    # A user is held to its ACL role; an integration here is flagged `admin`.
+    user: bool = False
 
 
 class AdminApi:
@@ -214,7 +219,7 @@ def _user(
     )
     if allowlist is not None:
         api.call("POST", f"/api/_action/user/{user_id}/mcp-allowlist", {"allowlist": allowlist})
-    return Principal(label, access_key, secret_key, expect)
+    return Principal(label, access_key, secret_key, expect, user=True)
 
 
 @contextmanager

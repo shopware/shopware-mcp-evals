@@ -49,7 +49,15 @@ from functional.checks import (
 from functional.customer import CustomerUnavailable, provision
 from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
 from functional.large_results import NO_STORE_OFFLOAD, verify_large_results
-from functional.principals import PROBE_ARGS, PROBE_TOOL, AdminApi, Principal, ProvisioningFailed, provisioned
+from functional.principals import (
+    PROBE_ARGS,
+    PROBE_TOOL,
+    UNPRIVILEGED_ARGS,
+    AdminApi,
+    Principal,
+    ProvisioningFailed,
+    provisioned,
+)
 from functional.reporting import Reporter
 from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
 from mcp_client import (
@@ -1078,6 +1086,16 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
         if expect == "partial" and control:
             refused = _refused_by_allowlist(mcp_call(session, control, {}, endpoint=endpoint))
             check(refused, f"is refused {control}", "the call was not refused by the allowlist")
+        if expect == "partial" and principal.user:
+            # Past the allowlist, the role decides, and its refusal carries a
+            # stable code (shopware/shopware#20948) a client can act on.
+            denied = read_result(mcp_call(session, PROBE_TOOL, UNPRIVILEGED_ARGS, endpoint=endpoint))
+            code = denied.error.code if denied.error else None
+            check(
+                code == "missing_privilege",
+                f"is refused {PROBE_TOOL} on product with missing_privilege",
+                f"the call answered {code or 'ok'}: {denied.failure[:120]}",
+            )
     except (RuntimeError, requests.exceptions.RequestException) as exc:
         rep.check_fail(f"allowlist: {who}", f"aborted: {exc}")
 

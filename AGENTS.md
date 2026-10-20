@@ -498,6 +498,9 @@ prompts/list, a direct call), and deletes them again:
 | integration | "All capabilities" | exactly what the admin user reaches |
 | integration, non-admin user | one tool | that tool; a tool from another toolset is refused |
 
+The one-tool user is also held to its ACL role, which grants `currency:read` only. Calling its
+tool on `product` must fail with the `missing_privilege` code.
+
 **"All capabilities" on an integration does not save `null`.** Since #20600 the
 Administration writes every name `/api/_action/mcp/capabilities` returned when
 the dialog opened (`fullSelection()`). So it is a snapshot: a tool added later is

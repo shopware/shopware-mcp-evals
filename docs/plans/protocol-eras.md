@@ -1,8 +1,8 @@
 # Plan: test every MCP protocol revision, era and result format
 
-Status: in progress since 2026-10-20. Phases 0, 1 and 2 are built. Phases 1 and 2
-have run only against fakes so far, because the local trunk lane predates #20948 (see
-Phase 2). The missing-privilege check of Phase 1 is still open, as are Phases 3 to 6.
+Status: in progress since 2026-10-20. Phases 0, 1 and 2 are built and pass on the
+local trunk lane at shopware 7a96f6086ec (2026-10-20). Phase 2's eval-side offload check is
+still open, as are Phases 3 to 6.
 
 ## Why
 
@@ -67,14 +67,14 @@ Everything else depends on this, and it changes no verdict on its own.
 
 Default stays 2024-11-05 at the end of this phase, so CI numbers must not move.
 
-## Phase 1: functional suite across revisions (done, one check open)
+## Phase 1: functional suite across revisions (done)
 
 As built: `functional/result_format.py` opens a session per revision itself, so
 there is no `--protocol` list and no CI loop. Every run of `functional.runner`
 covers the matrix, admin and store. A server older than #20948 records one skip
-naming the PR instead of failing every probe. The missing-privilege check is not
-built yet: it needs a principal from `principals.py`, so it belongs with Phase 2's
-principal binding.
+naming the PR instead of failing every probe. The missing-privilege check is part of
+the allowlist matrix. The one-tool user calls its allowed tool on `product`, which its
+role does not grant, and must get `missing_privilege`.
 
 Free, no model, so it can run on every push of the eval workflow.
 
@@ -116,9 +116,8 @@ As built, in `functional/large_results.py`:
 - The legacy plain-id fallback is not checked. A server older than #20951 is
   recorded as one skip naming the PR.
 - The eval-side check for offloaded fixture results (item 5) is not built yet.
-- Not yet run live. The local trunk lane serves core source from before #20948:
-  its `Framework.php` does not register the renderer's compiler pass, and the
-  mutagen sync from `~/Documents/Projects/shopware-trunk` is paused.
+- Passes live on the local trunk lane. On 2025-06-18 the reply carries a
+  `resource_link` block with a signed URI, and on 2024-11-05 it does not.
 
 
 1. **Trigger an offload.** The PR's own reproducer

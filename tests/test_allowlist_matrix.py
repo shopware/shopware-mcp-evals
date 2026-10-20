@@ -48,7 +48,15 @@ class FakeServer:
     """An MCP server that filters every surface by the caller's allowlist."""
 
     def __init__(self) -> None:
-        self.grants: dict[str, set[str]] = {"SUITE": EVERY_TOOL, "UNSET": set(), "ALL": EVERY_TOOL, "ONE": {PROBE_TOOL}}
+        self.grants: dict[str, set[str]] = {
+            "SUITE": EVERY_TOOL,
+            "UNSET": set(),
+            "ALL": EVERY_TOOL,
+            "ONE": {PROBE_TOOL},
+            "USER": {PROBE_TOOL},
+        }
+        # Users are held to a role granting currency:read only; None lets them through.
+        self.acl_code: str | None = "missing_privilege"
         self.refuse_init: set[str] = set()
         # The reported bug: a principal whose toolsets-list is empty whatever it holds.
         self.no_toolsets_for: set[str] = set()
@@ -90,6 +98,9 @@ class FakeServer:
         return []
 
     def call(self, _session: str, tool: str, _args: JsonObject, endpoint: Endpoint | None = None) -> McpResponse:
+        if self.key(endpoint) == "USER" and _args.get("entity") == "product" and self.acl_code:
+            refusal: JsonObject = {"success": False, "error": "Missing privilege: product:read", "code": self.acl_code}
+            return {"result": {"content": [{"type": "text", "text": json.dumps(refusal)}], "isError": True}}
         if tool == "shopware-tool-search":
             found = self.allowed(endpoint) | self.search_leaks.get(self.key(endpoint), set())
             return text_resp({"success": True, "data": [{"tool": {"name": n}} for n in sorted(found)]})
@@ -346,3 +357,33 @@ def test_the_principal_endpoint_targets_the_suites_server(monkeypatch: pytest.Mo
 
     assert seen
     assert set(seen) == {"http://shop.example"}
+
+
+ONE_TOOL_USER = Principal("mcp-evals-abc123-user-one-tool", "USER", "s", "partial", user=True)
+
+
+def test_a_user_past_the_allowlist_is_refused_by_its_role_with_a_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeServer(), monkeypatch, [ONE_TOOL_USER])
+
+    assert failures(rep) == []
+    assert any("on product with missing_privilege" in str(r["label"]) for r in rep.records)
+
+
+def test_an_integration_is_not_held_to_a_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flagged admin, so the call succeeds and there is no code to check."""
+    rep = run(FakeServer(), monkeypatch, [PRINCIPALS[2]])
+
+    assert not any("missing_privilege" in str(r["label"]) for r in rep.records)
+
+
+@pytest.mark.parametrize(("code", "answer"), [(None, "ok"), ("tool_error", "tool_error")])
+def test_a_role_refusal_without_the_code_fails(monkeypatch: pytest.MonkeyPatch, code: str | None, answer: str) -> None:
+    fake = FakeServer()
+    fake.acl_code = code
+    rep = run(fake, monkeypatch, [ONE_TOOL_USER])
+
+    assert [f for f in failures(rep) if "missing_privilege" in f] == [
+        f"allowlist: user-one-tool: expected it is refused {PROBE_TOOL} on product with missing_privilege, "
+        + f"but the call answered {answer}"
+        + (": Missing privilege: product:read" if code else ": ")
+    ]
