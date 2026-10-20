@@ -113,6 +113,11 @@ sequenceDiagram
   failure you can locate — one job failing no longer skips the rest, which used
   to make an admin fixture failure look like "the plugin is missing".
   The Store/UCP part runs by default; skip it with `run_store=false`.
+  A sixth, advisory job, `next-major`, builds its lane with `feature_flags:
+  V6_8_0_0` and runs the functional suite at 2025-11-25: nightly, the
+  `next_major` dispatch input or the `run-next-major` label. A plugin that does
+  not boot under the flag is deactivated, named in a warning, and its tools go
+  missing from that lane. It is not a dependency of `report`.
 - **Never let a job write state you care about.** `--allow-mutations` places a
   real order. CI sets it because the instance dies with the job; a developer's
   shop does not. If you add anything that commits, gate it the same way and

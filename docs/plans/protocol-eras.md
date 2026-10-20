@@ -1,7 +1,8 @@
 # Plan: test every MCP protocol revision, era and result format
 
 Status: in progress since 2026-10-20. Phases 0 to 3 are built and pass on the
-local trunk lane at shopware 7a96f6086ec (2026-10-20). Phases 4 to 6 are open.
+local trunk lane at shopware 7a96f6086ec (2026-10-20). Phase 4 is built and has
+not run in CI yet. Phases 5 and 6 are open.
 
 ## Why
 
@@ -166,7 +167,7 @@ in it carried a decisive code:
 So core is on the list too, not only the plugins: `entity-delete` answers a
 missing row with the default `tool_error` code.
 
-## Phase 4: next-major lane (`v6.8.0.0`)
+## Phase 4: next-major lane (`v6.8.0.0`) (built, not yet run in CI)
 
 1. `setup-lane` gets a `feature_flags` input written to `.env.local` and to the
    daemonised server's environment. The "plain http" UCP row in AGENTS.md is the
@@ -178,6 +179,13 @@ missing row with the default `tool_error` code.
 3. Opt-in on PRs with a `run-next-major` label, like `run-preloaded`.
 4. Expect plugins to break under the major flag before core does. That is the
    point of the job, and why it stays advisory until the plugins are clean.
+
+Built as the `feature_flags` input and `incompatible_plugins` output of
+`setup-lane`, plus the `next-major` job. The flags are probed with `cache:clear`
+before they go into `.env.local`, so each plugin that stops the kernel booting
+can still be deactivated, up to six. Measured locally under `V6_8_0_0`:
+SwagMcpMerchantTools fails first (its `services.xml` is deprecated), then
+SwagExtensionStore, which the CI lane does not install.
 
 ## Phase 5: stateless era (2026-07-28)
 

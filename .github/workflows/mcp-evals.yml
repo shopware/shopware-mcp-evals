@@ -86,6 +86,10 @@ on:
         description: 'Also run the admin fixtures with the whole catalogue pinned at connect time (?toolsets=all, shopware/shopware#20509) instead of discovered. Advisory. Compares accuracy and cost of a preloaded connector against discovery. Adds one primary-model pass.'
         required: false
         default: 'false'
+      next_major:
+        description: 'Also build a lane with the V6_8_0_0 feature flag and run the functional suite on it at the newest protocol revision. Advisory. Plugins that do not boot under the flag are deactivated and named. Nightly does this anyway.'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -799,6 +803,92 @@ jobs:
           # The reports only. `report` merges every artifact into one results/,
           # and this lane's tool-health-admin.json would overwrite static's —
           # the one the eval gate is meant to read.
+          path: results/functional-*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Dump symfony server logs on failure
+        if: failure()
+        uses: ./.github/actions/dump-logs
+
+      - name: Stop Shopware
+        if: always()
+        working-directory: shopware
+        run: symfony server:stop 2>/dev/null || true
+
+  # The next major: a lane with V6_8_0_0 switched on, the functional suite on
+  # the newest protocol revision. Advisory, because plugins break under a major
+  # flag before core does, and finding them is the job. A plugin that stops the
+  # kernel booting is deactivated by setup-lane and named here, so the rest of
+  # the lane still says what core does under the flag.
+  #
+  # Nightly, the `next_major` dispatch input, or the `run-next-major` PR label.
+  # Not a dependency of `report`: an advisory lane must not hold the summary.
+  next-major:
+    name: Next major (V6_8_0_0, advisory)
+    needs: static
+    if: >-
+      ${{ !cancelled() && needs.static.result != 'skipped'
+          && (github.event_name == 'schedule'
+              || github.event.inputs.next_major == 'true'
+              || contains(github.event.pull_request.labels.*.name, 'run-next-major')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Checkout evals repo
+        uses: actions/checkout@v7
+
+      - name: Bootstrap Python
+        uses: ./.github/actions/bootstrap
+
+      - name: Set up the lane
+        id: lane
+        uses: ./.github/actions/setup-lane
+        with:
+          shopware_repo: ${{ env.SHOPWARE_REPO }}
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
+          event_name: ${{ github.event_name }}
+          app_url: ${{ env.APP_URL }}
+          run_store: ${{ env.RUN_STORE }}
+          dev_tools_ref: ${{ github.event.inputs.dev_tools_ref }}
+          merchant_tools_ref: ${{ github.event.inputs.merchant_tools_ref }}
+          agentic_commerce_ref: ${{ github.event.inputs.agentic_commerce_ref }}
+          plugins_pat: ${{ secrets.PLUGINS_PAT }}
+          github_token: ${{ github.token }}
+          feature_flags: V6_8_0_0
+
+      - name: Plugins that do not boot under the major flag
+        if: ${{ steps.lane.outputs.incompatible_plugins != '' }}
+        env:
+          INCOMPATIBLE: ${{ steps.lane.outputs.incompatible_plugins }}
+        run: |
+          echo "::warning::Deactivated, do not boot under V6_8_0_0: ${INCOMPATIBLE}. Their tools are missing from the checks below."
+
+      - name: Functional suite, admin
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_ACCESS_KEY: ${{ steps.lane.outputs.sw_access_key }}
+          SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
+          MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
+          MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+        run: python -m functional.runner --endpoint admin --protocol-version 2025-11-25
+
+      - name: Functional suite, store
+        if: ${{ !cancelled() && steps.lane.outputs.sc_access_key != '' }}
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
+          MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+        run: python -m functional.runner --endpoint store --protocol-version 2025-11-25
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: next-major-results
+          # The reports only, for the same reason as session-store: this lane's
+          # tool-health files would overwrite the ones the eval gate reads.
           path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
