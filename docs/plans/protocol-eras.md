@@ -2,7 +2,8 @@
 
 Status: in progress since 2026-10-20. Phases 0 to 3 are built and pass on the
 local trunk lane at shopware 7a96f6086ec (2026-10-20). Phase 4 is built and has
-not run in CI yet. Phases 5 and 6 are open.
+not run in CI yet. Phase 5's probe is built; its scenarios wait on
+shopware/shopware#19969. Phase 6 is open.
 
 ## Why
 
@@ -187,7 +188,7 @@ can still be deactivated, up to six. Measured locally under `V6_8_0_0`:
 SwagMcpMerchantTools fails first (its `services.xml` is deprecated), then
 SwagExtensionStore, which the CI lane does not install.
 
-## Phase 5: stateless era (2026-07-28)
+## Phase 5: stateless era (2026-07-28) (probe built)
 
 Core does not serve it yet, so this starts as a probe and grows into the ADR's
 scenario list once shopware/shopware#19969 lands.
@@ -214,6 +215,14 @@ scenario list once shopware/shopware#19969 lands.
    `?toolsets=` and cannot enable anything, so it measures what claude.ai-style
    clients get. Compare it with the `preloaded` arm, which is the closest
    handshake equivalent.
+
+Items 1 and 2 are built as `mcp_discover` and `functional/stateless.py`, on both
+endpoints in every functional run. Trunk answers HTTP 400 with JSON-RPC -32022
+`Unsupported protocol version`, `requested: 2026-07-28` and the four handshake
+revisions as `supported`. The skip requires `requested` to be the stateless
+revision, so a refusal for any other reason fails instead. A second check fails
+when `supported` stops listing a revision this suite tests. Items 3 and 4 wait
+on #19969.
 
 ## Phase 6: move the eval to the revision real clients use
 

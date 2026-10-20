@@ -60,6 +60,7 @@ from functional.principals import (
 )
 from functional.reporting import Reporter
 from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
+from functional.stateless import verify_stateless_era
 from mcp_client import (
     ALL_TOOLSETS,
     BASE,
@@ -1151,6 +1152,7 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
     verify_tool_schemas(rep, schema_session, endpoint)
     verify_result_format(rep, endpoint, ADMIN_PROBES)
     verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
+    verify_stateless_era(rep, endpoint)
     run_admin_tools(rep, session, endpoint, args)
 
 
@@ -1172,6 +1174,7 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     verify_connect_time_toolsets(rep, endpoint, also_expected=ucp_default)
     verify_result_format(rep, endpoint, STORE_PROBES)
     rep.check_skip("large results (store)", NO_STORE_OFFLOAD)
+    verify_stateless_era(rep, endpoint)
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")

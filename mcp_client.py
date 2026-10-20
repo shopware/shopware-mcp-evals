@@ -450,6 +450,32 @@ def mcp_close(session_id: str, endpoint: Endpoint = ADMIN) -> int:
     return requests.delete(endpoint.url, headers=headers, timeout=30).status_code
 
 
+STATELESS_REVISION = "2026-07-28"
+
+
+def mcp_discover(endpoint: Endpoint = ADMIN) -> tuple[int, object]:
+    """`server/discover` the stateless way: no `initialize`, no session, the
+    revision in the request's own `_meta` and header. Returns the HTTP status and
+    the decoded body rather than raising, because today's answer is a refusal and
+    the refusal is what the caller reads."""
+    headers = {
+        **endpoint.auth_headers,
+        "Accept": "application/json, text/event-stream",
+        PROTOCOL_HEADER: STATELESS_REVISION,
+    }
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": STATELESS_REVISION}},
+    }
+    resp = requests.post(endpoint.url, headers=headers, json=body, timeout=30)
+    try:
+        return resp.status_code, _response(resp, 1)
+    except ValueError:
+        return resp.status_code, resp.text
+
+
 def mcp_call(session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:
     """Call a tool. Returns the full JSON-RPC response dict."""
     return _rpc_json(

@@ -401,6 +401,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, fake: FakeServer) -> None:
     # they reach whatever server .env names. Each has its own tests.
     monkeypatch.setattr(R, "verify_result_format", const(None))
     monkeypatch.setattr(R, "verify_large_results", const(None))
+    monkeypatch.setattr(R, "verify_stateless_era", const(None))
 
 
 def test_run_store_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
