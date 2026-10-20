@@ -325,3 +325,11 @@ def test_a_failing_negative_fixture_says_what_was_expected(capsys: pytest.Captur
     out = capsys.readouterr().out
     assert "(no tool — nothing should match)" in out
     assert "shopware-entity-search" in out
+
+
+def test_short_error_drops_the_url_and_keeps_the_servers_reason() -> None:
+    error = "404 Client Error: Not Found for url: http://shop.example/api/_mcp: Session not found or has expired."
+
+    assert R.short_error(error) == "404 Client Error: Not Found: Session not found or has expired."
+    assert R.short_error("500 Server Error: x for url: http://shop.example/api/_mcp") == "500 Server Error: x"
+    assert R.short_error("Expecting value") == "Expecting value"

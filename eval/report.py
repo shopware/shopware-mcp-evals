@@ -9,6 +9,7 @@ live progress feed; the scoring they render lives in eval/scoring.py.
 """
 
 import json
+import re
 
 from eval.result_schema import AttemptRecord, FixtureResult
 from eval.scoring import discovery_summary, executed, score, scored
@@ -21,6 +22,14 @@ YELLOW = "\033[1;33m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 CYAN = "\033[0;36m"
+
+
+def short_error(error: str) -> str:
+    """An error without the URL requests puts in the middle of it. Every fixture
+    calls the same endpoint, so the URL only pushed the server's reason past the
+    cut: six fixtures read `404 Client Error: Not Found for url: http://…` and
+    none said `Session not found or has expired.`"""
+    return re.sub(r" for url: \S+?(?=: |$)", "", error)[:120]
 
 
 def pct_color(pct: int) -> str:
@@ -114,7 +123,7 @@ def print_discovery_block(discovery: list[FixtureResult]):
     # underneath said "1/96 fixtures never reached the model".
     errored = [r for r in scored(discovery) if r.get("error")]
     if errored:
-        names = ", ".join(f"{r['id']} ({str(r.get('error', ''))[:60]})" for r in errored)
+        names = ", ".join(f"{r['id']} ({short_error(str(r.get('error', '')))})" for r in errored)
         print(f"  {DIM}Errored before reaching the model (excluded from the gate): {names}{RESET}")
 
     failed = [r for r in executed(discovery) if not r["passed"]]

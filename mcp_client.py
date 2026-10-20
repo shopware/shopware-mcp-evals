@@ -343,8 +343,29 @@ def _rpc(
     # range(THROTTLE_MAX_RETRIES + 1) is never empty, so the loop always assigns
     # resp at least once; the assert states that invariant for the type checker.
     assert resp is not None
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        # requests' message is the status and the URL. The server's reason is in
+        # the body, and it is the part that says what happened: a session the
+        # server no longer knows reads exactly like a missing route without it.
+        detail = _error_detail(resp)
+        if not detail:
+            raise
+        raise requests.HTTPError(f"{exc}: {detail}", response=resp) from exc
     return resp
+
+
+def _error_detail(resp: HttpReply) -> str:
+    """The JSON-RPC error message of a refused request, else the start of its
+    body. Empty when there is nothing to add."""
+    try:
+        message = _as_object(_as_object(_json_body(resp)).get("error")).get("message")
+    except ValueError:
+        message = None
+    if isinstance(message, str) and message:
+        return message
+    return " ".join(resp.text.split())[:200]
 
 
 def _parse_sse(text: str) -> list[McpResponse]:

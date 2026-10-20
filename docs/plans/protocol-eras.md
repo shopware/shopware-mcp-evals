@@ -247,8 +247,12 @@ Within noise, so `DEFAULT_PROTOCOL_VERSION` is 2025-11-25 now, for both
 runners. The functional suite passes on it against the same lane (admin 114
 passed, store 20, no failures). The errored fixtures were the lane, not the
 revision: HTTP 404 from `/api/_mcp` on the same `disambig_*` block in both
-runs. Most likely a session the server no longer knew (the 404 body was not
-recorded, so this is unconfirmed).
+runs. Those were sessions the server had dropped, and the cause was a plugin
+toggled on the same lane mid-run: the file store keeps sessions under
+`%kernel.cache_dir%`, whose name hashes the active plugins and flags, so any
+plugin (de)activation or `cache:clear` answers every live session with HTTP 404
+`Session not found or has expired.` HTTP errors now carry the server's message,
+so the next one says so.
 
 Item 3 is `structured_bytes` per fixture and `structured_bytes_p50` in the cost
 block, which `cost_drift` tracks. Item 1 is still open, and it decides whether

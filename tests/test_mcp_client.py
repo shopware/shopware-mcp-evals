@@ -767,3 +767,31 @@ def test_a_resource_is_read_by_uri_on_the_session(monkeypatch: pytest.MonkeyPatc
     body, headers = sent[0]
     assert (body["method"], body["params"]) == ("resources/read", {"uri": "shopware://tool-result/abc"})
     assert headers["Mcp-Session-Id"] == "s"
+
+
+def test_a_refused_request_carries_the_servers_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dropped session and a missing route are both a bare 404 without it."""
+    body = {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Session not found or has expired."}}
+    monkeypatch.setattr(C.requests, "post", const(FakeResp(404, body=body)))
+
+    with pytest.raises(requests.exceptions.HTTPError, match=r"^404 error: Session not found or has expired\.$"):
+        _ = C.mcp_call("gone", "shopware-entity-search", {})
+
+
+def test_a_refused_request_without_json_carries_the_start_of_its_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Html(FakeResp):
+        @override
+        def json(self) -> object:
+            raise ValueError("not json")
+
+    monkeypatch.setattr(C.requests, "post", const(Html(502, text="<html>\n  Bad   Gateway\n</html>")))
+
+    with pytest.raises(requests.exceptions.HTTPError, match=r"^502 error: <html> Bad Gateway </html>$"):
+        _ = C.mcp_call("s", "shopware-entity-search", {})
+
+
+def test_a_refused_request_with_an_empty_body_keeps_the_plain_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(C.requests, "post", const(FakeResp(500, body={})))
+
+    with pytest.raises(requests.exceptions.HTTPError, match=r"^500 error$"):
+        _ = C.mcp_call("s", "shopware-entity-search", {})
