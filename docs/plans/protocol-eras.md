@@ -1,7 +1,8 @@
 # Plan: test every MCP protocol revision, era and result format
 
-Status: in progress since 2026-10-20. Phases 0 and 1 are done, except the
-missing-privilege check of Phase 1; the rest is open.
+Status: in progress since 2026-10-20. Phases 0, 1 and 2 are built. Phases 1 and 2
+have run only against fakes so far, because the local trunk lane predates #20948 (see
+Phase 2). The missing-privilege check of Phase 1 is still open, as are Phases 3 to 6.
 
 ## Why
 
@@ -99,7 +100,26 @@ Free, no model, so it can run on every push of the eval workflow.
    Each loop writes its own report section; a revision-specific failure names the
    revision in its check label.
 
-## Phase 2: large results and signed pointers (#20951)
+## Phase 2: large results and signed pointers (#20951) (built)
+
+As built, in `functional/large_results.py`:
+
+- The reproducer needs no seeding. On the local lane's demo data it returned
+  346 KB, measured on 2026-10-20.
+- The offload is checked on 2024-11-05 and 2025-06-18. The binding checks are: the
+  same principal on a new session, a tampered expiry under the same signature, and
+  a second integration (behind `--provision-principals`).
+- The Store half is a recorded skip. No Store tool goes through core's offloading
+  response: the UCP tools render their own results, and
+  `shopware-store-api-context` stays far below 100 KB. The context-token checks
+  wait for a Store tool that can return a large result.
+- The legacy plain-id fallback is not checked. A server older than #20951 is
+  recorded as one skip naming the PR.
+- The eval-side check for offloaded fixture results (item 5) is not built yet.
+- Not yet run live. The local trunk lane serves core source from before #20948:
+  its `Framework.php` does not register the renderer's compiler pass, and the
+  mutagen sync from `~/Documents/Projects/shopware-trunk` is paused.
+
 
 1. **Trigger an offload.** The PR's own reproducer
    (`shopware-entity-search` on `country` with `states`, limit 500). Verify on

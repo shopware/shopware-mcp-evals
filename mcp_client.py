@@ -464,6 +464,11 @@ def mcp_call(session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoi
     )
 
 
+def mcp_read_resource(session_id: str, uri: str, endpoint: Endpoint = ADMIN) -> McpResponse:
+    """resources/read for one URI. Returns the full JSON-RPC response dict."""
+    return _rpc_json("resources/read", {"uri": uri}, session_id, rpc_id=5, endpoint=endpoint)
+
+
 def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[ToolDef]:
     """Fetch the full advertised tools/list for this session, following
     nextCursor pagination. Raises on duplicate tool names across pages

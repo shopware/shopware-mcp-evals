@@ -756,3 +756,13 @@ def test_mcp_close_deletes_the_session_and_returns_the_status(monkeypatch: pytes
     assert C.mcp_close("sid-1", endpoint=C.ADMIN) == 404
     assert sent[0]["Mcp-Session-Id"] == "sid-1"
     assert sent[0]["sw-access-key"] == C.ADMIN.auth_headers["sw-access-key"]
+
+
+def test_a_resource_is_read_by_uri_on_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = recording_server(monkeypatch)
+
+    _ = C.mcp_read_resource("s", "shopware://tool-result/abc")
+
+    body, headers = sent[0]
+    assert (body["method"], body["params"]) == ("resources/read", {"uri": "shopware://tool-result/abc"})
+    assert headers["Mcp-Session-Id"] == "s"

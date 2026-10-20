@@ -236,11 +236,30 @@ def provisioned(api: AdminApi) -> Generator[list[Principal]]:
             _user(api, created, f"mcp-evals-{run}-user-one-tool", role_id, locale_id, PARTIAL, "partial"),
         ]
     finally:
-        # Users before the role they hold; the list is already newest-first.
-        for path in created.paths:
-            try:
-                api.call("DELETE", path)
-            except ProvisioningFailed:
-                # A leftover is recognisable by its label; failing the run over
-                # cleanup would hide whatever the checks found.
-                pass
+        _delete(api, created)
+
+
+@contextmanager
+def another_principal(api: AdminApi) -> Generator[Principal]:
+    """One integration granted what "All capabilities" would grant, deleted after.
+
+    For a check that needs a second principal able to make the same call, so
+    that a refusal it gets is about who owns the thing, not about the allowlist.
+    """
+    created = _Created()
+    try:
+        label = f"mcp-evals-{secrets.token_hex(3)}-integration-other"
+        yield _integration(api, created, label, full_selection(api), "all")
+    finally:
+        _delete(api, created)
+
+
+def _delete(api: AdminApi, created: _Created) -> None:
+    # Users before the role they hold; the list is already newest-first.
+    for path in created.paths:
+        try:
+            api.call("DELETE", path)
+        except ProvisioningFailed:
+            # A leftover is recognisable by its label; failing the run over
+            # cleanup would hide whatever the checks found.
+            pass

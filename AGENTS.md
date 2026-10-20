@@ -540,6 +540,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
+| `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
 | `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. A server older than the renderer is one skip naming the PR |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |

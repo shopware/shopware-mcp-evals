@@ -397,6 +397,10 @@ def _wire(monkeypatch: pytest.MonkeyPatch, fake: FakeServer) -> None:
     # lives there so the eval suite shares one definition of "a cart that can
     # be checked out". Unpatched, these two tests reached the network.
     monkeypatch.setattr(lane, "mcp_call", fake.call)
+    # Both open sessions of their own through their own imports, so unpatched
+    # they reach whatever server .env names. Each has its own tests.
+    monkeypatch.setattr(R, "verify_result_format", const(None))
+    monkeypatch.setattr(R, "verify_large_results", const(None))
 
 
 def test_run_store_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:

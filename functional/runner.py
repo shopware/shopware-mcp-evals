@@ -48,6 +48,7 @@ from functional.checks import (
 )
 from functional.customer import CustomerUnavailable, provision
 from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
+from functional.large_results import NO_STORE_OFFLOAD, verify_large_results
 from functional.principals import PROBE_ARGS, PROBE_TOOL, AdminApi, Principal, ProvisioningFailed, provisioned
 from functional.reporting import Reporter
 from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
@@ -1131,6 +1132,7 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
     schema_session, _ = mcp_init(endpoint=endpoint)
     verify_tool_schemas(rep, schema_session, endpoint)
     verify_result_format(rep, endpoint, ADMIN_PROBES)
+    verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
     run_admin_tools(rep, session, endpoint, args)
 
 
@@ -1151,6 +1153,7 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     verify_default_surface(rep, session, endpoint, also_expected=ucp_default)
     verify_connect_time_toolsets(rep, endpoint, also_expected=ucp_default)
     verify_result_format(rep, endpoint, STORE_PROBES)
+    rep.check_skip("large results (store)", NO_STORE_OFFLOAD)
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")
