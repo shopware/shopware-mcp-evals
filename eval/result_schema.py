@@ -85,6 +85,9 @@ class FixtureResult(TypedDict, total=False):
     latency_s: float
     tokens: "TokenCounts"
     payload_bytes: int
+    # `structuredContent` bytes next to that text (2025-06-18 on). Absent on
+    # older reports; read with .get().
+    structured_bytes: int
     # The answer was stored behind a pointer the model cannot read. Absent on
     # reports from before shopware/shopware#20951 was graded; read with .get().
     offloaded: bool
@@ -205,6 +208,7 @@ class CostBlock(TypedDict):
     latency_p95: float | None
     payload_bytes_p50: float | None
     payload_bytes_p95: float | None
+    structured_bytes_p50: float | None
     surface_tokens_p50: float | None
     surface_tokens_peak: float | None
 

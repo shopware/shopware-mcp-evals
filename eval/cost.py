@@ -114,7 +114,7 @@ def percentile(values: list[float], p: float) -> float | None:
 
 def _series(results: list[FixtureResult], key: str) -> list[float]:
     # A variable key cannot index a TypedDict; these are all numeric fields and
-    # the caller only ever asks for four of them.
+    # the caller only ever asks for a handful of them.
     values = (cast(float | None, r.get(key)) for r in results or [])
     return [v for v in values if v is not None]
 
@@ -162,6 +162,7 @@ def run_cost(results: list[FixtureResult], model: str, pricing: Pricing, provide
         "latency_p95": percentile(_series(graded, "latency_s"), 95),
         "payload_bytes_p50": percentile(_series(graded, "payload_bytes"), 50),
         "payload_bytes_p95": percentile(_series(graded, "payload_bytes"), 95),
+        "structured_bytes_p50": percentile(_series(graded, "structured_bytes"), 50),
         "surface_tokens_p50": percentile(_series(graded, "surface_tokens"), 50),
         "surface_tokens_peak": max(_series(graded, "surface_tokens_peak"), default=None),
     }

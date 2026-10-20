@@ -269,13 +269,14 @@ def recording_server(
     return sent
 
 
-def test_a_session_asks_for_the_oldest_revision_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The revision every gate was measured on: legacy text and nothing else."""
+def test_a_session_asks_for_the_newest_handshake_revision_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a current client negotiates. The stateless revision is not one: it
+    has no initialize to ask in."""
     sent = recording_server(monkeypatch)
 
     _ = C.mcp_init(C.admin_endpoint())
 
-    assert cast(JsonObject, sent[0][0]["params"])["protocolVersion"] == "2024-11-05"
+    assert cast(JsonObject, sent[0][0]["params"])["protocolVersion"] == C.PROTOCOL_REVISIONS[-1] == "2025-11-25"
 
 
 def test_a_session_asks_for_the_endpoints_revision(monkeypatch: pytest.MonkeyPatch) -> None:

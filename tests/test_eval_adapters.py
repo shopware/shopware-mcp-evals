@@ -24,7 +24,7 @@ import pytest
 
 from eval import runner as E
 from eval.result_schema import Fixture, FixtureResult, JsonObject, McpResponse, TokenCounts, ToolDef, as_object
-from mcp_result import from_text
+from mcp_result import from_text, read_result
 from tests.stubs import const
 
 TOOL = "shopware-entity-read"
@@ -1199,3 +1199,13 @@ def test_a_passing_call_records_no_grading_source() -> None:
     result = E.run_fixture_discovery("openai", FakeClient(), fixture(), "m", None, 6)
 
     assert "graded_by" not in result.get("attempted_tools", [])[0]
+
+
+def test_structured_bytes_weigh_the_compact_json_and_nothing_without_it() -> None:
+    with_block = read_result(
+        cast(McpResponse, cast(object, {"result": {"content": [], "structuredContent": {"name": "Ä", "n": 1}}}))
+    )
+    without = read_result(cast(McpResponse, cast(object, {"result": {"content": [{"type": "text", "text": "x"}]}})))
+
+    assert E.structured_bytes(with_block) == len('{"name":"Ä","n":1}'.encode())
+    assert E.structured_bytes(without) == 0

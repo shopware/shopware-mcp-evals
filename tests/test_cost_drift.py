@@ -197,3 +197,9 @@ def test_the_threshold_is_configurable(
 
     assert D.main() == 0
     assert "input tokens per fixture" in capsys.readouterr().out
+
+
+def test_structured_content_growth_is_tracked() -> None:
+    assert [f["metric"] for f in D.compare(report(structured_bytes_p50=1000), report(structured_bytes_p50=100))] == [
+        "structured_bytes_p50"
+    ]

@@ -459,12 +459,12 @@ def test_report_records_the_discovery_mode() -> None:
 
 
 def test_report_records_the_protocol_revision() -> None:
-    """Older reports lack the key and were all on 2024-11-05, so the default is
-    that revision rather than an absence a reader would have to interpret."""
+    """Always written, so a reader never has to guess which revision a report
+    measured."""
     default = E.build_report("openai", "m", [], None, True, 6)
     pinned = E.build_report("openai", "m", [], None, True, 6, protocol_version="2025-06-18")
 
-    assert default.get("protocol_version") == "2024-11-05"
+    assert default.get("protocol_version") == "2025-11-25"
     assert pinned.get("protocol_version") == "2025-06-18"
 
 

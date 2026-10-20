@@ -109,7 +109,7 @@ from mcp_client import (
     mcp_init,
     mcp_tools_list_all,
 )
-from mcp_result import read_result
+from mcp_result import ToolOutcome, read_result
 from ownership import CORE, PROMPT_SETS, breakdown, owner_of
 from toolclass import classify, is_executable, prepare_call
 
@@ -530,6 +530,10 @@ class DiscoveryState:
     # answers correctly but returns 40k of JSON is expensive for every client,
     # and nothing else in the suite would notice.
     payload_bytes: int = 0
+    # Bytes of `structuredContent` alongside that text, from 2025-06-18 on. Not
+    # sent to the model here, but a client that passes both pays for the data
+    # twice, and this is what that second copy weighs.
+    structured_bytes: int = 0
     # An answering call came back as a pointer to a stored result.
     offloaded: bool = False
     steps: int = 0
@@ -634,12 +638,20 @@ class DiscoveryState:
             "latency_s": latency,
             "tokens": self.tokens,
             "payload_bytes": self.payload_bytes,
+            "structured_bytes": self.structured_bytes,
             "offloaded": self.offloaded,
             "surface_tokens": self.surface_tokens,
             "surface_tokens_peak": self.surface_tokens_peak,
             "notes": fixture.get("notes", ""),
         }
         return result
+
+
+def structured_bytes(outcome: ToolOutcome) -> int:
+    """The compact JSON size of a result's `structuredContent`; 0 without one."""
+    if not outcome.has_structured:
+        return 0
+    return len(json.dumps(outcome.structured, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
 
 def run_fixture_discovery(
@@ -790,6 +802,7 @@ def run_fixture_discovery(
             outcome = read_result(mcp_call(session_id, call["name"], call["input"], endpoint=endpoint))
             result_text = outcome.text or (f"Error: {outcome.failure}" if outcome.error else "")
             st.payload_bytes += len(result_text.encode("utf-8"))
+            st.structured_bytes += structured_bytes(outcome)
             tool_results.append((call["id"], result_text))
             st.meta_calls.append(MetaCall(tool=call["name"], input=call["input"], result_preview=result_text[:300]))
             if call["name"] == "shopware-tool-search":
@@ -892,6 +905,7 @@ def _handle_answering_call(
     outcome = read_result(mcp_call(session_id, call["name"], args, endpoint=endpoint))
     result_text = outcome.text
     st.payload_bytes += len(result_text.encode("utf-8"))
+    st.structured_bytes += structured_bytes(outcome)
     st.execution = "executed"
 
     ok, reason = check(fixture.get("expect_result"), outcome)
@@ -1583,9 +1597,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=PROTOCOL_REVISIONS,
         default=DEFAULT_PROTOCOL_VERSION,
         help=(
-            f"MCP revision every session negotiates (default {DEFAULT_PROTOCOL_VERSION}, the one the gates were "
-            "measured on). From 2025-06-18 the server adds structuredContent and resource_link blocks; what the "
-            "model reads stays the text blocks."
+            f"MCP revision every session negotiates (default {DEFAULT_PROTOCOL_VERSION}). From 2025-06-18 the "
+            "server adds structuredContent and resource_link blocks; what the model reads stays the text blocks, "
+            "and structured_bytes records what the second copy weighs."
         ),
     )
     parser.add_argument(

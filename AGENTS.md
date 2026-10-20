@@ -187,7 +187,8 @@ sequenceDiagram
   `ToolOutcome.envelope` is the legacy-shaped view the fixtures' `data.…` paths
   are written against.
 - **The protocol revision is an endpoint property.** Sessions ask for
-  `DEFAULT_PROTOCOL_VERSION` (2024-11-05, what every gate was measured on);
+  `DEFAULT_PROTOCOL_VERSION` (2025-11-25 since a paired run read 99% on both it
+  and 2024-11-05, where the gates were first measured);
   `Endpoint.with_protocol()` and `--protocol-version` on both runners pick
   another, and `mcp_init` fails if the server negotiates anything else. See
   `docs/plans/protocol-eras.md` for the matrix this is building towards.

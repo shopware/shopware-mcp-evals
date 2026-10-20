@@ -58,11 +58,13 @@ ALL_TOOLSETS = "all"
 # (see `mcp_init`).
 PROTOCOL_REVISIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 
-# What every session asks for unless told otherwise. The oldest revision, which is
-# also the one the whole suite and its gates were measured on: it gets the legacy
-# text and nothing else. 2025-06-18 is where the server starts adding
-# `structuredContent` and `resource_link` blocks (`McpToolResultRenderer`).
-DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+# What every session asks for unless told otherwise: the newest handshake
+# revision, the one a current client negotiates. From 2025-06-18 the server adds
+# `structuredContent` and `resource_link` blocks (`McpToolResultRenderer`) next to
+# the same text. The gates were first measured on 2024-11-05; a paired run on
+# trunk 7a96f6086ec (2026-10-20) read 99% on both, core 100% on both, which is
+# what moved the default (docs/plans/protocol-eras.md, Phase 6).
+DEFAULT_PROTOCOL_VERSION = "2025-11-25"
 
 # The Streamable HTTP transport of 2025-06-18 requires `MCP-Protocol-Version` on
 # every request after initialize; a server that gets none must assume 2025-03-26.

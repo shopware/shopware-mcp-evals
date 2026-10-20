@@ -15,7 +15,7 @@ from eval.result_schema import JsonObject, McpResponse
 from functional import large_results as L
 from functional.principals import Principal, ProvisioningFailed
 from functional.reporting import Reporter
-from mcp_client import Endpoint, admin_endpoint
+from mcp_client import DEFAULT_PROTOCOL_VERSION, Endpoint, admin_endpoint
 from mcp_result import ToolOutcome, read_result
 
 ADMIN: Endpoint = admin_endpoint(base_url="http://shop.example")
@@ -304,10 +304,10 @@ def test_no_good_pointer_means_no_binding_checks(monkeypatch: pytest.MonkeyPatch
 
 
 def test_a_session_that_will_not_open_for_the_read_back_fails_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The suite's own endpoint asks for the default revision, 2024-11-05."""
+    """The suite's own endpoint asks for the default revision."""
     server = FakeServer()
     rep = run(monkeypatch, server)
-    server.refuse = "2024-11-05"
+    server.refuse = DEFAULT_PROTOCOL_VERSION
     rep = Reporter("test", color=False)
     L.verify_pointer_binding(rep, ADMIN, URI, provision=True)
 

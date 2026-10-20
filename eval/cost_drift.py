@@ -37,6 +37,11 @@ TRACKED = (
     ("input_tokens_per_fixture", "input tokens per fixture", "the model is being sent more context"),
     ("output_tokens_per_fixture", "output tokens per fixture", "the model is writing more"),
     ("payload_bytes_p50", "median tool-result payload", "a tool is returning more data"),
+    (
+        "structured_bytes_p50",
+        "median structuredContent payload",
+        "a client passing structuredContent as well pays for more data",
+    ),
     ("surface_tokens_peak", "peak advertised surface", "discovery is pulling in more tools"),
 )
 
@@ -60,6 +65,7 @@ def metrics(report: Report) -> dict[str, float]:
         out["output_tokens_per_fixture"] = (tokens.get("output") or 0) / graded
     for key, value in (
         ("payload_bytes_p50", cost.get("payload_bytes_p50")),
+        ("structured_bytes_p50", cost.get("structured_bytes_p50")),
         ("surface_tokens_peak", cost.get("surface_tokens_peak")),
     ):
         if value is not None:

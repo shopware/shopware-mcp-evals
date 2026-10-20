@@ -3,7 +3,7 @@
 Status: in progress since 2026-10-20. Phases 0 to 3 are built and pass on the
 local trunk lane at shopware 7a96f6086ec (2026-10-20). Phase 4 is built and has
 not run in CI yet. Phase 5's probe is built; its scenarios wait on
-shopware/shopware#19969. Phase 6 is open.
+shopware/shopware#19969. Phase 6 items 2 and 3 are done; item 1 is open.
 
 ## Why
 
@@ -224,7 +224,7 @@ revision, so a refusal for any other reason fails instead. A second check fails
 when `supported` stops listing a revision this suite tests. Items 3 and 4 wait
 on #19969.
 
-## Phase 6: move the eval to the revision real clients use
+## Phase 6: move the eval to the revision real clients use (default moved)
 
 1. Find out which revision Claude, ChatGPT and the MCP Inspector negotiate today,
    and **which content they hand the model**: the text block, `structuredContent`,
@@ -235,6 +235,24 @@ on #19969.
    what moved before touching the gate.
 3. Record `structuredContent` bytes next to `payload_bytes`. A client that passes
    both pays for the data twice, and `cost_drift` should see that.
+
+Paired run on the trunk lane at 7a96f6086ec, openai, same commit, 99 fixtures:
+
+| revision | gate | core | errored before the model |
+|---|---|---|---|
+| 2024-11-05 | 92/93 = 99% | 42/42 | 6 |
+| 2025-11-25 | 94/95 = 99% | 44/44 | 4 |
+
+Within noise, so `DEFAULT_PROTOCOL_VERSION` is 2025-11-25 now, for both
+runners. The functional suite passes on it against the same lane (admin 114
+passed, store 20, no failures). The errored fixtures were the lane, not the
+revision: HTTP 404 from `/api/_mcp` on the same `disambig_*` block in both
+runs. Most likely a session the server no longer knew (the 404 body was not
+recorded, so this is unconfirmed).
+
+Item 3 is `structured_bytes` per fixture and `structured_bytes_p50` in the cost
+block, which `cost_drift` tracks. Item 1 is still open, and it decides whether
+the eval should hand the model `structuredContent` rather than the text.
 
 ## Order and cost
 
