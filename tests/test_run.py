@@ -3,6 +3,7 @@ admin/store flows driven through a stateful fake MCP server."""
 
 import argparse
 import json
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import cast, override
 
@@ -672,3 +673,68 @@ def test_the_check_skips_where_nothing_is_deferred(monkeypatch: pytest.MonkeyPat
     rep = _connect_report(monkeypatch, FakeServer([]))
 
     assert (rep.failed, rep.passed, rep.skipped) == (0, 0, 1)
+
+
+def _run(monkeypatch: pytest.MonkeyPatch, endpoint_name: str, revision: str) -> tuple[Reporter, list[str]]:
+    """The whole flow on one endpoint, recording which revision-spanning checks ran.
+
+    The revision is set on the shared endpoint rather than a clone because the
+    fake server checks it is talking to ADMIN or STORE by identity."""
+    import ucp
+
+    endpoint = ADMIN if endpoint_name == "admin" else STORE
+    monkeypatch.setattr(endpoint, "protocol_version", revision)
+    fake = (
+        FakeServer(ADMIN_TOOLSETS)
+        if endpoint_name == "admin"
+        else FakeServer(STORE_TOOLSETS, default_extra=ucp.all_classified())
+    )
+    _wire(monkeypatch, fake)
+    called: list[str] = []
+
+    def recorder(name: str) -> Callable[..., None]:
+        def record(*_args: object, **_kwargs: object) -> None:
+            called.append(name)
+
+        return record
+
+    for name in ("verify_result_format", "verify_large_results", "verify_stateless_era"):
+        monkeypatch.setattr(R, name, recorder(name))
+    rep = Reporter(endpoint_name, color=False)
+    session, _ = fake.init()
+    if endpoint_name == "admin":
+        R.run_admin(rep, endpoint, flags(skip_media_upload=False, skip_dev_tools=False), session)
+    else:
+        R.run_store(rep, endpoint, session)
+    return rep, called
+
+
+GATE_LABEL = "result format, large results, stateless era"
+
+
+@pytest.mark.parametrize("endpoint_name", ["admin", "store"])
+def test_the_default_revision_runs_the_checks_that_compare_revisions(
+    monkeypatch: pytest.MonkeyPatch, endpoint_name: str
+) -> None:
+    rep, called = _run(monkeypatch, endpoint_name, "2025-11-25")
+
+    assert "verify_result_format" in called
+    assert "verify_stateless_era" in called
+    assert not [r for r in rep.records if r["label"] == GATE_LABEL]
+
+
+@pytest.mark.parametrize("endpoint_name", ["admin", "store"])
+def test_an_older_revision_records_one_skip_instead_of_repeating_them(
+    monkeypatch: pytest.MonkeyPatch, endpoint_name: str
+) -> None:
+    """The CI matrix runs the whole suite once per revision. The comparison opens
+    its own session on every revision anyway, so each job repeating it would
+    triple it and file 2025-11-25 results under a 2024-11-05 job."""
+    rep, called = _run(monkeypatch, endpoint_name, "2024-11-05")
+
+    assert called == []
+    skip = next(r for r in rep.records if r["label"] == GATE_LABEL)
+    assert skip["status"] == "skipped"
+    assert "in the 2025-11-25 suite" in str(skip)
+    assert "at 2024-11-05" in str(skip)
+    assert rep.failed == 0

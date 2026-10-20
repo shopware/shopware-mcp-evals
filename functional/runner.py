@@ -1159,6 +1159,29 @@ def verify_allowlist_matrix(rep: Reporter, endpoint: Endpoint, provision: bool) 
         rep.check_fail("allowlist matrix", f"could not provision the principals: {exc}")
 
 
+COMPARED_ONCE = (
+    "the checks that compare protocol revisions run once, in the {default} suite; "
+    "this run is the whole suite at {revision}"
+)
+
+
+def compares_revisions(rep: Reporter, endpoint: Endpoint) -> bool:
+    """Whether this run owns the checks that span revisions: the result format
+    on each, large results on each, and the stateless probe.
+
+    They open their own sessions on every revision whatever this run negotiated,
+    so the CI matrix running the suite once per revision would repeat them in
+    every job. The default revision's run keeps them; the others record why not."""
+    if endpoint.protocol_version == DEFAULT_PROTOCOL_VERSION:
+        return True
+    rep.section("Across protocol revisions")
+    rep.check_skip(
+        "result format, large results, stateless era",
+        COMPARED_ONCE.format(default=DEFAULT_PROTOCOL_VERSION, revision=endpoint.protocol_version),
+    )
+    return False
+
+
 def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, session: str) -> None:
     verify_allowlist_matrix(rep, endpoint, provision=cast(bool, args.provision_principals))
     verify_default_surface(rep, session, endpoint)
@@ -1167,9 +1190,10 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
     verify_admin_discovery(rep, endpoint, entity_toolset, toolsets)
     schema_session, _ = mcp_init(endpoint=endpoint)
     verify_tool_schemas(rep, schema_session, endpoint)
-    verify_result_format(rep, endpoint, ADMIN_PROBES)
-    verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
-    verify_stateless_era(rep, endpoint)
+    if compares_revisions(rep, endpoint):
+        verify_result_format(rep, endpoint, ADMIN_PROBES)
+        verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
+        verify_stateless_era(rep, endpoint)
     run_admin_tools(rep, session, endpoint, args)
 
 
@@ -1189,9 +1213,10 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     ucp_default = _ucp_default_published(session, endpoint)
     verify_default_surface(rep, session, endpoint, also_expected=ucp_default)
     verify_connect_time_toolsets(rep, endpoint, also_expected=ucp_default)
-    verify_result_format(rep, endpoint, STORE_PROBES)
-    rep.check_skip("large results (store)", NO_STORE_OFFLOAD)
-    verify_stateless_era(rep, endpoint)
+    if compares_revisions(rep, endpoint):
+        verify_result_format(rep, endpoint, STORE_PROBES)
+        rep.check_skip("large results (store)", NO_STORE_OFFLOAD)
+        verify_stateless_era(rep, endpoint)
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")

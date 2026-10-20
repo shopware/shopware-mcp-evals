@@ -20,7 +20,8 @@ flowchart TD
     A --> D{Store preflight}
 
     B --> B1[ruff · basedpyright · pytest]
-    B --> B2[functional: admin + store]
+    B --> B2[functional: admin + store<br/>at 2025-11-25]
+    A --> G[Protocol 2024-11-05 · 2025-06-18<br/>functional at that revision]
     B --> B3[tool catalogue snapshot + drift]
 
     D -->|UCP answers| E[Store eval]
@@ -95,7 +96,7 @@ sequenceDiagram
   (plus id/prompt uniqueness and toolset correctness) against
   `tool-history/latest.json`, so a new server-side tool fails the unit tests
   until it has prompts.
-- **Two workflows, and the heavy one is five jobs.** `lint.yml` is the fast gate
+- **Two workflows, and the heavy one is five jobs plus a matrix.** `lint.yml` is the fast gate
   (ruff, ruff format, basedpyright, pytest+cov, then ShellCheck **twice** — once
   over `functional/**/*.sh` + `scripts/**/*.sh`, once over the shell inside
   workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
@@ -118,6 +119,12 @@ sequenceDiagram
   `next_major` dispatch input or the `run-next-major` label. A plugin that does
   not boot under the flag is deactivated, named in a warning, and its tools go
   missing from that lane. It is not a dependency of `report`.
+  Two more, `revisions`, are a matrix: `Protocol 2024-11-05` and `Protocol
+  2025-06-18` run the whole functional suite, admin and store, at that revision,
+  so a red check names the revision that broke. `static` is the 2025-11-25 run
+  and the only one that keeps the checks comparing revisions with each other;
+  the matrix jobs record a skip for them. 2025-03-26 is left out because the
+  server renders it like 2024-11-05. The LLM eval stays on 2025-11-25.
 - **Never let a job write state you care about.** `--allow-mutations` places a
   real order. CI sets it because the instance dies with the job; a developer's
   shop does not. If you add anything that commits, gate it the same way and

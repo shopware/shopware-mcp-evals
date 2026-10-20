@@ -384,7 +384,9 @@ jobs:
       #
       # Deliberately NOT part of the gate: this is a convenience, so every failure
       # mode here is swallowed rather than allowed to fail a run whose eval passed.
-      - name: Run functional tests
+      # At the default revision, 2025-11-25. The `revisions` jobs run the same
+      # suite at the older ones.
+      - name: Run functional tests (2025-11-25)
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_ACCESS_KEY: ${{ steps.lane.outputs.sw_access_key }}
@@ -803,6 +805,93 @@ jobs:
           # The reports only. `report` merges every artifact into one results/,
           # and this lane's tool-health-admin.json would overwrite static's —
           # the one the eval gate is meant to read.
+          path: results/functional-*.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Dump symfony server logs on failure
+        if: failure()
+        uses: ./.github/actions/dump-logs
+
+      - name: Stop Shopware
+        if: always()
+        working-directory: shopware
+        run: symfony server:stop 2>/dev/null || true
+
+  # The functional suite at each older protocol revision, one job per revision,
+  # so a red check names the revision that broke. Static runs the suite at the
+  # default, 2025-11-25, and keeps the checks that compare revisions with each
+  # other; these jobs record one skip for them (compares_revisions in
+  # functional/runner.py) and run everything else at their own revision.
+  #
+  # 2025-03-26 is left out: the server renders it like 2024-11-05
+  # (structuredContent and resource_link start at 2025-06-18), so a third lane
+  # would repeat the first. A revision is the client's choice, not the lane's,
+  # so every entry builds the same lane: ~140s each, paid in parallel, for a
+  # failure that says which revision it belongs to.
+  revisions:
+    name: Protocol ${{ matrix.revision }}
+    needs: static
+    if: ${{ !cancelled() && needs.static.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: ["2024-11-05", "2025-06-18"]
+    env:
+      REVISION: ${{ matrix.revision }}
+    steps:
+      - name: Checkout evals repo
+        uses: actions/checkout@v7
+
+      - name: Bootstrap Python
+        uses: ./.github/actions/bootstrap
+
+      - name: Set up the lane
+        id: lane
+        uses: ./.github/actions/setup-lane
+        with:
+          shopware_repo: ${{ env.SHOPWARE_REPO }}
+          shopware_ref: ${{ needs.static.outputs.shopware_sha || github.event.inputs.shopware_ref }}
+          event_name: ${{ github.event_name }}
+          app_url: ${{ env.APP_URL }}
+          run_store: ${{ env.RUN_STORE }}
+          dev_tools_ref: ${{ github.event.inputs.dev_tools_ref }}
+          merchant_tools_ref: ${{ github.event.inputs.merchant_tools_ref }}
+          agentic_commerce_ref: ${{ github.event.inputs.agentic_commerce_ref }}
+          plugins_pat: ${{ secrets.PLUGINS_PAT }}
+          github_token: ${{ github.token }}
+
+      - name: Functional suite, admin
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_ACCESS_KEY: ${{ steps.lane.outputs.sw_access_key }}
+          SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
+          MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
+          MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+        run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}"
+
+      # Commits like static's store step, and warns like it: the second order
+      # (agentic-commerce#163) fails on every revision, which would otherwise
+      # turn each of these jobs red for the same known bug.
+      - name: Functional suite, store
+        if: ${{ !cancelled() && needs.static.outputs.store_ready == 'true' && steps.lane.outputs.sc_access_key != '' }}
+        continue-on-error: true
+        env:
+          SW_BASE_URL: ${{ env.APP_URL }}
+          SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
+          UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
+          MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+        run: python -m functional.runner --endpoint store --allow-mutations --protocol-version "${REVISION}"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: revision-${{ matrix.revision }}-results
+          # The reports only, for the same reason as session-store: this lane's
+          # tool-health files would overwrite the ones the eval gate reads.
           path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn

@@ -79,6 +79,19 @@ role does not grant, and must get `missing_privilege`.
 
 Free, no model, so it can run on every push of the eval workflow.
 
+**Revised: a CI job per revision.** The section above compared four probe tools
+across revisions, while every other check ran at 2025-11-25 only. A tool that
+breaks on one older revision went unseen, and a revision failure was one line in
+the static log. So `mcp-evals.yml` now has a `revisions` matrix: `Protocol
+2024-11-05` and `Protocol 2025-06-18` each build a lane and run the whole
+functional suite, admin and store, with `--protocol-version`. `static` stays the
+2025-11-25 run and keeps the comparison section, because comparing needs every
+revision side by side. At any other revision `compares_revisions` in
+`functional/runner.py` records one skip in its place. 2025-03-26 has no job: the
+server renders it like 2024-11-05. Measured on the trunk lane before the first
+CI run: both revisions clean on admin, and on store only the known second order
+(agentic-commerce#163).
+
 1. `functional.runner --protocol 2024-11-05,2025-06-18,2025-11-25` runs the
    result-format checks once per revision. The discovery and per-tool checks run
    once, under the newest revision, to keep the job short.
