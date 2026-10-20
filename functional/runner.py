@@ -263,10 +263,11 @@ def _ucp_default_published(session: str, endpoint: Endpoint) -> frozenset[str]:
 
 
 # The server before shopware/shopware#21772: the pin changes what tools/list
-# advertises, but toolsets-list still lists every pinned toolset as disabled.
-# The pinned trunk predates the fix, so this exact symptom is recorded as a skip
-# naming the PR rather than failed. Delete the tolerance once `shopware.sha`
-# includes the fix: after that, the same symptom is a regression.
+# advertises, but toolsets-list, while listing every toolset, reports none of
+# them enabled. The pinned trunk predates the fix, so this exact symptom is
+# recorded as a skip naming the PR rather than failed. It covers the pinned
+# cases only; the plain connect is still checked. Delete the tolerance once
+# `shopware.sha` includes the fix: after that, the same symptom is a regression.
 PINNED_REPORTED_DISABLED = (
     "toolsets-list reports pinned toolsets as enabled (shopware/shopware#21772 not on this build: "
     "every pinned toolset is advertised, but listed with enabled=false)"
@@ -282,6 +283,15 @@ class _PinCase:
     enabled: frozenset[str]
     ok: str
     fail: str
+
+
+@dataclass(frozen=True)
+class _ToolsetsReport:
+    """What toolsets-list answered on one session: every toolset it listed, and
+    the ones among them it reported enabled."""
+
+    listed: frozenset[str]
+    enabled: frozenset[str]
 
 
 def verify_connect_time_toolsets(
@@ -370,18 +380,18 @@ def verify_connect_time_toolsets(
     # parameter cannot be mistaken for one in the default surface.
     cases.append(_PinCase((), floor, frozenset(), "a plain connect is unaffected by the feature", "plain connect"))
 
-    reports: list[tuple[_PinCase, frozenset[str]]] = []
+    reports: list[tuple[_PinCase, _ToolsetsReport]] = []
     for case in cases:
         seen = _connect_pinned(rep, endpoint, case.names)
         if seen is None:
             continue
-        advertised, enabled = seen
+        advertised, report = seen
         if advertised == case.tools:
             rep.check_pass(case.ok)
             # Only a pin that took effect has a report worth checking. Where
             # tools/list already failed, a wrong report is the same failure again.
-            if enabled is not None:
-                reports.append((case, enabled))
+            if report is not None:
+                reports.append((case, report))
         elif case.names:
             rep.check_fail(
                 case.fail,
@@ -390,16 +400,16 @@ def verify_connect_time_toolsets(
         else:
             rep.check_fail(case.fail, f"default surface moved: {sorted(advertised ^ case.tools)}")
 
-    _verify_pinned_reported_enabled(rep, reports)
+    _verify_pinned_reported_enabled(rep, reports, frozenset(ts["name"] for ts in toolsets))
 
 
 def _connect_pinned(
     rep: Reporter, endpoint: Endpoint, names: tuple[str, ...]
-) -> tuple[frozenset[str], frozenset[str] | None] | None:
+) -> tuple[frozenset[str], _ToolsetsReport | None] | None:
     """Open a session with these toolsets pinned, and return what it advertises
-    and which toolsets its toolsets-list reports enabled. None (after recording a
-    fail) when the session or tools/list fails; the enabled set alone is None
-    when only toolsets-list does."""
+    and what its toolsets-list reports. None (after recording a fail) when the
+    session or tools/list fails; the report alone is None when only
+    toolsets-list does."""
     pinned = endpoint.with_toolsets(*names)
     label = f"?toolsets={','.join(names)}"
     try:
@@ -411,26 +421,42 @@ def _connect_pinned(
     if got is None:
         return None
     try:
-        enabled = frozenset(ts["name"] for ts in load_toolsets(session, pinned) if ts.get("enabled"))
+        listed = load_toolsets(session, pinned)
     except (RuntimeError, ValueError, requests.exceptions.RequestException) as exc:
         rep.check_fail(f"{label} toolsets-list", str(exc))
         return frozenset(got), None
-    return frozenset(got), enabled
+    return frozenset(got), _ToolsetsReport(
+        listed=frozenset(ts["name"] for ts in listed),
+        enabled=frozenset(ts["name"] for ts in listed if ts.get("enabled")),
+    )
 
 
-def _verify_pinned_reported_enabled(rep: Reporter, reports: list[tuple[_PinCase, frozenset[str]]]) -> None:
-    """Does toolsets-list report exactly the pinned toolsets as enabled?"""
-    pinned = [enabled for case, enabled in reports if case.names]
-    if pinned and not any(pinned):
+def _verify_pinned_reported_enabled(
+    rep: Reporter, reports: list[tuple[_PinCase, _ToolsetsReport]], listed: frozenset[str]
+) -> None:
+    """Does toolsets-list, on every session, list the same toolsets as a plain
+    connect and report exactly the pinned ones enabled?
+
+    `listed` is what the plain probe session listed. A pin changes visibility,
+    not the allowlist, so every session must list the same toolsets; that also
+    keeps an empty or missing `toolsets` array from passing as "none enabled"."""
+    pinned = [report for case, report in reports if case.names]
+    if pinned and all(r.listed == listed and not r.enabled for r in pinned):
         rep.skip(PINNED_REPORTED_DISABLED)
-        return
-    for case, enabled in reports:
+        reports = [(case, report) for case, report in reports if not case.names]
+    for case, report in reports:
         label = f"?toolsets={','.join(case.names)} toolsets-list" if case.names else "plain connect toolsets-list"
-        if enabled == case.enabled:
+        if report.listed != listed:
+            rep.check_fail(
+                label,
+                f"lists different toolsets than a plain connect: missing {sorted(listed - report.listed)} "
+                + f"unexpected {sorted(report.listed - listed)}",
+            )
+        elif report.enabled == case.enabled:
             what = "the pinned toolsets" if case.names else "nothing"
             rep.check_pass(f"{label} reports {what} enabled")
         else:
-            rep.check_fail(label, f"reported enabled: {sorted(enabled)}, pinned: {sorted(case.enabled)}")
+            rep.check_fail(label, f"reported enabled: {sorted(report.enabled)}, pinned: {sorted(case.enabled)}")
 
 
 def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None:

@@ -649,9 +649,52 @@ def test_a_pin_listed_as_disabled_is_skipped_naming_the_upstream_fix(
     gap stays visible."""
     rep = _connect_report(monkeypatch, ReportsPinsDisabled(CONNECT_TOOLSETS))
 
-    assert (rep.failed, rep.passed, rep.skipped) == (0, 5, 1)
+    # five tools/list checks plus the plain connect's report, which the skip
+    # does not cover
+    assert (rep.failed, rep.passed, rep.skipped) == (0, 6, 1)
     assert f"SKIP {R.PINNED_REPORTED_DISABLED}" in capsys.readouterr().out
     assert "shopware/shopware#21772" in R.PINNED_REPORTED_DISABLED
+
+
+def test_the_legacy_skip_still_checks_the_plain_connect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tolerance is for the pinned cases. A plain connect that reports a
+    toolset enabled is a separate regression and must fail under it."""
+
+    class PlainReportsOrder(ReportsPinsDisabled):
+        @override
+        def list_toolsets(self, session: str, endpoint: Endpoint | None = None) -> list[Toolset]:
+            listed = super().list_toolsets(session, endpoint)
+            if self.pinned.get(session, ()):
+                return listed
+            return [{**ts, "enabled": ts["name"] == "order"} for ts in listed]
+
+    rep = _connect_report(monkeypatch, PlainReportsOrder(CONNECT_TOOLSETS))
+
+    failures = [(r["label"], r.get("error")) for r in rep.records if r["status"] == "fail"]
+    assert failures == [("plain connect toolsets-list", "reported enabled: ['order'], pinned: []")]
+    assert rep.skipped == 1
+
+
+def test_an_empty_pinned_listing_is_not_mistaken_for_the_legacy_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The old server listed every toolset with enabled=false. A pinned session
+    whose toolsets array is empty, or missing (parsed as []), reports nothing
+    enabled too, but it is a different bug and fails."""
+
+    class PinnedListsNothing(FakeServer):
+        @override
+        def list_toolsets(self, session: str, endpoint: Endpoint | None = None) -> list[Toolset]:
+            return [] if self.pinned.get(session, ()) else super().list_toolsets(session, endpoint)
+
+    rep = _connect_report(monkeypatch, PinnedListsNothing(CONNECT_TOOLSETS))
+
+    failures = [r["label"] for r in rep.records if r["status"] == "fail"]
+    assert failures == [
+        "?toolsets=media toolsets-list",
+        "?toolsets=media,order,theme toolsets-list",
+        "?toolsets=all toolsets-list",
+        "?toolsets=no-such-toolset,media toolsets-list",
+    ]
+    assert rep.skipped == 0
 
 
 def test_a_report_that_names_the_wrong_toolsets_fails(monkeypatch: pytest.MonkeyPatch) -> None:
