@@ -218,7 +218,11 @@ def test_init_returns_the_session_id_and_server_instructions(monkeypatch: pytest
         "post",
         const(
             json_resp(
-                {"jsonrpc": "2.0", "id": 1, "result": {"instructions": "Use entity tools."}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"protocolVersion": C.DEFAULT_PROTOCOL_VERSION, "instructions": "Use entity tools."},
+                },
                 headers={"Mcp-Session-Id": "sid-1"},
             )
         ),
@@ -240,7 +244,12 @@ def test_init_tolerates_a_server_that_sends_no_instructions(monkeypatch: pytest.
     monkeypatch.setattr(
         C.requests,
         "post",
-        const(json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s"})),
+        const(
+            json_resp(
+                {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": C.DEFAULT_PROTOCOL_VERSION}},
+                headers={"Mcp-Session-Id": "s"},
+            )
+        ),
     )
 
     assert C.mcp_init() == ("s", "")
@@ -294,6 +303,19 @@ def test_a_downgraded_session_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(RuntimeError, match="for protocol 2025-11-25, it negotiated 2025-03-26"):
         _ = C.mcp_init(C.admin_endpoint().with_protocol("2025-11-25"))
+
+
+def test_a_reply_naming_no_revision_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The spec requires protocolVersion in the initialize result. Without it,
+    a per-revision job would file its checks under a revision never confirmed."""
+    monkeypatch.setattr(
+        C.requests,
+        "post",
+        const(json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s"})),
+    )
+
+    with pytest.raises(RuntimeError, match="its reply named no protocolVersion"):
+        _ = C.mcp_init(C.admin_endpoint().with_protocol("2024-11-05"))
 
 
 @pytest.mark.parametrize(

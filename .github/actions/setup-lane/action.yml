@@ -649,6 +649,16 @@ runs:
             echo "::warning::${plugin} does not boot under ${FEATURE_FLAGS}; deactivated: $(tail -1 <<<"$probe")"
             bin/console plugin:deactivate "$plugin" --no-interaction --no-ansi
             incompatible="${incompatible:+${incompatible},}${plugin}"
+            # The Store flag was exported as true above. Left there, the sc step
+            # would run ucp:config:set against a deactivated plugin and abort the
+            # lane, the opposite of what deactivating is for. A later write to
+            # either file wins, so this turns the Store suite off with a reason.
+            if [ "$plugin" = "SwagAgenticCommerce" ] && [ "${STORE_PLUGIN_OK}" = "true" ]; then
+              STORE_PLUGIN_OK=false
+              echo "STORE_PLUGIN_OK=false" >> "$GITHUB_ENV"
+              echo "store_plugin_ok=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Store/UCP suite skipped: SwagAgenticCommerce does not boot under ${FEATURE_FLAGS}."
+            fi
           done
           "$booted" || { echo "::error::still not booting under ${FEATURE_FLAGS} after deactivating ${incompatible}"; exit 1; }
           printf '%s\n' "${flag_env[@]}" >> .env.local

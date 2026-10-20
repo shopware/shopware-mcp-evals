@@ -455,11 +455,15 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
             "per-session toolset enablement no longer works and this suite has to change with it."
         )
     result = _as_object(_response(resp, 1).get("result"))
+    # A reply without protocolVersion is refused like a mismatch: the spec
+    # requires it, and without it nothing confirms the revision this session's
+    # checks are filed under.
     negotiated = result.get("protocolVersion")
-    if negotiated is not None and negotiated != endpoint.protocol_version:
+    if negotiated != endpoint.protocol_version:
+        said = f"it negotiated {negotiated}" if negotiated is not None else "its reply named no protocolVersion"
         raise RuntimeError(
             f"Asked the {endpoint.name} endpoint for protocol {endpoint.protocol_version}, "
-            f"it negotiated {negotiated}. Every check of this session would report the wrong revision."
+            f"{said}. Every check of this session would report a revision nobody confirmed."
         )
     instructions = result.get("instructions", "")
     return session_id, instructions if isinstance(instructions, str) else ""
