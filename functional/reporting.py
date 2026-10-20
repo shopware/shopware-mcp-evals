@@ -75,6 +75,17 @@ class Reporter:
         print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}")
         self.skipped += 1
 
+    def check_skip(self, label: str, reason: str) -> None:
+        """A structural check that did not run, recorded with why.
+
+        For a skip someone has to act on later — a check waiting for a server
+        change — where a bare count would let it be forgotten. Still `check`, so
+        it contributes nothing to the tool health map.
+        """
+        print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}: {reason}")
+        self.skipped += 1
+        self.records.append(FunctionalRecord(tool="check", label=label, status="skipped", reason=reason))
+
     def tool_skip(self, tool: str, label: str, reason: str) -> None:
         """A tool that did not run, and why.
 

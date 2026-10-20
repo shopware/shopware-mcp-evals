@@ -50,6 +50,7 @@ from functional.customer import CustomerUnavailable, provision
 from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
 from functional.principals import PROBE_ARGS, PROBE_TOOL, AdminApi, Principal, ProvisioningFailed, provisioned
 from functional.reporting import Reporter
+from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
 from mcp_client import (
     ALL_TOOLSETS,
     BASE,
@@ -1129,6 +1130,7 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
     verify_admin_discovery(rep, endpoint, entity_toolset, toolsets)
     schema_session, _ = mcp_init(endpoint=endpoint)
     verify_tool_schemas(rep, schema_session, endpoint)
+    verify_result_format(rep, endpoint, ADMIN_PROBES)
     run_admin_tools(rep, session, endpoint, args)
 
 
@@ -1148,6 +1150,7 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     ucp_default = _ucp_default_published(session, endpoint)
     verify_default_surface(rep, session, endpoint, also_expected=ucp_default)
     verify_connect_time_toolsets(rep, endpoint, also_expected=ucp_default)
+    verify_result_format(rep, endpoint, STORE_PROBES)
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")

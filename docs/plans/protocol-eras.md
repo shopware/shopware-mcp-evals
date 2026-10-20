@@ -1,6 +1,7 @@
 # Plan: test every MCP protocol revision, era and result format
 
-Status: in progress since 2026-10-20. Phase 0 is done; the rest is open.
+Status: in progress since 2026-10-20. Phases 0 and 1 are done, except the
+missing-privilege check of Phase 1; the rest is open.
 
 ## Why
 
@@ -65,7 +66,14 @@ Everything else depends on this, and it changes no verdict on its own.
 
 Default stays 2024-11-05 at the end of this phase, so CI numbers must not move.
 
-## Phase 1: functional suite across revisions
+## Phase 1: functional suite across revisions (done, one check open)
+
+As built: `functional/result_format.py` opens a session per revision itself, so
+there is no `--protocol` list and no CI loop. Every run of `functional.runner`
+covers the matrix, admin and store. A server older than #20948 records one skip
+naming the PR instead of failing every probe. The missing-privilege check is not
+built yet: it needs a principal from `principals.py`, so it belongs with Phase 2's
+principal binding.
 
 Free, no model, so it can run on every push of the eval workflow.
 
