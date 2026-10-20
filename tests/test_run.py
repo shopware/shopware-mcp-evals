@@ -24,13 +24,14 @@ def call_resp(payload: object) -> McpResponse:
     return {"result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}
 
 
-def flags(*, skip_media_upload: bool, skip_dev_tools: bool) -> argparse.Namespace:
+def flags(*, skip_media_upload: bool, skip_dev_tools: bool, deactivated: list[str] | None = None) -> argparse.Namespace:
     """The argparse attributes the admin flow reads."""
     return argparse.Namespace(
         endpoint="admin",
         skip_media_upload=skip_media_upload,
         skip_dev_tools=skip_dev_tools,
         provision_principals=False,
+        deactivated_plugins=deactivated or [],
     )
 
 
@@ -576,6 +577,24 @@ def test_run_admin_respects_skip_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     labels = " ".join(r["label"] for r in rep.records)
     assert "shopware-media-upload" not in labels
     assert "swag-dev-tools" not in labels
+
+
+def test_a_deactivated_merchant_plugin_skips_its_tools_and_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured on the next-major lane: setup-lane deactivated the plugin, and
+    every merchant check then failed with "Tool not found"."""
+    fake = FakeServer(ADMIN_TOOLSETS)
+    _wire(monkeypatch, fake)
+    rep = Reporter("admin", color=False)
+    args = flags(skip_media_upload=True, skip_dev_tools=True, deactivated=["SwagMcpMerchantTools"])
+    session, _ = fake.init()
+
+    R.run_admin_tools(rep, session, ADMIN, args)
+
+    merchant = [r for r in rep.records if r["tool"].startswith("merchant-")]
+    assert {r["tool"] for r in merchant} == {c.tool for c in R.MERCHANT_CHECKS}
+    assert all(
+        r["status"] == "skipped" and "SwagMcpMerchantTools is deactivated" in r.get("reason", "") for r in merchant
+    )
 
 
 # ---------------------------------------------------------------------------

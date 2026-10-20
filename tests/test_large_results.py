@@ -312,3 +312,35 @@ def test_a_session_that_will_not_open_for_the_read_back_fails_once(monkeypatch: 
     L.verify_pointer_binding(rep, ADMIN, URI, provision=True)
 
     assert statuses(rep) == {"large result pointer: opens a session to read it back": "fail"}
+
+
+def offloaded_spec(revision: str, *, expiry: bool = True) -> McpResponse:
+    """The same reply under the `v6.8.0.0` flag (`McpToolResultRenderer::specTexts`):
+    no data, the note as the summary, then the metadata as its own block. The
+    parser promoted `expiresAt` to the result's expiry, so it is gone from the
+    block and sent as `shopware/expiresAt` on every revision."""
+    block: JsonObject = {"resourceUri": URI, "responseSize": 346116}
+    content: list[object] = [
+        {"type": "text", "text": "Response too large."},
+        {"type": "text", "text": json.dumps({"_meta": block})},
+    ]
+    result_meta: JsonObject = {**STAMP, "shopware/resourceUri": URI, "shopware/responseSize": 346116}
+    if expiry:
+        result_meta["shopware/expiresAt"] = EXPIRES
+    if revision >= L.LINK_SINCE:
+        content.append({"type": "resource_link", "uri": URI, "name": "tool-result"})
+    return response({"content": content, "isError": False, "_meta": result_meta})
+
+
+@pytest.mark.parametrize("revision", L.OFFLOAD_REVISIONS)
+def test_the_spec_format_carries_the_expiry_in_the_result_meta_only(revision: str) -> None:
+    """Measured on the next-major lane: the text block has no expiresAt there,
+    and asking for one failed both revisions."""
+    assert L.offload_problems(read_result(offloaded_spec(revision)), revision) == []
+
+
+@pytest.mark.parametrize("revision", L.OFFLOAD_REVISIONS)
+def test_the_spec_format_without_an_expiry_is_named(revision: str) -> None:
+    problems = L.offload_problems(read_result(offloaded_spec(revision, expiry=False)), revision)
+
+    assert problems == [f"no shopware/expiresAt in the result _meta on {revision}"]

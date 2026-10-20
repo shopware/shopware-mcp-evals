@@ -875,15 +875,12 @@ def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str, p
     return token
 
 
-def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argparse.Namespace) -> None:
-    """Per-tool assertions on a session with NO toolsets enabled — each call to
-    a deferred tool doubles as a direct-callability assertion."""
-    ctx = gather_context(session, endpoint, args)
+MERCHANT_PLUGIN = "SwagMcpMerchantTools"
+DEACTIVATED = "{plugin} is deactivated on this lane: it does not boot under the lane's feature flags"
 
-    rep.section("Core tools")
-    run_checks(rep, session, endpoint, CORE_CHECKS, ctx)
 
-    rep.section("Merchant tools")
+def run_merchant_tools(rep: Reporter, session: str, endpoint: Endpoint, ctx: Context) -> None:
+    """The merchant plugin's checks, on a cart made of products that can be sold."""
     # Storefront-visible products, not just any product row. entity-search
     # returns products that are inactive, out of stock, or not in this channel,
     # and adding one answers `success: true` with an empty cart — so the checkout
@@ -896,6 +893,26 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     ctx["cart_product_ids"] = product_ids
     ctx["cart_token"] = create_cart_token(session, endpoint, channel, product_ids)
     run_checks(rep, session, endpoint, MERCHANT_CHECKS, ctx)
+
+
+def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argparse.Namespace) -> None:
+    """Per-tool assertions on a session with NO toolsets enabled — each call to
+    a deferred tool doubles as a direct-callability assertion."""
+    ctx = gather_context(session, endpoint, args)
+
+    rep.section("Core tools")
+    run_checks(rep, session, endpoint, CORE_CHECKS, ctx)
+
+    rep.section("Merchant tools")
+    if MERCHANT_PLUGIN in cast(list[str], args.deactivated_plugins):
+        # setup-lane deactivated it because the kernel would not boot with it
+        # under the lane's feature flags. Its tools are not registered, so each
+        # is a recorded skip: "Tool not found" would read as a broken tool, and
+        # the eval's tool-health gate has to know nobody tried them.
+        for check in MERCHANT_CHECKS:
+            rep.tool_skip(check.tool, check.tool, DEACTIVATED.format(plugin=MERCHANT_PLUGIN))
+    else:
+        run_merchant_tools(rep, session, endpoint, ctx)
 
     rep.section("Dev tools")
     if cast(bool, args.skip_dev_tools):
@@ -1327,6 +1344,15 @@ def main() -> int:
     )
     parser.add_argument("--skip-media-upload", action="store_true")
     parser.add_argument("--skip-dev-tools", action="store_true")
+    parser.add_argument(
+        "--deactivated-plugins",
+        type=lambda value: [name for name in value.split(",") if name],
+        default=[],
+        help=(
+            "Comma-separated plugins setup-lane deactivated because they do not boot under the lane's "
+            "feature flags (its incompatible_plugins output). Their checks are recorded as skips naming that."
+        ),
+    )
     parser.add_argument(
         "--allow-mutations",
         action="store_true",

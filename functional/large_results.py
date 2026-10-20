@@ -83,14 +83,18 @@ def offload_problems(outcome: ToolOutcome, revision: str) -> list[str]:
         problems.append(f"the pointer is not a signed token: {link.uri}")
     if outcome.data is not None:
         problems.append("data was sent inline next to the pointer")
-    if outcome.meta.get("expiresAt") is None:
+    # The legacy text keeps the expiry in its envelope. The spec format (the
+    # `v6.8.0.0` flag) does not: McpToolResultParser promotes it to the result's
+    # expiry, which only the result `_meta` carries, on every revision.
+    spec = outcome.shape == "spec"
+    if not spec and outcome.meta.get("expiresAt") is None:
         problems.append("no expiresAt next to the pointer in the text")
     has_block = any(lk.source == "resource_link" for lk in outcome.links)
+    if revision >= LINK_SINCE and not has_block:
+        problems.append(f"no resource_link block on {revision}")
+    if (spec or revision >= LINK_SINCE) and META_PREFIX + "expiresAt" not in outcome.result_meta:
+        problems.append(f"no shopware/expiresAt in the result _meta on {revision}")
     if revision >= LINK_SINCE:
-        if not has_block:
-            problems.append(f"no resource_link block on {revision}")
-        if META_PREFIX + "expiresAt" not in outcome.result_meta:
-            problems.append(f"no shopware/expiresAt in the result _meta on {revision}")
         text_uri = outcome.meta.get("resourceUri")
         if has_block and text_uri is not None and text_uri != link.uri:
             problems.append("the resource_link block and the text name different pointers")

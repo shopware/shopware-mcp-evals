@@ -194,6 +194,14 @@ can still be deactivated, up to six. Measured locally under `V6_8_0_0`:
 SwagMcpMerchantTools fails first (its `services.xml` is deprecated), then
 SwagExtensionStore, which the CI lane does not install.
 
+First CI run (PR #99): core held up under the flag, and the suite needed two
+corrections. Under the spec format the expiry of a stored result is only
+`shopware/expiresAt` in the result `_meta`, because `McpToolResultParser`
+promotes it out of the text's metadata, so the check looks there for both
+revisions. And the deactivated SwagMcpMerchantTools left its checks failing
+with "Tool not found"; `--deactivated-plugins` now records them as skips naming
+the deactivation.
+
 ## Phase 5: stateless era (2026-07-28) (probe built)
 
 Core does not serve it yet, so this starts as a probe and grows into the ADR's
