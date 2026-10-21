@@ -48,7 +48,7 @@ import yaml
 
 import lane
 import ucp
-from eval.assertions import args_mismatch, check, inband_error
+from eval.assertions import args_mismatch, check, classify_error
 from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
     BOLD,
@@ -82,6 +82,7 @@ from eval.result_schema import (
 from eval.scoring import (
     count_rate_limited,
     discovery_summary,
+    error_grading,
     executed,
     gate_verdict,
     is_correct,
@@ -92,7 +93,9 @@ from mcp_client import (
     ADMIN,
     ALL_TOOLSETS,
     BASE,
+    DEFAULT_PROTOCOL_VERSION,
     META_TOOLS,
+    PROTOCOL_REVISIONS,
     SW_ACCESS_KEY,
     SW_BASE_URL,
     SW_SC_ACCESS_KEY,
@@ -102,12 +105,11 @@ from mcp_client import (
     enable_toolset,
     endpoint_by_name,
     mcp_call,
-    mcp_call_error,
     mcp_fetch_context_prompts,
     mcp_init,
-    mcp_result_text,
     mcp_tools_list_all,
 )
+from mcp_result import ToolOutcome, read_result
 from ownership import CORE, PROMPT_SETS, breakdown, owner_of
 from toolclass import classify, is_executable, prepare_call
 
@@ -460,7 +462,7 @@ class SearchRow(TypedDict):
     rank: int
 
 
-def _search_rows(result_text: str) -> tuple[list[SearchRow], int | None]:
+def _search_rows(payload: JsonObject) -> tuple[list[SearchRow], int | None]:
     """Ranked rows from shopware-tool-search, plus the candidate pool size.
 
     Each row is {tool, score, matchedIn, rank}, `rank` being the 1-indexed
@@ -470,10 +472,6 @@ def _search_rows(result_text: str) -> tuple[list[SearchRow], int | None]:
     it. The server already computes and sends `score`/`matchedIn`; this used to
     drop both on the floor.
     """
-    try:
-        payload = as_object(cast(object, json.loads(result_text)))
-    except (json.JSONDecodeError, TypeError):
-        return [], None
     rows: list[SearchRow] = []
     for position, raw in enumerate(as_list(payload.get("data")), start=1):
         row = as_object(raw)
@@ -532,6 +530,12 @@ class DiscoveryState:
     # answers correctly but returns 40k of JSON is expensive for every client,
     # and nothing else in the suite would notice.
     payload_bytes: int = 0
+    # Bytes of `structuredContent` alongside that text, from 2025-06-18 on. Not
+    # sent to the model here, but a client that passes both pays for the data
+    # twice, and this is what that second copy weighs.
+    structured_bytes: int = 0
+    # An answering call came back as a pointer to a stored result.
+    offloaded: bool = False
     steps: int = 0
     surface_tokens: int = 0
     surface_tokens_peak: int = 0
@@ -541,13 +545,13 @@ class DiscoveryState:
         # except here — which is how cache writes were first dropped per fixture.
         add_tokens(self.tokens, turn_tokens)
 
-    def record_search(self, result_text: str, expected_tool: str | None, catalog: dict[str, ToolDef]) -> bool:
+    def record_search(self, payload: JsonObject, expected_tool: str | None, catalog: dict[str, ToolDef]) -> bool:
         """Absorb a shopware-tool-search result. Tracks whether the expected tool
         was surfaced and the best rank it ever reached (a later, vaguer query
         cannot make the catalogue look worse than it is), and makes any
         search-surfaced tool callable next turn. Returns whether the catalog grew.
         """
-        rows, candidates = _search_rows(result_text)
+        rows, candidates = _search_rows(payload)
         hit = any(r["tool"].get("name") == expected_tool for r in rows)
         self.search_hit = hit if self.search_hit is None else (self.search_hit or hit)
         if candidates is not None:
@@ -634,11 +638,20 @@ class DiscoveryState:
             "latency_s": latency,
             "tokens": self.tokens,
             "payload_bytes": self.payload_bytes,
+            "structured_bytes": self.structured_bytes,
+            "offloaded": self.offloaded,
             "surface_tokens": self.surface_tokens,
             "surface_tokens_peak": self.surface_tokens_peak,
             "notes": fixture.get("notes", ""),
         }
         return result
+
+
+def structured_bytes(outcome: ToolOutcome) -> int:
+    """The compact JSON size of a result's `structuredContent`; 0 without one."""
+    if not outcome.has_structured:
+        return 0
+    return len(json.dumps(outcome.structured, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
 
 
 def run_fixture_discovery(
@@ -786,15 +799,15 @@ def run_fixture_discovery(
                 continue
 
             # Execute discovery meta-tools for real and feed results back.
-            resp = mcp_call(session_id, call["name"], call["input"], endpoint=endpoint)
-            err = mcp_call_error(resp)
-            result_text = mcp_result_text(resp) or (f"Error: {err}" if err else "")
+            outcome = read_result(mcp_call(session_id, call["name"], call["input"], endpoint=endpoint))
+            result_text = outcome.text or (f"Error: {outcome.failure}" if outcome.error else "")
             st.payload_bytes += len(result_text.encode("utf-8"))
+            st.structured_bytes += structured_bytes(outcome)
             tool_results.append((call["id"], result_text))
             st.meta_calls.append(MetaCall(tool=call["name"], input=call["input"], result_preview=result_text[:300]))
             if call["name"] == "shopware-tool-search":
-                catalog_changed |= st.record_search(result_text, expected_tool, catalog)
-            if call["name"] == "shopware-toolset-enable" and not err:
+                catalog_changed |= st.record_search(outcome.envelope, expected_tool, catalog)
+            if call["name"] == "shopware-toolset-enable" and outcome.ok:
                 toolset = str(call["input"].get("toolset", ""))
                 catalog_changed |= st.record_enable(toolset, session_id, endpoint, catalog)
 
@@ -889,31 +902,35 @@ def _handle_answering_call(
         st.stop = True
         return True
 
-    resp = mcp_call(session_id, call["name"], args, endpoint=endpoint)
-    err = mcp_call_error(resp)
-    result_text = mcp_result_text(resp) or ""
+    outcome = read_result(mcp_call(session_id, call["name"], args, endpoint=endpoint))
+    result_text = outcome.text
     st.payload_bytes += len(result_text.encode("utf-8"))
+    st.structured_bytes += structured_bytes(outcome)
     st.execution = "executed"
 
-    ok, reason = check(fixture.get("expect_result"), result_text, err)
+    ok, reason = check(fixture.get("expect_result"), outcome)
     # The server's own words, truncated. Without this the report could say a call
     # failed but never what the server said, so diagnosing it meant re-running
     # with a debugger attached.
     #
-    # `err or inband_error(...)` for the same reason check() folds the two
-    # together: the admin merchant/entity tools answer a rejected call with
-    # `isError: false` and `{"success": false, ...}` in the body, so `err` is
-    # empty and only the in-band message exists. Recording just `err` is why
-    # every failed attempt in the last run read `tool_error` with error="" —
-    # the five gating failures had to be diagnosed from the fixture text.
-    # In-band first, as in check(): with `isError: true` the same body also
-    # arrives as `err`, raw.
-    server_text = inband_error(result_text) or err or ""
+    # The described failure, not the transport error alone: the admin
+    # merchant/entity tools answer a rejected call with `isError: false` and
+    # `{"success": false, ...}` in the body, so only the in-band message exists.
+    # Recording just the transport error is why every failed attempt in one run
+    # read `tool_error` with error="" — the five gating failures had to be
+    # diagnosed from the fixture text.
+    server_text = outcome.failure
     if mismatch:
         # Missed arguments win over the server's verdict, refused or not, and the
         # server's text stays next to the mismatch so neither is lost.
         ok, reason = False, "wrong_args"
     attempt["executed"] = True
+    if outcome.links:
+        attempt["offloaded"] = True
+        st.offloaded = True
+    if outcome.error is not None:
+        attempt["error_code"] = outcome.error.code
+        attempt["graded_by"] = classify_error(outcome)[1]
     attempt["ok"] = ok
     attempt["reason"] = reason
     error = f"{mismatch}; server: {server_text}" if mismatch and server_text else mismatch or server_text
@@ -930,7 +947,7 @@ def _handle_answering_call(
     # actually said and let the model correct itself — that recovery is the thing
     # being measured, so no hint is injected.
     st.fail_reason = reason if correct else "wrong_tool"
-    tool_results.append((call["id"], result_text or f"Error: {err}"))
+    tool_results.append((call["id"], result_text or f"Error: {outcome.failure}"))
     return False
 
 
@@ -1176,6 +1193,12 @@ def write_summary_row(
 
     if throttled:
         print(f"\n::warning::{throttled} fixture(s) hit provider rate limits — results are understated.")
+    if offloaded := [r["id"] for r in graded if r.get("offloaded")]:
+        print(
+            f"\n::warning::{len(offloaded)} fixture(s) were answered with a result stored behind a pointer, which "
+            f"the model cannot read (no resources/read is offered): {', '.join(offloaded)}. Tighten the fixture, "
+            "or the tool's default limit, rather than grading a preview."
+        )
     return row
 
 
@@ -1570,6 +1593,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Which MCP endpoint to test (default admin). 'store' uses the Store API + UCP tools.",
     )
     parser.add_argument(
+        "--protocol-version",
+        choices=PROTOCOL_REVISIONS,
+        default=DEFAULT_PROTOCOL_VERSION,
+        help=(
+            f"MCP revision every session negotiates (default {DEFAULT_PROTOCOL_VERSION}). From 2025-06-18 the "
+            "server adds structuredContent and resource_link blocks; what the model reads stays the text blocks, "
+            "and structured_bytes records what the second copy weighs."
+        ),
+    )
+    parser.add_argument(
         "--fixtures", help="Fixtures file (default: fixtures.yaml, or fixtures_store.yaml for --endpoint store)"
     )
     parser.add_argument("--category", help="Run only fixtures of this category")
@@ -1702,9 +1735,8 @@ def _first_sales_channel_id(endpoint: Endpoint) -> str | None:
     """
     session_id, _ = mcp_init(endpoint=endpoint)
     resp = mcp_call(session_id, "shopware-entity-search", {"entity": "sales_channel", "limit": 25}, endpoint=endpoint)
-    try:
-        body = as_object(cast(object, json.loads(mcp_result_text(resp) or "")))
-    except (json.JSONDecodeError, TypeError):
+    body = read_result(resp).envelope
+    if not body:
         return None
     raw = body.get("data") or body.get("elements")
     keyed = as_object(raw)
@@ -1792,11 +1824,7 @@ def _ucp_call(endpoint: Endpoint) -> ucp.ToolCall:
     session_id, _ = mcp_init(endpoint=endpoint)
 
     def call(tool: str, arguments: JsonObject) -> JsonObject:
-        text = mcp_result_text(mcp_call(session_id, tool, arguments, endpoint=endpoint)) or ""
-        try:
-            return as_object(cast(object, json.loads(text)))
-        except (json.JSONDecodeError, TypeError):
-            return {}
+        return read_result(mcp_call(session_id, tool, arguments, endpoint=endpoint)).envelope
 
     return call
 
@@ -1983,6 +2011,7 @@ def build_report(
     max_steps: int,
     arm_results: dict[str, list[FixtureResult]] | None = None,
     prompt_inventory: PromptInventory | None = None,
+    protocol_version: str = DEFAULT_PROTOCOL_VERSION,
 ) -> Report:
     """The JSON report. Pure: no writing, so its shape can be asserted directly."""
     report: Report = {
@@ -1998,6 +2027,7 @@ def build_report(
         # without it.
         "context_prompt": cast(JsonObject, cast(object, prompt_inventory or {})),
         "max_steps": max_steps,
+        "protocol_version": protocol_version,
     }
     if discovery is not None:
         report["modes"]["discovery"] = ModeBlock(
@@ -2031,6 +2061,7 @@ def build_report(
     # via the CLI, but an empty table is the honest answer rather than a crash for
     # a direct caller.
     report["by_tier"] = breakdown(executed(discovery or []))
+    report["error_grading"] = error_grading(discovery or [])
     # What this run cost, in dollars and in the volume behind them. Recorded in
     # the report rather than only printed so cost_drift.py can compare a run
     # against its predecessor without re-deriving anything.
@@ -2068,6 +2099,17 @@ def print_gate(verdict: GateVerdict, args: argparse.Namespace) -> None:
         print("  too many fixtures errored to trust this run — fix the server/provider, then re-run.")
 
 
+def print_error_grading(results: list[FixtureResult]) -> None:
+    """Which owners' tools answered an error without a code that says what kind,
+    so the message was read instead. Counts errored calls, passing or not: a
+    not-found told in prose passes the accepted tier and still counts here.
+    Silent when every error carried a code."""
+    prose = {owner: counts["prose"] for owner, counts in error_grading(results).items() if counts["prose"]}
+    if prose:
+        listed = ", ".join(f"{owner} {n}" for owner, n in sorted(prose.items()))
+        print(f"  Errored calls told apart by their message, not an error code: {listed}")
+
+
 def run_suite(args: argparse.Namespace) -> int:
     """One eval run end to end. Returns the process exit code."""
     provider = cast(str, args.provider)
@@ -2077,7 +2119,8 @@ def run_suite(args: argparse.Namespace) -> int:
     no_system_prompt = cast(bool, args.no_system_prompt)
     model = resolve_model(provider, cast(str | None, args.model))
     modes = parse_modes(cast(str, args.modes))
-    endpoint = endpoint_by_name(endpoint_name)
+    # with_protocol keeps the Store endpoint's context token: same cart, other revision.
+    endpoint = endpoint_by_name(endpoint_name).with_protocol(cast(str, args.protocol_version))
     credential = require_credentials(provider, endpoint_name)
     client = build_client(provider, credential)
     fixtures = load_fixtures(
@@ -2087,7 +2130,7 @@ def run_suite(args: argparse.Namespace) -> int:
     )
 
     print(f"{BOLD}Shopware MCP LLM Eval (v2 discovery){RESET}")
-    print(f"Server:   {SW_BASE_URL}  ({endpoint.name} endpoint)")
+    print(f"Server:   {SW_BASE_URL}  ({endpoint.name} endpoint, MCP {endpoint.protocol_version})")
     print(f"Provider: {provider}")
     print(f"Model:    {model}")
     print(f"Modes:    {', '.join(modes)}")
@@ -2173,6 +2216,7 @@ def run_suite(args: argparse.Namespace) -> int:
                 max_steps,
                 arm_results,
                 prompt_inventory,
+                endpoint.protocol_version,
             ),
             indent=2,
         )
@@ -2193,6 +2237,7 @@ def run_suite(args: argparse.Namespace) -> int:
         max_error_rate=cast(float, args.max_error_rate),
     )
     print_gate(verdict, args)
+    print_error_grading(results_discovery or [])
     write_summary_row(provider, model, results_discovery, verdict["rate"], verdict["ok"], args)
     return 0 if verdict["ok"] else 1
 

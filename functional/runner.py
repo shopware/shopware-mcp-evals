@@ -35,7 +35,7 @@ import requests
 
 import lane
 import ucp
-from eval.assertions import inband_error, is_not_found
+from eval.assertions import is_not_found
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
 from functional.checks import (
     CORE_CHECKS,
@@ -48,12 +48,25 @@ from functional.checks import (
 )
 from functional.customer import CustomerUnavailable, provision
 from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
-from functional.principals import PROBE_ARGS, PROBE_TOOL, AdminApi, Principal, ProvisioningFailed, provisioned
+from functional.large_results import NO_STORE_OFFLOAD, verify_large_results
+from functional.principals import (
+    PROBE_ARGS,
+    PROBE_TOOL,
+    UNPRIVILEGED_ARGS,
+    AdminApi,
+    Principal,
+    ProvisioningFailed,
+    provisioned,
+)
 from functional.reporting import Reporter
+from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
+from functional.stateless import verify_stateless_era
 from mcp_client import (
     ALL_TOOLSETS,
     BASE,
+    DEFAULT_PROTOCOL_VERSION,
     META_TOOLS,
+    PROTOCOL_REVISIONS,
     SW_ACCESS_KEY,
     SW_BASE_URL,
     SW_SC_ACCESS_KEY,
@@ -64,14 +77,13 @@ from mcp_client import (
     enable_toolset,
     endpoint_by_name,
     mcp_call,
-    mcp_call_error,
     mcp_init,
     mcp_list_names,
-    mcp_result_text,
     mcp_tools_list_all,
     mcp_toolsets_list,
     store_endpoint,
 )
+from mcp_result import read_result
 
 # No extra default-surface tools. A named constant because basedpyright rejects
 # a frozenset() call in a parameter default (reportCallInDefaultInitializer).
@@ -140,8 +152,7 @@ def assert_tool(
     error and some content", which is blind to the way UCP reports every failure:
     HTTP 200, no JSON-RPC error, and `{"success": false}` in the body. All 27
     admin checks were green over a mechanism that could not have seen a single
-    Store failure. `eval/preflight.py` already had this right; this is the same
-    `inband_error` and the same reasoning.
+    Store failure. `mcp_result` reads every failure the same way for both.
 
     `harness_error` maps an error to the reason it is the environment's failure
     (see ToolCheck.harness_errors); such a failure is recorded as a check, not
@@ -151,28 +162,27 @@ def assert_tool(
     ToolCheck.not_found_passes): "not found" is then the right answer.
     """
     label = label or tool
-    resp = mcp_call(session, tool, args, endpoint=endpoint)
-    error = (resp.get("error") or {}).get("message", "")
-    content = (resp.get("result") or {}).get("content", [])
-    text = mcp_result_text(resp)
-    failure = error or (inband_error(text) if content else "")
+    outcome = read_result(mcp_call(session, tool, args, endpoint=endpoint))
+    text = outcome.text
+    # A JSON-RPC error, `isError`, and an in-band `{"success": false}` alike.
+    # `isError` with plain text used to pass here: no JSON-RPC error, no envelope
+    # to find `success: false` in, and some content, so the tool was green.
+    failure = outcome.failure
     if failure and not_found_passes and is_not_found(failure):
         rep.tool_pass(tool, label, f"not found, as expected for a phantom id: {failure[:80]}")
     elif failure and harness_error and (why := harness_error(failure)):
         rep.check_fail(label, f"{why}: {failure}")
-    elif error:
-        rep.tool_fail(tool, label, error)
-    elif not content:
+    elif failure:
+        rep.tool_fail(tool, label, failure)
+    elif not outcome.texts and not outcome.links:
         rep.tool_fail(tool, label, "empty content in response")
-    elif in_band := inband_error(text):
-        rep.tool_fail(tool, label, in_band)
-    elif contains and contains not in (text or ""):
+    elif contains and contains not in text:
         # The tool answered, and answered with the wrong thing. A reader pointed
         # at the wrong file returns an empty result and would otherwise pass.
         rep.tool_fail(tool, label, f"response did not contain {contains!r}")
     else:
         rep.tool_pass(tool, label, text[:120])
-        return _payload(resp)
+        return outcome.envelope
     return {}
 
 
@@ -181,20 +191,12 @@ def assert_tool_error(
 ) -> None:
     """Call a tool and expect it to FAIL (protocol error, isError, or a
     {"success": false} payload), optionally containing `expected`."""
-    resp = mcp_call(session, tool, args, endpoint=endpoint)
-    msg = (resp.get("error") or {}).get("message", "")
-    result = resp.get("result") or {}
-    text = mcp_result_text(resp)
-    is_error = bool(msg) or bool(result.get("isError"))
-    if not is_error:
-        try:
-            is_error = as_object(cast(object, json.loads(text))).get("success") is False
-        except (ValueError, TypeError):
-            pass
-    if not is_error:
+    outcome = read_result(mcp_call(session, tool, args, endpoint=endpoint))
+    said = f"{outcome.failure} {outcome.text}".strip()
+    if outcome.ok:
         rep.check_fail(label, "expected an error response, got: NO_ERROR")
-    elif expected and expected not in (msg + text):
-        rep.check_fail(label, f"expected an error response, got: WRONG_ERROR:{(msg + ' ' + text)[:120]}")
+    elif expected and expected not in said:
+        rep.check_fail(label, f"expected an error response, got: WRONG_ERROR:{said[:120]}")
     else:
         rep.check_pass(label)
 
@@ -446,12 +448,8 @@ def _search_payload_tools(session: str, endpoint: Endpoint) -> list[JsonObject]:
     """
     seen: dict[str, JsonObject] = {}
     for query in ("list", "skills", "search", "config", "order", "product"):
-        payload = mcp_result_text(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint))
-        try:
-            data = as_list(as_object(cast(object, json.loads(payload))).get("data"))
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            continue
-        for row in data:
+        envelope = read_result(mcp_call(session, "shopware-tool-search", {"query": query}, endpoint=endpoint)).envelope
+        for row in as_list(envelope.get("data")):
             tool = as_object(as_object(row).get("tool"))
             name = str(tool.get("name", ""))
             if name:
@@ -799,7 +797,7 @@ def newest_log_file(session: str, endpoint: Endpoint) -> tuple[str, str]:
         # the reader to the seeding step, which is fine.
         return "", f"swag-dev-tools-log-search is not callable: {error}"
 
-    text = mcp_result_text(reply)
+    text = read_result(reply).text
     marker = "Available files:"
     if marker not in (text or ""):
         # The tool answered, and not with the list this parse depends on. Naming
@@ -831,15 +829,15 @@ def find_log_probe(session: str, endpoint: Endpoint, files_hint: str) -> tuple[s
     else's shop has no probe and demanding it would fail every instance this
     suite did not build.
     """
-    probe = mcp_result_text(
+    probe = read_result(
         mcp_call(
             session,
             "swag-dev-tools-log-search",
             {"query": LOG_PROBE_TEXT, "limit": 1, "file": files_hint},
             endpoint=endpoint,
         )
-    )
-    if LOG_PROBE_TEXT in (probe or ""):
+    ).text
+    if LOG_PROBE_TEXT in probe:
         return files_hint, True
     return files_hint, False
 
@@ -877,15 +875,12 @@ def create_cart_token(session: str, endpoint: Endpoint, sales_channel_id: str, p
     return token
 
 
-def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argparse.Namespace) -> None:
-    """Per-tool assertions on a session with NO toolsets enabled — each call to
-    a deferred tool doubles as a direct-callability assertion."""
-    ctx = gather_context(session, endpoint, args)
+MERCHANT_PLUGIN = "SwagMcpMerchantTools"
+DEACTIVATED = "{plugin} is deactivated on this lane: it does not boot under the lane's feature flags"
 
-    rep.section("Core tools")
-    run_checks(rep, session, endpoint, CORE_CHECKS, ctx)
 
-    rep.section("Merchant tools")
+def run_merchant_tools(rep: Reporter, session: str, endpoint: Endpoint, ctx: Context) -> None:
+    """The merchant plugin's checks, on a cart made of products that can be sold."""
     # Storefront-visible products, not just any product row. entity-search
     # returns products that are inactive, out of stock, or not in this channel,
     # and adding one answers `success: true` with an empty cart — so the checkout
@@ -898,6 +893,26 @@ def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argpa
     ctx["cart_product_ids"] = product_ids
     ctx["cart_token"] = create_cart_token(session, endpoint, channel, product_ids)
     run_checks(rep, session, endpoint, MERCHANT_CHECKS, ctx)
+
+
+def run_admin_tools(rep: Reporter, session: str, endpoint: Endpoint, args: argparse.Namespace) -> None:
+    """Per-tool assertions on a session with NO toolsets enabled — each call to
+    a deferred tool doubles as a direct-callability assertion."""
+    ctx = gather_context(session, endpoint, args)
+
+    rep.section("Core tools")
+    run_checks(rep, session, endpoint, CORE_CHECKS, ctx)
+
+    rep.section("Merchant tools")
+    if MERCHANT_PLUGIN in cast(list[str], args.deactivated_plugins):
+        # setup-lane deactivated it because the kernel would not boot with it
+        # under the lane's feature flags. Its tools are not registered, so each
+        # is a recorded skip: "Tool not found" would read as a broken tool, and
+        # the eval's tool-health gate has to know nobody tried them.
+        for check in MERCHANT_CHECKS:
+            rep.tool_skip(check.tool, check.tool, DEACTIVATED.format(plugin=MERCHANT_PLUGIN))
+    else:
+        run_merchant_tools(rep, session, endpoint, ctx)
 
     rep.section("Dev tools")
     if cast(bool, args.skip_dev_tools):
@@ -965,15 +980,14 @@ def _searched(session: str, endpoint: Endpoint) -> set[str]:
 
 def _call_error(resp: McpResponse) -> str:
     """Why a call did not run, including the in-band `{"success": false}` kind."""
-    # In-band first: an `isError: true` result carries the same body as raw
-    # JSON, and only the parsed form names the code (see eval.assertions.check).
-    return inband_error(mcp_result_text(resp)) or mcp_call_error(resp) or ""
+    return read_result(resp).failure
 
 
 def _refused_by_allowlist(resp: McpResponse) -> bool:
     # Named, not just "errored": an argument-validation error is also an error,
     # and counting it as a refusal would pass a server that enforces nothing.
-    return "allowlist" in ((resp.get("error") or {}).get("message", "") + mcp_result_text(resp)).lower()
+    outcome = read_result(resp)
+    return "allowlist" in f"{outcome.failure} {outcome.text}".lower()
 
 
 def _names(items: set[str]) -> str:
@@ -1002,7 +1016,9 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
         else:
             rep.check_fail(f"allowlist: {who}", f"expected it {claim}, but {detail}")
 
-    endpoint = admin_endpoint(principal.access_key, principal.secret_key, base_url=suite.base_url)
+    endpoint = admin_endpoint(principal.access_key, principal.secret_key, base_url=suite.base_url).with_protocol(
+        suite.protocol_version
+    )
     try:
         session, _ = mcp_init(endpoint=endpoint)
     except (RuntimeError, requests.exceptions.RequestException) as exc:
@@ -1090,6 +1106,16 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
         if expect == "partial" and control:
             refused = _refused_by_allowlist(mcp_call(session, control, {}, endpoint=endpoint))
             check(refused, f"is refused {control}", "the call was not refused by the allowlist")
+        if expect == "partial" and principal.user:
+            # Past the allowlist, the role decides, and its refusal carries a
+            # stable code (shopware/shopware#20948) a client can act on.
+            denied = read_result(mcp_call(session, PROBE_TOOL, UNPRIVILEGED_ARGS, endpoint=endpoint))
+            code = denied.error.code if denied.error else None
+            check(
+                code == "missing_privilege",
+                f"is refused {PROBE_TOOL} on product with missing_privilege",
+                f"the call answered {code or 'ok'}: {denied.failure[:120]}",
+            )
     except (RuntimeError, requests.exceptions.RequestException) as exc:
         rep.check_fail(f"allowlist: {who}", f"aborted: {exc}")
 
@@ -1135,6 +1161,29 @@ def verify_allowlist_matrix(rep: Reporter, endpoint: Endpoint, provision: bool) 
         rep.check_fail("allowlist matrix", f"could not provision the principals: {exc}")
 
 
+COMPARED_ONCE = (
+    "the checks that compare protocol revisions run once, in the {default} suite; "
+    "this run is the whole suite at {revision}"
+)
+
+
+def compares_revisions(rep: Reporter, endpoint: Endpoint) -> bool:
+    """Whether this run owns the checks that span revisions: the result format
+    on each, large results on each, and the stateless probe.
+
+    They open their own sessions on every revision whatever this run negotiated,
+    so the CI matrix running the suite once per revision would repeat them in
+    every job. The default revision's run keeps them; the others record why not."""
+    if endpoint.protocol_version == DEFAULT_PROTOCOL_VERSION:
+        return True
+    rep.section("Across protocol revisions")
+    rep.check_skip(
+        "result format, large results, stateless era",
+        COMPARED_ONCE.format(default=DEFAULT_PROTOCOL_VERSION, revision=endpoint.protocol_version),
+    )
+    return False
+
+
 def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, session: str) -> None:
     verify_allowlist_matrix(rep, endpoint, provision=cast(bool, args.provision_principals))
     verify_default_surface(rep, session, endpoint)
@@ -1143,6 +1192,10 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
     verify_admin_discovery(rep, endpoint, entity_toolset, toolsets)
     schema_session, _ = mcp_init(endpoint=endpoint)
     verify_tool_schemas(rep, schema_session, endpoint)
+    if compares_revisions(rep, endpoint):
+        verify_result_format(rep, endpoint, ADMIN_PROBES)
+        verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
+        verify_stateless_era(rep, endpoint)
     run_admin_tools(rep, session, endpoint, args)
 
 
@@ -1162,6 +1215,10 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     ucp_default = _ucp_default_published(session, endpoint)
     verify_default_surface(rep, session, endpoint, also_expected=ucp_default)
     verify_connect_time_toolsets(rep, endpoint, also_expected=ucp_default)
+    if compares_revisions(rep, endpoint):
+        verify_result_format(rep, endpoint, STORE_PROBES)
+        rep.check_skip("large results (store)", NO_STORE_OFFLOAD)
+        verify_stateless_era(rep, endpoint)
 
     # --- toolset taxonomy ---
     rep.section("v2: Toolset taxonomy")
@@ -1252,10 +1309,10 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     # order-get returns an order at all, and its fixtures would be graded on a
     # tool that has only ever said no.
     rep.section("UCP buyer journey — authenticated customer")
-    run_customer_journey(rep, allow_mutations)
+    run_customer_journey(rep, endpoint, allow_mutations)
 
 
-def run_customer_journey(rep: Reporter, allow_mutations: bool) -> None:
+def run_customer_journey(rep: Reporter, endpoint: Endpoint, allow_mutations: bool) -> None:
     """The journey again, logged in as a real customer.
 
     A failure to provision is reported against `order-get` specifically, not
@@ -1278,7 +1335,9 @@ def run_customer_journey(rep: Reporter, allow_mutations: bool) -> None:
     rep.info(f"  shopping as {email}")
     # A second endpoint rather than a mutated one: the guest journey's cart lives
     # on the process-wide token, and rebuilding that would silently abandon it.
-    customer_endpoint = store_endpoint(context_token=context_token)
+    # On the suite's revision: a rebuilt endpoint starts at the default, and the
+    # customer half of a 2024-11-05 job would quietly run at 2025-11-25.
+    customer_endpoint = store_endpoint(context_token=context_token).with_protocol(endpoint.protocol_version)
     session, _ = mcp_init(endpoint=customer_endpoint)
     enable_all_toolsets(session, endpoint=customer_endpoint)
 
@@ -1306,8 +1365,23 @@ def require(name: str, value: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Shopware MCP functional test runner")
     parser.add_argument("--endpoint", choices=["admin", "store"], default="admin")
+    parser.add_argument(
+        "--protocol-version",
+        choices=PROTOCOL_REVISIONS,
+        default=DEFAULT_PROTOCOL_VERSION,
+        help=f"MCP revision the suite's sessions negotiate (default {DEFAULT_PROTOCOL_VERSION}).",
+    )
     parser.add_argument("--skip-media-upload", action="store_true")
     parser.add_argument("--skip-dev-tools", action="store_true")
+    parser.add_argument(
+        "--deactivated-plugins",
+        type=lambda value: [name for name in value.split(",") if name],
+        default=[],
+        help=(
+            "Comma-separated plugins setup-lane deactivated because they do not boot under the lane's "
+            "feature flags (its incompatible_plugins output). Their checks are recorded as skips naming that."
+        ),
+    )
     parser.add_argument(
         "--allow-mutations",
         action="store_true",
@@ -1329,16 +1403,16 @@ def main() -> int:
     endpoint_name = cast(str, args.endpoint)
 
     require("SW_BASE_URL", SW_BASE_URL)
-    endpoint = endpoint_by_name(endpoint_name)
+    endpoint = endpoint_by_name(endpoint_name).with_protocol(cast(str, args.protocol_version))
     if endpoint_name == "admin":
         require("SW_ACCESS_KEY", SW_ACCESS_KEY)
         require("SW_SECRET_ACCESS_KEY", SW_SECRET_ACCESS_KEY)
     else:
         require("SW_SC_ACCESS_KEY (sales-channel access key)", SW_SC_ACCESS_KEY)
 
-    rep = Reporter(SW_BASE_URL)
+    rep = Reporter(SW_BASE_URL, protocol_version=endpoint.protocol_version)
     rep.banner(f"Shopware MCP Functional Tests — {endpoint_name} (v2 discovery)")
-    rep.info(f"Endpoint: {endpoint.url}\n")
+    rep.info(f"Endpoint: {endpoint.url} (MCP {endpoint.protocol_version})\n")
     rep.info("Initializing MCP session...")
     try:
         session, _ = mcp_init(endpoint=endpoint)

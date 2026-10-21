@@ -22,20 +22,20 @@ every call site — it writes to the shop, which is only ever acceptable on an
 instance that is about to be destroyed.
 """
 
-import json
 from typing import cast
 
 from eval.result_schema import JsonObject, McpResponse, as_object
-from mcp_client import Endpoint, mcp_call, mcp_result_text
+from mcp_client import Endpoint, mcp_call
+from mcp_result import read_result
 
 
 def payload(resp: McpResponse) -> JsonObject:
-    """The JSON object carried in a tools/call text content block, or {}."""
-    try:
-        parsed = cast(object, json.loads(mcp_result_text(resp) or "{}"))
-    except (ValueError, TypeError):
-        return {}
-    return cast(JsonObject, parsed) if isinstance(parsed, dict) else {}
+    """The tool reply as a legacy `{"success", "data", "_meta"}` envelope, or {}.
+
+    The envelope whatever format the server answered in — see mcp_result — so the
+    lookups below survive the 6.8 format, which sends the data bare.
+    """
+    return read_result(resp).envelope
 
 
 def data_rows(resp: McpResponse, key: str = "") -> list[object]:

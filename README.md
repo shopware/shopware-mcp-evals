@@ -90,6 +90,7 @@ they say; see the first bullet of `AGENTS.md` for where that line falls.
 ├── pyproject.toml         # package metadata; `pip install -e .` makes the imports work
 ├── shopware.sha           # pinned Shopware commit for reproducible CI runs
 ├── mcp_client.py          # shared MCP HTTP helpers (admin + store endpoints)
+├── mcp_result.py          # reads a tool result, whatever revision and format it came in
 ├── lane.py                # real ids read off the instance, so no fixture has to invent one
 ├── ownership.py           # tool name → owning repository, and what a failure there costs
 ├── toolclass.py           # Layer 0/2: may a tool be executed, and how to make it safe

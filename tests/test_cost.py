@@ -277,3 +277,14 @@ def test_cache_writes_are_summed_and_tolerated_when_absent() -> None:
     assert C.token_totals(results) == {"input": 15, "cached_input": 2, "output": 2, "cache_write": 40}
     run = C.run_cost(results, "m1", PRICING)
     assert C.combine([run, run])["tokens"].get("cache_write") == 80
+
+
+def test_structured_bytes_have_a_median_and_older_reports_have_none() -> None:
+    """A report from before the field existed yields None, not a median of 0
+    that cost_drift would compare a real number against."""
+    sized = [result(f, structured_bytes=n) for f, n in (("a", 100), ("b", 200), ("c", 300))]
+    current = C.run_cost(sized, "m1", PRICING)
+    older = C.run_cost([result("a"), result("b")], "m1", PRICING)
+
+    assert current.get("structured_bytes_p50") == 200
+    assert older.get("structured_bytes_p50") is None

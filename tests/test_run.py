@@ -3,6 +3,7 @@ admin/store flows driven through a stateful fake MCP server."""
 
 import argparse
 import json
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import cast, override
 
@@ -24,13 +25,14 @@ def call_resp(payload: object) -> McpResponse:
     return {"result": {"content": [{"type": "text", "text": json.dumps(payload)}]}}
 
 
-def flags(*, skip_media_upload: bool, skip_dev_tools: bool) -> argparse.Namespace:
+def flags(*, skip_media_upload: bool, skip_dev_tools: bool, deactivated: list[str] | None = None) -> argparse.Namespace:
     """The argparse attributes the admin flow reads."""
     return argparse.Namespace(
         endpoint="admin",
         skip_media_upload=skip_media_upload,
         skip_dev_tools=skip_dev_tools,
         provision_principals=False,
+        deactivated_plugins=deactivated or [],
     )
 
 
@@ -397,6 +399,11 @@ def _wire(monkeypatch: pytest.MonkeyPatch, fake: FakeServer) -> None:
     # lives there so the eval suite shares one definition of "a cart that can
     # be checked out". Unpatched, these two tests reached the network.
     monkeypatch.setattr(lane, "mcp_call", fake.call)
+    # Both open sessions of their own through their own imports, so unpatched
+    # they reach whatever server .env names. Each has its own tests.
+    monkeypatch.setattr(R, "verify_result_format", const(None))
+    monkeypatch.setattr(R, "verify_large_results", const(None))
+    monkeypatch.setattr(R, "verify_stateless_era", const(None))
 
 
 def test_run_store_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -573,6 +580,24 @@ def test_run_admin_respects_skip_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "swag-dev-tools" not in labels
 
 
+def test_a_deactivated_merchant_plugin_skips_its_tools_and_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured on the next-major lane: setup-lane deactivated the plugin, and
+    every merchant check then failed with "Tool not found"."""
+    fake = FakeServer(ADMIN_TOOLSETS)
+    _wire(monkeypatch, fake)
+    rep = Reporter("admin", color=False)
+    args = flags(skip_media_upload=True, skip_dev_tools=True, deactivated=["SwagMcpMerchantTools"])
+    session, _ = fake.init()
+
+    R.run_admin_tools(rep, session, ADMIN, args)
+
+    merchant = [r for r in rep.records if r["tool"].startswith("merchant-")]
+    assert {r["tool"] for r in merchant} == {c.tool for c in R.MERCHANT_CHECKS}
+    assert all(
+        r["status"] == "skipped" and "SwagMcpMerchantTools is deactivated" in r.get("reason", "") for r in merchant
+    )
+
+
 # ---------------------------------------------------------------------------
 # Connect-time toolset selection (?toolsets=)
 # ---------------------------------------------------------------------------
@@ -648,3 +673,87 @@ def test_the_check_skips_where_nothing_is_deferred(monkeypatch: pytest.MonkeyPat
     rep = _connect_report(monkeypatch, FakeServer([]))
 
     assert (rep.failed, rep.passed, rep.skipped) == (0, 0, 1)
+
+
+def _run(monkeypatch: pytest.MonkeyPatch, endpoint_name: str, revision: str) -> tuple[Reporter, list[str]]:
+    """The whole flow on one endpoint, recording which revision-spanning checks ran.
+
+    The revision is set on the shared endpoint rather than a clone because the
+    fake server checks it is talking to ADMIN or STORE by identity."""
+    import ucp
+
+    endpoint = ADMIN if endpoint_name == "admin" else STORE
+    monkeypatch.setattr(endpoint, "protocol_version", revision)
+    fake = (
+        FakeServer(ADMIN_TOOLSETS)
+        if endpoint_name == "admin"
+        else FakeServer(STORE_TOOLSETS, default_extra=ucp.all_classified())
+    )
+    _wire(monkeypatch, fake)
+    called: list[str] = []
+
+    def recorder(name: str) -> Callable[..., None]:
+        def record(*_args: object, **_kwargs: object) -> None:
+            called.append(name)
+
+        return record
+
+    for name in ("verify_result_format", "verify_large_results", "verify_stateless_era"):
+        monkeypatch.setattr(R, name, recorder(name))
+    rep = Reporter(endpoint_name, color=False)
+    session, _ = fake.init()
+    if endpoint_name == "admin":
+        R.run_admin(rep, endpoint, flags(skip_media_upload=False, skip_dev_tools=False), session)
+    else:
+        R.run_store(rep, endpoint, session)
+    return rep, called
+
+
+GATE_LABEL = "result format, large results, stateless era"
+
+
+@pytest.mark.parametrize("endpoint_name", ["admin", "store"])
+def test_the_default_revision_runs_the_checks_that_compare_revisions(
+    monkeypatch: pytest.MonkeyPatch, endpoint_name: str
+) -> None:
+    rep, called = _run(monkeypatch, endpoint_name, "2025-11-25")
+
+    assert "verify_result_format" in called
+    assert "verify_stateless_era" in called
+    assert not [r for r in rep.records if r["label"] == GATE_LABEL]
+
+
+@pytest.mark.parametrize("endpoint_name", ["admin", "store"])
+def test_an_older_revision_records_one_skip_instead_of_repeating_them(
+    monkeypatch: pytest.MonkeyPatch, endpoint_name: str
+) -> None:
+    """The CI matrix runs the whole suite once per revision. The comparison opens
+    its own session on every revision anyway, so each job repeating it would
+    triple it and file 2025-11-25 results under a 2024-11-05 job."""
+    rep, called = _run(monkeypatch, endpoint_name, "2024-11-05")
+
+    assert called == []
+    skip = next(r for r in rep.records if r["label"] == GATE_LABEL)
+    assert skip["status"] == "skipped"
+    assert "in the 2025-11-25 suite" in str(skip)
+    assert "at 2024-11-05" in str(skip)
+    assert rep.failed == 0
+
+
+def test_the_customer_journey_negotiates_the_suites_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The customer half rebuilds its endpoint for the context token. Rebuilt
+    from scratch it would start at the default revision, so a 2024-11-05 job
+    would run its authenticated journey at 2025-11-25 and report otherwise."""
+    seen: list[str] = []
+
+    def init(endpoint: Endpoint) -> tuple[str, str]:
+        seen.append(endpoint.protocol_version)
+        raise RuntimeError("stop after the handshake")
+
+    monkeypatch.setattr(R, "provision", const(("buyer@example.invalid", "ctx-token")))
+    monkeypatch.setattr(R, "mcp_init", init)
+
+    with pytest.raises(RuntimeError, match="stop after the handshake"):
+        R.run_customer_journey(Reporter("store", color=False), STORE.with_protocol("2024-11-05"), True)
+
+    assert seen == ["2024-11-05"]

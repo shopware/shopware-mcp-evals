@@ -35,8 +35,9 @@ class _Palette:
 class Reporter:
     """Collects pass/fail/skip results for one functional run."""
 
-    def __init__(self, server: str, *, color: bool | None = None):
+    def __init__(self, server: str, *, color: bool | None = None, protocol_version: str | None = None):
         self.server: str = server
+        self.protocol_version: str | None = protocol_version
         self.passed: int = 0
         self.failed: int = 0
         self.skipped: int = 0
@@ -73,6 +74,17 @@ class Reporter:
         """A structural check that did not run. Counted, not attributed."""
         print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}")
         self.skipped += 1
+
+    def check_skip(self, label: str, reason: str) -> None:
+        """A structural check that did not run, recorded with why.
+
+        For a skip someone has to act on later — a check waiting for a server
+        change — where a bare count would let it be forgotten. Still `check`, so
+        it contributes nothing to the tool health map.
+        """
+        print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}: {reason}")
+        self.skipped += 1
+        self.records.append(FunctionalRecord(tool="check", label=label, status="skipped", reason=reason))
 
     def tool_skip(self, tool: str, label: str, reason: str) -> None:
         """A tool that did not run, and why.
@@ -142,14 +154,20 @@ class Reporter:
 
     def write_report(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        report = FunctionalReport(
-            timestamp=datetime.now(UTC).isoformat(),
-            server=self.server,
-            total=self.total,
-            tools=self.records,
-            health=self.tool_health(),
-            **{"pass": self.passed, "fail": self.failed, "skip": self.skipped},
-        )
+        # A literal, not the keyword form: `pass` is a keyword, and splatting it in
+        # from a dict of ints stops type-checking once the record has a str field.
+        report: FunctionalReport = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "server": self.server,
+            "pass": self.passed,
+            "fail": self.failed,
+            "skip": self.skipped,
+            "total": self.total,
+            "tools": self.records,
+            "health": self.tool_health(),
+        }
+        if self.protocol_version:
+            report["protocol_version"] = self.protocol_version
         path.write_text(json.dumps(report, indent=2))
         print(f"Report: {path}")
 

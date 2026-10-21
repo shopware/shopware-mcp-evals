@@ -20,7 +20,8 @@ flowchart TD
     A --> D{Store preflight}
 
     B --> B1[ruff · basedpyright · pytest]
-    B --> B2[functional: admin + store]
+    B --> B2[functional: admin + store<br/>at 2025-11-25]
+    A --> G[Protocol 2024-11-05 · 2025-06-18<br/>functional at that revision]
     B --> B3[tool catalogue snapshot + drift]
 
     D -->|UCP answers| E[Store eval]
@@ -95,7 +96,7 @@ sequenceDiagram
   (plus id/prompt uniqueness and toolset correctness) against
   `tool-history/latest.json`, so a new server-side tool fails the unit tests
   until it has prompts.
-- **Two workflows, and the heavy one is five jobs.** `lint.yml` is the fast gate
+- **Two workflows, and the heavy one is five jobs plus a matrix.** `lint.yml` is the fast gate
   (ruff, ruff format, basedpyright, pytest+cov, then ShellCheck **twice** — once
   over `functional/**/*.sh` + `scripts/**/*.sh`, once over the shell inside
   workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
@@ -113,6 +114,17 @@ sequenceDiagram
   failure you can locate — one job failing no longer skips the rest, which used
   to make an admin fixture failure look like "the plugin is missing".
   The Store/UCP part runs by default; skip it with `run_store=false`.
+  A sixth, advisory job, `next-major`, builds its lane with `feature_flags:
+  V6_8_0_0` and runs the functional suite at 2025-11-25: nightly, the
+  `next_major` dispatch input or the `run-next-major` label. A plugin that does
+  not boot under the flag is deactivated, named in a warning, and its tools go
+  missing from that lane. It is not a dependency of `report`.
+  Two more, `revisions`, are a matrix: `Protocol 2024-11-05` and `Protocol
+  2025-06-18` run the whole functional suite, admin and store, at that revision,
+  so a red check names the revision that broke. `static` is the 2025-11-25 run
+  and the only one that keeps the checks comparing revisions with each other;
+  the matrix jobs record a skip for them. 2025-03-26 is left out because the
+  server renders it like 2024-11-05. The LLM eval stays on 2025-11-25.
 - **Never let a job write state you care about.** `--allow-mutations` places a
   real order. CI sets it because the instance dies with the job; a developer's
   shop does not. If you add anything that commits, gate it the same way and
@@ -171,9 +183,22 @@ sequenceDiagram
   which matters on store where rebuilding would mint a different cart token.
 - **A tool can fail while the transport succeeds.** UCP reports every failure as
   HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
-  asserting on a tool call must go through `eval/assertions.py:inband_error`, or
-  it is blind to the entire Store failure mode — which is exactly what happened
-  to 27 admin checks for months.
+  asserting on a tool call must read it through `mcp_result.read_result` and its
+  `failure`, or it is blind to the entire Store failure mode — which is exactly
+  what happened to 27 admin checks for months.
+- **Never parse the first text block yourself.** A result arrives in one of three
+  shapes: the legacy `{"success", "data", "_meta"}` text, the `v6.8.0.0` format
+  (plain data first, metadata in blocks of its own), or plain text — plus
+  `structuredContent` and `resource_link` blocks from protocol 2025-06-18 on
+  (shopware/shopware#20948, #20951). `read_result` knows all of them, and
+  `ToolOutcome.envelope` is the legacy-shaped view the fixtures' `data.…` paths
+  are written against.
+- **The protocol revision is an endpoint property.** Sessions ask for
+  `DEFAULT_PROTOCOL_VERSION` (2025-11-25 since a paired run read 99% on both it
+  and 2024-11-05, where the gates were first measured);
+  `Endpoint.with_protocol()` and `--protocol-version` on both runners pick
+  another, and `mcp_init` fails if the server negotiates anything else. See
+  `docs/plans/protocol-eras.md` for the matrix this is building towards.
 
 ## UCP: six gates before a tool runs
 
@@ -486,6 +511,9 @@ prompts/list, a direct call), and deletes them again:
 | integration | "All capabilities" | exactly what the admin user reaches |
 | integration, non-admin user | one tool | that tool; a tool from another toolset is refused |
 
+The one-tool user is also held to its ACL role, which grants `currency:read` only. Calling its
+tool on `product` must fail with the `missing_privilege` code.
+
 **"All capabilities" on an integration does not save `null`.** Since #20600 the
 Administration writes every name `/api/_action/mcp/capabilities` returned when
 the dialog opened (`fullSelection()`). So it is a snapshot: a tool added later is
@@ -502,7 +530,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 
 | File | Purpose |
 |---|---|
-| `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE` |
+| `mcp_client.py` | Shared MCP HTTP helpers + `ADMIN`/`STORE` endpoints; session, paginated `tools/list`, toolsets, enable-all, `META_TOOLS`/`DEFAULT_SURFACE`, the protocol revisions |
+| `mcp_result.py` | **The only reader of tool results.** Legacy envelope, 6.8 spec format, plain text, `structuredContent`, `resource_link`, error codes |
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
 | `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
@@ -527,6 +556,9 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
+| `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
+| `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. A server older than the renderer is one skip naming the PR |
+| `functional/stateless.py` | The stateless 2026-07-28 revision: `server/discover` with no session. Today a skip naming `withoutModernEra()` and shopware/shopware#19969, accepted only when the refusal names that revision. An answer fails until the scenarios in the plan exist |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
 | `eval/reconcile.py` | Whether the nightly may merge its own reconciliation PR: only a `shopware.sha` bump, both catalogues measured that night with no drift, and `static`, `admin-eval` and `session-store` green on that commit. Pushes, opens and merges the PR with an octo-sts token (a PR pushed as `github-actions[bot]` has its runs parked at `action_required` until a maintainer approves them) (policy: `.github/chainguard/reconcile.sts.yaml`, scheduled runs on `main` only), because octo-sts may bypass the org's default-branch ruleset and `GITHUB_TOKEN` may not; without a token the PR stays open with a "safe to merge" comment. Before merging, `eval/await_runs.py` waits for the PR's own runs to finish and requires lint to pass on them. Merging the moment the PR opened made both runs fail at startup, and moved the pin without lint ever running on the commit |

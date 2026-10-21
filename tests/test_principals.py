@@ -203,3 +203,24 @@ def test_no_locale_at_all_raises(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(P.ProvisioningFailed, match="no locale"), P.provisioned(P.AdminApi(BASE, "k", "s")):
         pass
+
+
+def test_another_principal_is_one_integration_granted_everything_and_deleted(admin: FakeAdmin) -> None:
+    api = P.AdminApi(BASE, "SWUAKEY", "secret")
+
+    with P.another_principal(api) as other:
+        assert other.access_key.startswith("SWIA")
+        assert admin.paths("DELETE") == []
+
+    created = admin.body("/api/integration")
+    assert admin.paths("DELETE") == [f"/api/integration/{created['id']}"]
+    assert admin.body("/api/_action/integration/") == {"allowlist": P.full_selection(api)}
+
+
+def test_another_principal_is_deleted_when_the_check_raises(admin: FakeAdmin) -> None:
+    api = P.AdminApi(BASE, "SWUAKEY", "secret")
+
+    with pytest.raises(RuntimeError), P.another_principal(api):
+        raise RuntimeError("check blew up")
+
+    assert len(admin.paths("DELETE")) == 1

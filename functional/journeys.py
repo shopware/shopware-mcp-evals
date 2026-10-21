@@ -49,17 +49,15 @@ PAYLOAD NOTES (measured, not documented anywhere the model can see):
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from typing import cast
 
-from eval.assertions import inband_error
 from eval.result_schema import JsonObject, as_list, as_object
 from functional.reporting import Reporter
-from mcp_client import Endpoint, mcp_call, mcp_result_text
+from mcp_client import Endpoint, mcp_call
+from mcp_result import ToolError, read_result
 
 # The ids each step contributes and the later steps consume, keyed by the names
 # `needs` refers to. Distinct from functional.checks.Context — same shape, but
@@ -515,23 +513,21 @@ def _call(session: str, endpoint: Endpoint, step: JourneyStep, ctx: Context) -> 
     started = time.monotonic()
     response = mcp_call(session, step.tool, step.args(ctx), endpoint=endpoint)
     elapsed = time.monotonic() - started
-    text = mcp_result_text(response)
-    error = (response.get("error") or {}).get("message", "") or inband_error(text) or ""
-    if error:
-        return Outcome(elapsed, error, _error_body(text), {})
-    try:
-        payload = as_object(cast(object, json.loads(text))).get("data")
-    except (ValueError, TypeError):
+    result = read_result(response)
+    if result.error:
+        return Outcome(elapsed, result.failure, _error_body(result.error), {})
+    if result.payload is None:
         return Outcome(elapsed, "response was not readable JSON", {}, {})
-    return Outcome(elapsed, "", {}, as_object(payload))
+    return Outcome(elapsed, "", {}, as_object(result.envelope.get("data")))
 
 
-def _error_body(text: str) -> JsonObject:
-    """The tool's `error` object, for the fields `inband_error` flattens away."""
-    try:
-        return as_object(as_object(cast(object, json.loads(text))).get("error"))
-    except (ValueError, TypeError):
-        return {}
+def _error_body(error: ToolError) -> JsonObject:
+    """The tool's `error` object, for the fields `describe()` flattens away
+    (`severity`, and `type` as its own field)."""
+    body: JsonObject = {**error.details, "message": error.message}
+    if error.code is not None:
+        body["code"] = error.code
+    return body
 
 
 def journey_for(persona: Persona) -> tuple[JourneyStep, ...]:

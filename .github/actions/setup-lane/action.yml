@@ -50,6 +50,13 @@ inputs:
   redis_url:
     description: The pool the `redis` session store writes to. Its own database, so the checks' key scans stay small.
     default: redis://localhost:6379/5
+  feature_flags:
+    description: >-
+      Comma-separated feature flags to switch on, e.g. `V6_8_0_0` for the next
+      major. Set in .env.local and in the server's own environment. A plugin
+      that does not boot under them is deactivated and named in
+      `incompatible_plugins`.
+    default: ''
   plugins_pat:
     description: Token that can read the private plugin repositories.
     required: true
@@ -72,6 +79,9 @@ outputs:
   sales_channel_id:
     description: The sales channel that owns app_url, and whose UCP config was set.
     value: ${{ steps.sc.outputs.sales_channel_id }}
+  incompatible_plugins:
+    description: Comma-separated plugins deactivated because they do not boot under `feature_flags`. Empty otherwise.
+    value: ${{ steps.plugins.outputs.incompatible_plugins }}
   promo_code:
     description: >
       Redeemable promotion code for the UCP buyer journey's discount step. Empty
@@ -338,6 +348,7 @@ runs:
         UCP_SDK_CONSTRAINT: ${{ github.event.inputs.ucp_sdk_ref || '>=0.0.5 <0.1.0' }}
         SESSION_STORE: ${{ inputs.session_store }}
         REDIS_URL: ${{ inputs.redis_url }}
+        FEATURE_FLAGS: ${{ inputs.feature_flags }}
       run: |
         set -euo pipefail
 
@@ -606,6 +617,54 @@ runs:
         YAML
         fi
 
+        # Feature flags, for the next-major lane. A version flag (V6_8_0_0) is
+        # never persisted, so it has to be in the environment of every process:
+        # the console reads it from .env.local, the daemonised server gets it in
+        # its own environment below (the same three-environments trap as the UCP
+        # dev-mode flag).
+        #
+        # Under a major flag, deprecated code throws, and a plugin still using it
+        # stops the kernel from booting at all. Each one is deactivated and named
+        # rather than failing the lane, because finding them is what the lane is
+        # for. The probe runs without the flags in .env.local, so the deactivation
+        # itself boots.
+        flag_env=()
+        incompatible=""
+        if [ -n "$FEATURE_FLAGS" ]; then
+          for flag in ${FEATURE_FLAGS//,/ }; do
+            [[ "$flag" =~ ^[A-Z0-9_]+$ ]] || { echo "::error::feature flag '$flag' is not a flag name"; exit 1; }
+            flag_env+=("${flag}=1")
+          done
+          booted=false
+          for _ in 1 2 3 4 5 6; do
+            if probe=$(env "${flag_env[@]}" bin/console cache:clear --no-interaction --no-ansi 2>&1); then
+              booted=true
+              break
+            fi
+            plugin=$(grep -oE 'custom/plugins/[A-Za-z0-9_]+' <<<"$probe" | head -1 | cut -d/ -f3) || true
+            if [ -z "$plugin" ]; then
+              echo "::error::Shopware does not boot under ${FEATURE_FLAGS}, and no plugin is named: $(tail -1 <<<"$probe")"
+              exit 1
+            fi
+            echo "::warning::${plugin} does not boot under ${FEATURE_FLAGS}; deactivated: $(tail -1 <<<"$probe")"
+            bin/console plugin:deactivate "$plugin" --no-interaction --no-ansi
+            incompatible="${incompatible:+${incompatible},}${plugin}"
+            # The Store flag was exported as true above. Left there, the sc step
+            # would run ucp:config:set against a deactivated plugin and abort the
+            # lane, the opposite of what deactivating is for. A later write to
+            # either file wins, so this turns the Store suite off with a reason.
+            if [ "$plugin" = "SwagAgenticCommerce" ] && [ "${STORE_PLUGIN_OK}" = "true" ]; then
+              STORE_PLUGIN_OK=false
+              echo "STORE_PLUGIN_OK=false" >> "$GITHUB_ENV"
+              echo "store_plugin_ok=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Store/UCP suite skipped: SwagAgenticCommerce does not boot under ${FEATURE_FLAGS}."
+            fi
+          done
+          "$booted" || { echo "::error::still not booting under ${FEATURE_FLAGS} after deactivating ${incompatible}"; exit 1; }
+          printf '%s\n' "${flag_env[@]}" >> .env.local
+        fi
+        echo "incompatible_plugins=${incompatible}" >> "$GITHUB_OUTPUT"
+
         bin/console cache:clear --no-interaction
         bin/console cache:warmup --no-interaction
 
@@ -639,7 +698,8 @@ runs:
         # find it) does not put it in the process that serves UCP requests. That
         # gap is why the lane kept answering "Plain http is only allowed when
         # profile fetching development mode is enabled" in both prod and dev while
-        # every file-level check passed.
+        # every file-level check passed. The feature flags go the same way.
+        env "${flag_env[@]}" \
         SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1 \
         SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
           symfony server:start
@@ -856,6 +916,7 @@ runs:
       id: sc
       env:
         APP_URL: ${{ inputs.app_url }}
+        FEATURE_FLAGS: ${{ inputs.feature_flags }}
       run: |
         set -euo pipefail
         TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \
@@ -1089,6 +1150,11 @@ runs:
         # started earlier in this action, immediately after a cache:warmup, and
         # every write in this step lands afterwards.
         symfony server:stop 2>/dev/null || true
+        # The flags were validated by the plugin step; the server's environment
+        # is rebuilt from scratch on every start, so they are passed again.
+        flag_env=()
+        for flag in ${FEATURE_FLAGS//,/ }; do flag_env+=("${flag}=1"); done
+        env "${flag_env[@]}" \
         SWAG_AGENTIC_COMMERCE_UCP_PROFILE_FETCHING_DEVELOPMENT_MODE=1 \
         SYMFONY_DAEMON=1 SYMFONY_NO_TLS=1 SYMFONY_ALLOW_HTTP=1 SYMFONY_PORT=8000 SYMFONY_ALLOW_ALL_IP=1 \
           symfony server:start

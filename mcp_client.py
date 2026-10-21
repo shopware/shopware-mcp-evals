@@ -33,6 +33,7 @@ import requests
 
 import ucp
 from eval.result_schema import JsonObject, McpResponse, PromptInventory, ToolDef, Toolset
+from mcp_result import read_result
 from ownership import owner_of
 
 # The MCP endpoint throttles bursts (HTTP 429). Retry a bounded number of times,
@@ -49,6 +50,26 @@ BASE = Path(__file__).resolve().parent
 # than using "*" so it survives clients that escape wildcards.
 QUERY_PARAMETER = "toolsets"
 ALL_TOOLSETS = "all"
+
+# The handshake-era protocol revisions mcp/sdk 0.8 serves
+# (`Mcp\Schema\Enum\ProtocolVersion`), oldest first. They are ISO dates, so
+# string comparison orders them. The stateless 2026-07-28 revision is not here on
+# purpose: it has no initialize and no session, and this client speaks neither
+# (see `mcp_init`).
+PROTOCOL_REVISIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
+
+# What every session asks for unless told otherwise: the newest handshake
+# revision, the one a current client negotiates. From 2025-06-18 the server adds
+# `structuredContent` and `resource_link` blocks (`McpToolResultRenderer`) next to
+# the same text. The gates were first measured on 2024-11-05; a paired run on
+# trunk 7a96f6086ec (2026-10-20) read 99% on both, core 100% on both, which is
+# what moved the default (docs/plans/protocol-eras.md, Phase 6).
+DEFAULT_PROTOCOL_VERSION = "2025-11-25"
+
+# The Streamable HTTP transport of 2025-06-18 requires `MCP-Protocol-Version` on
+# every request after initialize; a server that gets none must assume 2025-03-26.
+PROTOCOL_HEADER = "MCP-Protocol-Version"
+PROTOCOL_HEADER_SINCE = "2025-06-18"
 
 # Meta-tools of the v2 discovery layer. Always advertised on both endpoints.
 META_TOOLS = {
@@ -102,6 +123,11 @@ class Endpoint:
 
     Visibility only. The per-principal allowlist and per-tool ACL still apply,
     so a pinned toolset cannot widen what a caller may reach.
+
+    `protocol_version` is the revision `mcp_init` asks for. It lives here rather
+    than on the call for the same reason as `toolsets`: it is fixed for the
+    lifetime of a connection, and a clone with another one must keep the
+    credentials (see `with_toolsets`).
     """
 
     def __init__(
@@ -111,7 +137,11 @@ class Endpoint:
         auth_headers: dict[str, str],
         base_url: str | None = None,
         toolsets: str | Sequence[str] | None = None,
+        protocol_version: str = DEFAULT_PROTOCOL_VERSION,
     ):
+        if protocol_version not in PROTOCOL_REVISIONS:
+            raise ValueError(f"unknown protocol revision {protocol_version!r}; known: {', '.join(PROTOCOL_REVISIONS)}")
+        self.protocol_version: str = protocol_version
         self.name: str = name
         self.path: str = path
         self.base_url: str = (base_url or SW_BASE_URL).rstrip("/")
@@ -140,9 +170,22 @@ class Endpoint:
         `sw-context-token` per call, so rebuilding would hand back an endpoint
         pointing at a different cart.
         """
-        clone = Endpoint(self.name, self.path, {}, self.base_url, names)
+        clone = Endpoint(self.name, self.path, {}, self.base_url, names, self.protocol_version)
         clone.auth_headers = dict(self.auth_headers)
         return clone
+
+    def with_protocol(self, version: str) -> "Endpoint":
+        """The same endpoint, credentials and pinned toolsets, negotiating `version`."""
+        clone = Endpoint(self.name, self.path, {}, self.base_url, self.toolsets, version)
+        clone.auth_headers = dict(self.auth_headers)
+        return clone
+
+    def session_headers(self, session_id: str) -> dict[str, str]:
+        """What every request after initialize carries besides the auth headers."""
+        headers = {"Mcp-Session-Id": session_id}
+        if self.protocol_version >= PROTOCOL_HEADER_SINCE:
+            headers[PROTOCOL_HEADER] = self.protocol_version
+        return headers
 
 
 def admin_endpoint(
@@ -281,7 +324,7 @@ def _rpc(
     # also has to push a notification (e.g. tools/list_changed after an enable).
     headers["Accept"] = "application/json, text/event-stream"
     if session_id is not None:
-        headers["Mcp-Session-Id"] = session_id
+        headers.update(endpoint.session_headers(session_id))
     body = {"jsonrpc": "2.0", "method": method, "params": params, "id": rpc_id}
     resp: requests.Response | None = None
     for attempt in range(THROTTLE_MAX_RETRIES + 1):
@@ -300,8 +343,29 @@ def _rpc(
     # range(THROTTLE_MAX_RETRIES + 1) is never empty, so the loop always assigns
     # resp at least once; the assert states that invariant for the type checker.
     assert resp is not None
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        # requests' message is the status and the URL. The server's reason is in
+        # the body, and it is the part that says what happened: a session the
+        # server no longer knows reads exactly like a missing route without it.
+        detail = _error_detail(resp)
+        if not detail:
+            raise
+        raise requests.HTTPError(f"{exc}: {detail}", response=resp) from exc
     return resp
+
+
+def _error_detail(resp: HttpReply) -> str:
+    """The JSON-RPC error message of a refused request, else the start of its
+    body. Empty when there is nothing to add."""
+    try:
+        message = _as_object(_as_object(_json_body(resp)).get("error")).get("message")
+    except ValueError:
+        message = None
+    if isinstance(message, str) and message:
+        return message
+    return " ".join(resp.text.split())[:200]
 
 
 def _parse_sse(text: str) -> list[McpResponse]:
@@ -361,18 +425,23 @@ def _rpc_json(
 
 
 def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
-    """Initialize MCP session. Returns (session_id, server_instructions)."""
+    """Initialize MCP session. Returns (session_id, server_instructions).
+
+    Raises when the server negotiates a revision other than the one asked for. A
+    silent downgrade would make every per-revision check measure the wrong
+    revision while reporting the right one.
+    """
     resp = _rpc(
         "initialize",
         {
-            # A session-era revision on purpose. Everything here is scoped by
-            # Mcp-Session-Id — toolset enablement persists per session, and
-            # discovery-mode eval opens a fresh one per fixture. mcp/sdk 0.8
-            # serves the stateless 2026-07-28 revision, which mints no session
-            # id; Shopware keeps both endpoints on the session era with
+            # A handshake-era revision on purpose (PROTOCOL_REVISIONS). Everything
+            # here is scoped by Mcp-Session-Id — toolset enablement persists per
+            # session, and discovery-mode eval opens a fresh one per fixture.
+            # mcp/sdk 0.8 serves the stateless 2026-07-28 revision, which mints no
+            # session id; Shopware keeps both endpoints on the handshake era with
             # Builder::withoutModernEra(). If that ever goes, this is where it
             # shows up first, as the error below.
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": endpoint.protocol_version,
             "capabilities": {},
             "clientInfo": {"name": "mcp-eval", "version": "2.0"},
         },
@@ -385,16 +454,53 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
             "if it now serves the stateless 2026-07-28 revision (no Builder::withoutModernEra()), "
             "per-session toolset enablement no longer works and this suite has to change with it."
         )
-    instructions = _response(resp, 1).get("result", {}).get("instructions", "")
-    return session_id, instructions
+    result = _as_object(_response(resp, 1).get("result"))
+    # A reply without protocolVersion is refused like a mismatch: the spec
+    # requires it, and without it nothing confirms the revision this session's
+    # checks are filed under.
+    negotiated = result.get("protocolVersion")
+    if negotiated != endpoint.protocol_version:
+        said = f"it negotiated {negotiated}" if negotiated is not None else "its reply named no protocolVersion"
+        raise RuntimeError(
+            f"Asked the {endpoint.name} endpoint for protocol {endpoint.protocol_version}, "
+            f"{said}. Every check of this session would report a revision nobody confirmed."
+        )
+    instructions = result.get("instructions", "")
+    return session_id, instructions if isinstance(instructions, str) else ""
 
 
 def mcp_close(session_id: str, endpoint: Endpoint = ADMIN) -> int:
     """End a session with `DELETE`, as the Streamable HTTP transport defines it.
     Returns the HTTP status rather than raising: what a refused close looks like
     is the caller's question, not a transport failure."""
-    headers = {**endpoint.auth_headers, "Mcp-Session-Id": session_id}
+    headers = {**endpoint.auth_headers, **endpoint.session_headers(session_id)}
     return requests.delete(endpoint.url, headers=headers, timeout=30).status_code
+
+
+STATELESS_REVISION = "2026-07-28"
+
+
+def mcp_discover(endpoint: Endpoint = ADMIN) -> tuple[int, object]:
+    """`server/discover` the stateless way: no `initialize`, no session, the
+    revision in the request's own `_meta` and header. Returns the HTTP status and
+    the decoded body rather than raising, because today's answer is a refusal and
+    the refusal is what the caller reads."""
+    headers = {
+        **endpoint.auth_headers,
+        "Accept": "application/json, text/event-stream",
+        PROTOCOL_HEADER: STATELESS_REVISION,
+    }
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": STATELESS_REVISION}},
+    }
+    resp = requests.post(endpoint.url, headers=headers, json=body, timeout=30)
+    try:
+        return resp.status_code, _response(resp, 1)
+    except ValueError:
+        return resp.status_code, resp.text
 
 
 def mcp_call(session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:
@@ -411,30 +517,9 @@ def mcp_call(session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoi
     )
 
 
-def mcp_result_text(resp: McpResponse) -> str:
-    """Extract the first text content block from a tools/call response."""
-    content = resp.get("result", {}).get("content", [])
-    for block in content:
-        if block.get("type", "text") == "text":
-            return block.get("text", "")
-    return ""
-
-
-def mcp_result_meta(resp: McpResponse) -> JsonObject:
-    return resp.get("result", {}).get("_meta", {}) or {}
-
-
-def mcp_call_error(resp: McpResponse) -> str:
-    """Return the error message of a tools/call response ('' if none).
-
-    Covers both protocol-level errors (error.message) and tool-level errors
-    (result.isError with the message in the text content).
-    """
-    if "error" in resp:
-        return resp["error"].get("message", "unknown error")
-    if resp.get("result", {}).get("isError"):
-        return mcp_result_text(resp) or "tool error"
-    return ""
+def mcp_read_resource(session_id: str, uri: str, endpoint: Endpoint = ADMIN) -> McpResponse:
+    """resources/read for one URI. Returns the full JSON-RPC response dict."""
+    return _rpc_json("resources/read", {"uri": uri}, session_id, rpc_id=5, endpoint=endpoint)
 
 
 def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[ToolDef]:
@@ -490,12 +575,10 @@ def mcp_list_names(session_id: str, method: str, endpoint: Endpoint = ADMIN) -> 
 def mcp_toolsets_list(session_id: str, endpoint: Endpoint = ADMIN) -> list[Toolset]:
     """Call shopware-toolsets-list and return the parsed toolsets array:
     [{name, title, description, tools, enabled}, ...]"""
-    resp = mcp_call(session_id, "shopware-toolsets-list", {}, endpoint=endpoint)
-    err = mcp_call_error(resp)
-    if err:
-        raise RuntimeError(f"shopware-toolsets-list failed: {err}")
-    data = _as_object(_as_object(cast(object, json.loads(mcp_result_text(resp)))).get("data"))
-    toolsets = data.get("toolsets")
+    outcome = read_result(mcp_call(session_id, "shopware-toolsets-list", {}, endpoint=endpoint))
+    if outcome.error:
+        raise RuntimeError(f"shopware-toolsets-list failed: {outcome.failure}")
+    toolsets = _as_object(outcome.envelope.get("data")).get("toolsets")
     return cast(list[Toolset], toolsets) if isinstance(toolsets, list) else []
 
 
@@ -510,10 +593,9 @@ def enable_all_toolsets(session_id: str, endpoint: Endpoint = ADMIN) -> list[str
     enabled: list[str] = []
     for toolset in mcp_toolsets_list(session_id, endpoint=endpoint):
         if not toolset.get("enabled"):
-            resp = enable_toolset(session_id, toolset["name"], endpoint=endpoint)
-            err = mcp_call_error(resp)
-            if err:
-                raise RuntimeError(f"Failed to enable toolset '{toolset['name']}': {err}")
+            outcome = read_result(enable_toolset(session_id, toolset["name"], endpoint=endpoint))
+            if outcome.error:
+                raise RuntimeError(f"Failed to enable toolset '{toolset['name']}': {outcome.failure}")
         enabled.append(toolset["name"])
     return enabled
 

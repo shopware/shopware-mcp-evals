@@ -14,6 +14,8 @@ from typing import Never
 
 import pytest
 
+from mcp_result import ToolOutcome, from_text
+
 
 def const[T](value: T) -> Callable[..., T]:
     """A stub that ignores its arguments and always returns `value`."""
@@ -44,5 +46,19 @@ def never(reason: str) -> Callable[..., Never]:
 
     def stub(*_args: object, **_kwargs: object) -> Never:
         pytest.fail(reason)
+
+    return stub
+
+
+def reads_text(text_of: Callable[..., str]) -> Callable[..., ToolOutcome]:
+    """A `read_result` stand-in for a test that only says what TEXT came back.
+
+    Replaces patching `mcp_result_text`, which is gone: every reader goes through
+    mcp_result now, so the stub has to hand back an outcome, built from the text
+    exactly as a pre-#20948 server would have sent it.
+    """
+
+    def stub(resp: object, *_args: object, **_kwargs: object) -> ToolOutcome:
+        return from_text(text_of(resp))
 
     return stub

@@ -27,6 +27,7 @@ import requests
 import mcp_client as mc
 import toolclass
 from eval.result_schema import JsonObject, McpResponse, as_list, as_object
+from mcp_result import read_result
 
 # A read-only tool per endpoint whose success proves the whole chain works:
 # session, toolset enable, argument validation, and — on store — the UCP-Agent
@@ -154,7 +155,7 @@ DIAGNOSES = (
 def diagnose(error: str | None) -> str:
     """Map a failure to its cause. Pure, so the table is testable without a server.
 
-    `None` reaches here from the callers' `mcp_call_error(...) or ...` chains."""
+    `None` reaches here from callers that have no failure to report."""
     lowered = (error or "").lower()
     for marker, advice in DIAGNOSES:
         if marker in lowered:
@@ -180,7 +181,7 @@ def _first_product_name(body: object) -> str:
     return ""
 
 
-def _product_id_from_search(text: str) -> str:
+def _product_id_from_search(envelope: JsonObject) -> str:
     """The first product id in a catalog-search result, or empty.
 
     Catalog-search wraps its payload as `{"data": {"products": [...]}}` and each
@@ -188,11 +189,7 @@ def _product_id_from_search(text: str) -> str:
     A malformed or empty result degrades to "" so the caller skips the lookup
     probe rather than sending a lookup nothing can resolve.
     """
-    try:
-        payload = as_object(cast(object, json.loads(text))).get("data", {})
-    except (ValueError, TypeError, AttributeError):
-        return ""
-    products = as_list(as_object(payload).get("products"))
+    products = as_list(as_object(envelope.get("data")).get("products"))
     if not products:
         return ""
     return str(as_object(products[0]).get("id") or "").strip()
@@ -247,15 +244,11 @@ def _execute(
     started = time.monotonic()
     response = mc.mcp_call(session_id, tool, prepared, endpoint)
     elapsed = time.monotonic() - started
-    text = mc.mcp_result_text(response)
-    # An in-band `{"success": false}` arrives as HTTP 200 with no transport
-    # error, so checking only mcp_call_error would pass every rejected call.
-    from eval.assertions import inband_error
-
-    # In-band first: an `isError: true` result carries the same body as raw
-    # JSON, and only the parsed form names the code (see check()).
-    error = inband_error(text) or mc.mcp_call_error(response) or ""
-    return error, text, elapsed, response
+    # `failure` covers the in-band `{"success": false}` too, which arrives as
+    # HTTP 200 with no transport error: checking the transport alone would pass
+    # every rejected call.
+    outcome = read_result(response)
+    return outcome.failure, outcome.text, elapsed, response
 
 
 def _report_failure(
@@ -311,7 +304,7 @@ def run(endpoint_name: str) -> int:
         failures += 1
         _report_failure("store", f"{search_tool} (query {query!r})", error, elapsed, text, response)
     else:
-        product_id = _product_id_from_search(text)
+        product_id = _product_id_from_search(read_result(response).envelope)
         found = f"; first product id {product_id}." if product_id else " (no product in the result to look up)."
         print(f"OK — {search_tool} executed and returned a result ({len(text)} bytes) in {elapsed:.2f}s{found}")
 

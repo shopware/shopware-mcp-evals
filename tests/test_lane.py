@@ -16,7 +16,7 @@ import pytest
 import lane
 from eval.result_schema import JsonObject, McpResponse
 from mcp_client import ADMIN, Endpoint
-from tests.stubs import const
+from tests.stubs import const, reads_text
 
 
 class Shop:
@@ -69,7 +69,7 @@ def shop(monkeypatch: pytest.MonkeyPatch) -> Shop:
         return json.dumps({"success": True, **payload})
 
     monkeypatch.setattr(lane, "mcp_call", call)
-    monkeypatch.setattr(lane, "mcp_result_text", result_text)
+    monkeypatch.setattr(lane, "read_result", reads_text(result_text))
     return server
 
 
@@ -78,13 +78,13 @@ def shop(monkeypatch: pytest.MonkeyPatch) -> Shop:
 # collection. Every caller re-deriving that is how they drifted apart.
 # ---------------------------------------------------------------------------
 def test_payload_is_empty_rather_than_raising_on_a_non_json_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lane, "mcp_result_text", const("<html>gateway timeout</html>"))
+    monkeypatch.setattr(lane, "read_result", reads_text(const("<html>gateway timeout</html>")))
 
     assert lane.payload(cast(McpResponse, cast(object, {}))) == {}
 
 
 def test_payload_is_empty_when_the_body_is_not_an_object(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(lane, "mcp_result_text", const("[1, 2]"))
+    monkeypatch.setattr(lane, "read_result", reads_text(const("[1, 2]")))
 
     assert lane.payload(cast(McpResponse, cast(object, {}))) == {}
 
@@ -103,7 +103,7 @@ def test_payload_is_empty_when_the_body_is_not_an_object(monkeypatch: pytest.Mon
 def test_data_rows_tolerates_every_shape_the_server_has_used(
     monkeypatch: pytest.MonkeyPatch, body: JsonObject, key: str, expected: list[object]
 ) -> None:
-    monkeypatch.setattr(lane, "mcp_result_text", const(json.dumps(body)))
+    monkeypatch.setattr(lane, "read_result", reads_text(const(json.dumps(body))))
 
     assert lane.data_rows(cast(McpResponse, cast(object, {})), key) == expected
 

@@ -85,6 +85,12 @@ class FixtureResult(TypedDict, total=False):
     latency_s: float
     tokens: "TokenCounts"
     payload_bytes: int
+    # `structuredContent` bytes next to that text (2025-06-18 on). Absent on
+    # older reports; read with .get().
+    structured_bytes: int
+    # The answer was stored behind a pointer the model cannot read. Absent on
+    # reports from before shopware/shopware#20951 was graded; read with .get().
+    offloaded: bool
     surface_tokens: int
     surface_tokens_peak: int
 
@@ -144,6 +150,11 @@ class AttemptRecord(TypedDict, total=False):
     step: Required[int]
     executed: bool
     ok: bool
+    offloaded: bool
+    # On a failed call: the server's error code, or None when it sent none, and
+    # whether the verdict came from that code or from matching the message.
+    error_code: str | None
+    graded_by: str
     reason: str | None
     error: str
 
@@ -197,6 +208,7 @@ class CostBlock(TypedDict):
     latency_p95: float | None
     payload_bytes_p50: float | None
     payload_bytes_p95: float | None
+    structured_bytes_p50: float | None
     surface_tokens_p50: float | None
     surface_tokens_peak: float | None
 
@@ -263,10 +275,24 @@ class Report(TypedDict, total=False):
     system_prompt: bool
     context_prompt: JsonObject
     max_steps: int
+    # The MCP revision every session of the run negotiated. Absent before it was
+    # recorded, and those runs all asked for 2024-11-05.
+    protocol_version: str
     discovery_summary: JsonObject
     skipped_fixtures: list[SkippedFixture]
     by_tier: dict[str, TierBucket]
+    # Per owning repository: how many failed calls were graded on the server's
+    # error code and how many on matching its message. The `prose` column is the
+    # list of codebases still to move to coded errors, and it should only fall.
+    error_grading: dict[str, "ErrorGrading"]
     cost: CostBlock
+
+
+class ErrorGrading(TypedDict):
+    """One owner's failed calls, by what decided their verdict."""
+
+    code: int
+    prose: int
 
 
 class ToolDef(TypedDict, total=False):
@@ -343,6 +369,8 @@ FunctionalReport = TypedDict(
         "total": int,
         "tools": list[FunctionalRecord],
         "health": dict[str, ToolHealth],
+        # The MCP revision the run negotiated; absent before it was recorded.
+        "protocol_version": NotRequired[str],
     },
 )
 
@@ -469,6 +497,12 @@ class ContentBlock(TypedDict, total=False):
 
     type: str
     text: str
+    # A `resource_link` block (2025-06-18+): the pointer to an offloaded result.
+    uri: str
+    name: str
+    description: str
+    mimeType: str  # noqa: N815 — the wire name
+    size: int
 
 
 class McpError(TypedDict, total=False):
@@ -491,6 +525,9 @@ class McpResult(TypedDict, total=False):
 
     content: list[ContentBlock]
     isError: bool  # noqa: N815 — the wire name
+    # 2025-06-18+ only. A JSON object on the handshake era: the server wraps a
+    # list or scalar as `{"result": …}`. Read through mcp_result, not directly.
+    structuredContent: object  # noqa: N815 — the wire name
     _meta: JsonObject
     instructions: str
     tools: list[ToolDef]
@@ -505,7 +542,7 @@ class McpResponse(TypedDict, total=False):
     Every key NotRequired because the three shapes share this type: a `result`
     reply, an `error` reply, and the SSE frames a streamable-HTTP server pushes
     when it also has a notification to send. Readers ask which one arrived rather
-    than assuming (see mcp_call_error, mcp_result_text).
+    than assuming (see mcp_result.read_result).
     """
 
     jsonrpc: str

@@ -127,9 +127,10 @@ def test_the_skip_flags_reach_the_admin_suite(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(R, "run_admin", capture)
 
-    run(monkeypatch, "--skip-media-upload", "--skip-dev-tools")
+    run(monkeypatch, "--skip-media-upload", "--skip-dev-tools", "--deactivated-plugins", "SwagMcpMerchantTools,")
 
     assert seen["skip_media_upload"] is True and seen["skip_dev_tools"] is True
+    assert seen["deactivated_plugins"] == ["SwagMcpMerchantTools"]
 
 
 def test_the_skip_flags_default_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -143,6 +144,7 @@ def test_the_skip_flags_default_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
     run(monkeypatch)
 
     assert seen["skip_media_upload"] is False and seen["skip_dev_tools"] is False
+    assert seen["deactivated_plugins"] == []
 
 
 # ---------------------------------------------------------------------------

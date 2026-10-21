@@ -218,7 +218,11 @@ def test_init_returns_the_session_id_and_server_instructions(monkeypatch: pytest
         "post",
         const(
             json_resp(
-                {"jsonrpc": "2.0", "id": 1, "result": {"instructions": "Use entity tools."}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"protocolVersion": C.DEFAULT_PROTOCOL_VERSION, "instructions": "Use entity tools."},
+                },
                 headers={"Mcp-Session-Id": "sid-1"},
             )
         ),
@@ -240,63 +244,123 @@ def test_init_tolerates_a_server_that_sends_no_instructions(monkeypatch: pytest.
     monkeypatch.setattr(
         C.requests,
         "post",
-        const(json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s"})),
+        const(
+            json_resp(
+                {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": C.DEFAULT_PROTOCOL_VERSION}},
+                headers={"Mcp-Session-Id": "s"},
+            )
+        ),
     )
 
     assert C.mcp_init() == ("s", "")
 
 
 # ---------------------------------------------------------------------------
-# Result / error extraction
+# Protocol revision
 # ---------------------------------------------------------------------------
-def test_result_text_takes_the_first_text_block() -> None:
-    resp = reply({"result": {"content": [{"type": "text", "text": "first"}, {"type": "text", "text": "second"}]}})
+def recording_server(
+    monkeypatch: pytest.MonkeyPatch, negotiated: str | None = None
+) -> list[tuple[JsonObject, dict[str, str]]]:
+    """A fake server answering initialize with `negotiated` (or the requested
+    revision), and recording every request body and its headers."""
+    sent: list[tuple[JsonObject, dict[str, str]]] = []
 
-    assert C.mcp_result_text(resp) == "first"
+    def post(_url: str, **kwargs: object) -> FakeResp:
+        body = cast(JsonObject, kwargs["json"])
+        sent.append((body, cast(dict[str, str], kwargs["headers"])))
+        if body["method"] == "initialize":
+            asked = cast(JsonObject, body["params"])["protocolVersion"]
+            result: JsonObject = {"protocolVersion": negotiated or asked}
+            return json_resp({"jsonrpc": "2.0", "id": 1, "result": result}, headers={"Mcp-Session-Id": "s"})
+        return json_resp({"jsonrpc": "2.0", "id": body["id"], "result": {"tools": []}})
 
-
-def test_result_text_skips_a_non_text_block() -> None:
-    resp = reply({"result": {"content": [{"type": "image", "data": "..."}, {"type": "text", "text": "wanted"}]}})
-
-    assert C.mcp_result_text(resp) == "wanted"
-
-
-def test_result_text_treats_a_block_without_a_type_as_text() -> None:
-    assert C.mcp_result_text(reply({"result": {"content": [{"text": "implicit"}]}})) == "implicit"
-
-
-def test_result_text_of_an_empty_response_is_empty() -> None:
-    assert C.mcp_result_text(reply({})) == ""
-    assert C.mcp_result_text(reply({"result": {"content": []}})) == ""
-
-
-def test_result_meta_defaults_to_a_dict_even_when_null() -> None:
-    assert C.mcp_result_meta(reply({"result": {"_meta": None}})) == {}
-    assert C.mcp_result_meta(reply({"result": {"_meta": {"listChanged": True}}})) == {"listChanged": True}
+    monkeypatch.setattr(C.requests, "post", post)
+    return sent
 
 
-def test_call_error_reports_a_protocol_error() -> None:
-    assert C.mcp_call_error(reply({"error": {"message": "Tool not found"}})) == "Tool not found"
+def test_a_session_asks_for_the_newest_handshake_revision_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a current client negotiates. The stateless revision is not one: it
+    has no initialize to ask in."""
+    sent = recording_server(monkeypatch)
+
+    _ = C.mcp_init(C.admin_endpoint())
+
+    assert cast(JsonObject, sent[0][0]["params"])["protocolVersion"] == C.PROTOCOL_REVISIONS[-1] == "2025-11-25"
 
 
-def test_call_error_names_an_unlabelled_protocol_error() -> None:
-    assert C.mcp_call_error(reply({"error": {}})) == "unknown error"
+def test_a_session_asks_for_the_endpoints_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = recording_server(monkeypatch)
+
+    _ = C.mcp_init(C.admin_endpoint().with_protocol("2025-11-25"))
+
+    assert cast(JsonObject, sent[0][0]["params"])["protocolVersion"] == "2025-11-25"
 
 
-def test_call_error_reports_a_tool_level_error_from_the_text_block() -> None:
-    """isError puts the message in the content, not in error.message — missing
-    this reads a failed tool call as a success."""
-    resp = reply({"result": {"isError": True, "content": [{"type": "text", "text": "entity not found"}]}})
+def test_a_downgraded_session_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server answering an older revision than asked would make every
+    per-revision check report a revision it never measured."""
+    _ = recording_server(monkeypatch, negotiated="2025-03-26")
 
-    assert C.mcp_call_error(resp) == "entity not found"
-
-
-def test_call_error_falls_back_when_an_is_error_response_has_no_text() -> None:
-    assert C.mcp_call_error(reply({"result": {"isError": True, "content": []}})) == "tool error"
+    with pytest.raises(RuntimeError, match="for protocol 2025-11-25, it negotiated 2025-03-26"):
+        _ = C.mcp_init(C.admin_endpoint().with_protocol("2025-11-25"))
 
 
-def test_call_error_of_a_successful_response_is_empty() -> None:
-    assert C.mcp_call_error(reply({"result": {"content": [{"type": "text", "text": "ok"}]}})) == ""
+def test_a_reply_naming_no_revision_is_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The spec requires protocolVersion in the initialize result. Without it,
+    a per-revision job would file its checks under a revision never confirmed."""
+    monkeypatch.setattr(
+        C.requests,
+        "post",
+        const(json_resp({"jsonrpc": "2.0", "id": 1, "result": {}}, headers={"Mcp-Session-Id": "s"})),
+    )
+
+    with pytest.raises(RuntimeError, match="its reply named no protocolVersion"):
+        _ = C.mcp_init(C.admin_endpoint().with_protocol("2024-11-05"))
+
+
+@pytest.mark.parametrize(
+    ("revision", "header"),
+    [("2024-11-05", None), ("2025-03-26", None), ("2025-06-18", "2025-06-18"), ("2025-11-25", "2025-11-25")],
+)
+def test_the_protocol_header_follows_initialize_from_2025_06_18(
+    monkeypatch: pytest.MonkeyPatch, revision: str, header: str | None
+) -> None:
+    """The 2025-06-18 transport requires it on every later request; a server that
+    gets none assumes 2025-03-26. Older revisions never had it."""
+    sent = recording_server(monkeypatch)
+    endpoint = C.admin_endpoint().with_protocol(revision)
+
+    session, _ = C.mcp_init(endpoint)
+    _ = C.mcp_tools_list_all(session, endpoint=endpoint)
+
+    init_headers, list_headers = sent[0][1], sent[1][1]
+    assert C.PROTOCOL_HEADER not in init_headers, "initialize is what negotiates it"
+    assert list_headers.get(C.PROTOCOL_HEADER) == header
+
+
+def test_an_unknown_revision_is_refused_when_the_endpoint_is_built() -> None:
+    """The stateless 2026-07-28 revision included: it has no initialize, and this
+    client would send one."""
+    with pytest.raises(ValueError, match="unknown protocol revision '2026-07-28'"):
+        _ = C.admin_endpoint().with_protocol("2026-07-28")
+
+
+def test_a_revision_clone_keeps_credentials_and_pinned_toolsets() -> None:
+    """On store, rebuilding would mint a new context token: a different cart."""
+    base = C.store_endpoint(context_token="tok").with_toolsets("ucp")
+
+    clone = base.with_protocol("2025-06-18")
+
+    assert clone.auth_headers == base.auth_headers
+    assert clone.toolsets == ("ucp",)
+    assert clone.url == base.url
+    assert clone.protocol_version == "2025-06-18"
+
+
+def test_a_toolset_clone_keeps_the_revision() -> None:
+    clone = C.admin_endpoint().with_protocol("2025-11-25").with_toolsets("order")
+
+    assert clone.protocol_version == "2025-11-25"
 
 
 # ---------------------------------------------------------------------------
@@ -715,3 +779,41 @@ def test_mcp_close_deletes_the_session_and_returns_the_status(monkeypatch: pytes
     assert C.mcp_close("sid-1", endpoint=C.ADMIN) == 404
     assert sent[0]["Mcp-Session-Id"] == "sid-1"
     assert sent[0]["sw-access-key"] == C.ADMIN.auth_headers["sw-access-key"]
+
+
+def test_a_resource_is_read_by_uri_on_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = recording_server(monkeypatch)
+
+    _ = C.mcp_read_resource("s", "shopware://tool-result/abc")
+
+    body, headers = sent[0]
+    assert (body["method"], body["params"]) == ("resources/read", {"uri": "shopware://tool-result/abc"})
+    assert headers["Mcp-Session-Id"] == "s"
+
+
+def test_a_refused_request_carries_the_servers_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dropped session and a missing route are both a bare 404 without it."""
+    body = {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Session not found or has expired."}}
+    monkeypatch.setattr(C.requests, "post", const(FakeResp(404, body=body)))
+
+    with pytest.raises(requests.exceptions.HTTPError, match=r"^404 error: Session not found or has expired\.$"):
+        _ = C.mcp_call("gone", "shopware-entity-search", {})
+
+
+def test_a_refused_request_without_json_carries_the_start_of_its_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Html(FakeResp):
+        @override
+        def json(self) -> object:
+            raise ValueError("not json")
+
+    monkeypatch.setattr(C.requests, "post", const(Html(502, text="<html>\n  Bad   Gateway\n</html>")))
+
+    with pytest.raises(requests.exceptions.HTTPError, match=r"^502 error: <html> Bad Gateway </html>$"):
+        _ = C.mcp_call("s", "shopware-entity-search", {})
+
+
+def test_a_refused_request_with_an_empty_body_keeps_the_plain_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(C.requests, "post", const(FakeResp(500, body={})))
+
+    with pytest.raises(requests.exceptions.HTTPError, match=r"^500 error$"):
+        _ = C.mcp_call("s", "shopware-entity-search", {})

@@ -463,3 +463,24 @@ def test_discovery_summary_over_records_the_runner_actually_produces() -> None:
 
     assert out.get("first_try_rate") == 0.0
     assert out.get("unexecuted") == 0
+
+
+def _graded(*attempts: tuple[str, str | None]) -> FixtureResult:
+    rows: list[JsonObject] = [{"tool": tool, "correct": True, "step": 1, "graded_by": by} for tool, by in attempts]
+    return cast(FixtureResult, cast(object, {"id": "f", "passed": False, "attempted_tools": rows}))
+
+
+def test_error_grading_counts_code_and_prose_per_owner() -> None:
+    results = [
+        _graded(("shopware-entity-read", "code"), ("get_order", "prose")),
+        _graded(("get_order", "prose"), ("shopware-entity-search", None)),
+    ]
+
+    assert S.error_grading(results) == {
+        "core": {"code": 1, "prose": 0},
+        "agentic-commerce": {"code": 0, "prose": 2},
+    }
+
+
+def test_error_grading_is_empty_without_failed_calls() -> None:
+    assert S.error_grading([cast(FixtureResult, cast(object, {"id": "f", "passed": True}))]) == {}

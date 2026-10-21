@@ -50,6 +50,9 @@ TIMEOUT_S = 30
 PROBE_TOOL = "shopware-entity-search"
 PROBE_ARGS: JsonObject = {"entity": "currency", "limit": 1}
 PROBE_PRIVILEGES = ["currency:read"]
+# The same tool on an entity the role does not grant: allowed by the allowlist,
+# refused by ACL, which is what `missing_privilege` exists to say.
+UNPRIVILEGED_ARGS: JsonObject = {"entity": "product", "limit": 1}
 
 Expect = Literal["blocked", "all", "partial"]
 
@@ -66,6 +69,8 @@ class Principal:
     access_key: str
     secret_key: str
     expect: Expect
+    # A user is held to its ACL role; an integration here is flagged `admin`.
+    user: bool = False
 
 
 class AdminApi:
@@ -214,7 +219,7 @@ def _user(
     )
     if allowlist is not None:
         api.call("POST", f"/api/_action/user/{user_id}/mcp-allowlist", {"allowlist": allowlist})
-    return Principal(label, access_key, secret_key, expect)
+    return Principal(label, access_key, secret_key, expect, user=True)
 
 
 @contextmanager
@@ -236,11 +241,30 @@ def provisioned(api: AdminApi) -> Generator[list[Principal]]:
             _user(api, created, f"mcp-evals-{run}-user-one-tool", role_id, locale_id, PARTIAL, "partial"),
         ]
     finally:
-        # Users before the role they hold; the list is already newest-first.
-        for path in created.paths:
-            try:
-                api.call("DELETE", path)
-            except ProvisioningFailed:
-                # A leftover is recognisable by its label; failing the run over
-                # cleanup would hide whatever the checks found.
-                pass
+        _delete(api, created)
+
+
+@contextmanager
+def another_principal(api: AdminApi) -> Generator[Principal]:
+    """One integration granted what "All capabilities" would grant, deleted after.
+
+    For a check that needs a second principal able to make the same call, so
+    that a refusal it gets is about who owns the thing, not about the allowlist.
+    """
+    created = _Created()
+    try:
+        label = f"mcp-evals-{secrets.token_hex(3)}-integration-other"
+        yield _integration(api, created, label, full_selection(api), "all")
+    finally:
+        _delete(api, created)
+
+
+def _delete(api: AdminApi, created: _Created) -> None:
+    # Users before the role they hold; the list is already newest-first.
+    for path in created.paths:
+        try:
+            api.call("DELETE", path)
+        except ProvisioningFailed:
+            # A leftover is recognisable by its label; failing the run over
+            # cleanup would hide whatever the checks found.
+            pass
