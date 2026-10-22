@@ -188,6 +188,10 @@ env:
         || contains(github.event.pull_request.labels.*.name, 'run-preloaded') }}
 
 
+# ubuntu-24.04, not ubuntu-latest, in every job. GitHub moves ubuntu-latest to
+# Ubuntu 26 from 2026-10-19 and posts a notice about it in every job that uses
+# the label. A pinned image changes only in a commit here, which is the
+# point of pinning anything else in this repo.
 jobs:
   # ---------------------------------------------------------------------------
   # 1. Static proof. No model, no LLM spend.
@@ -199,11 +203,11 @@ jobs:
   # ---------------------------------------------------------------------------
   # Runs ONLY for a labelled fork PR, to say why nothing else will. Without it
   # the label looks broken: applied, accepted, and then silence. Costs one
-  # ubuntu-latest second and no secrets.
+  # runner second and no secrets.
   fork-notice:
     name: Why this PR cannot run the evals
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && contains(github.event.pull_request.labels.*.name, 'run-evals') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - run: |
           echo "::warning::The \`run-evals\` label is set, but this PR comes from a fork and the evals cannot run for it. GitHub does not pass repository secrets to a \`pull_request\` run from a fork, so OPENAI_API_KEY would be empty and the suite would fail after installing Shopware — minutes spent for no measurement.%0ATo evaluate these changes, push the branch to this repository and label that PR, or run the workflow manually from the Actions tab against a branch here."
@@ -214,7 +218,7 @@ jobs:
     # no secrets, so it can only burn a full Shopware install and then fail on an
     # empty API key. `fork-notice` above explains that in the run itself.
     if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'run-evals') && !github.event.pull_request.head.repo.fork) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       store_plugin_ok: ${{ steps.lane.outputs.store_plugin_ok }}
@@ -251,6 +255,10 @@ jobs:
         id: lane
         uses: ./.github/actions/setup-lane
         with:
+          # The one lane that posts the SDK and served-profile notices. Every
+          # lane installs the same thing; seven copies buried the annotations
+          # that mattered.
+          announce: 'true'
           shopware_repo: ${{ env.SHOPWARE_REPO }}
           shopware_ref: ${{ github.event.inputs.shopware_ref }}
           event_name: ${{ github.event_name }}
@@ -295,7 +303,11 @@ jobs:
               echo "No description drift vs committed baseline."
             else
               echo "drift=true" >> "$GITHUB_OUTPUT"
-              echo "::warning::Tool description drift detected vs committed baseline."
+              # Context in the annotation itself: "drift detected" alone left the
+              # reader to guess whether to act. On a PR it usually means a plugin's
+              # default branch moved (only Shopware is pinned), and nobody has to fix
+              # it by hand, because the nightly reconciliation PR commits the baseline.
+              echo "::warning::Tool catalogue differs from the committed baseline (tool-history/latest.json). Expected when a plugin's default branch or shopware.sha moved. Effect: the admin LLM gate is advisory for this run. Nothing to fix by hand: the nightly run opens a reconciliation PR with the new baseline. The job summary names what moved."
               # `eval.drift` names what moved. The raw diff stays below it, folded,
               # because 200 lines of JSON is evidence rather than a finding — a
               # reader needs "these 11 descriptions changed" first.
@@ -632,63 +644,19 @@ jobs:
           # and skips the discount step without it, which is what it did on every
           # run before the lane created one.
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
-        run: |
-          # --allow-mutations: the UCP journey commits, because the plugin rolls
-          # every dry run back and a rolled-back cart cannot be the next step's
-          # precondition. Safe here and nowhere else — this instance is destroyed
-          # with the job.
-          #
-          # Warns instead of failing, for the reason on the preflight above: this
-          # was continue-on-error already, so its exit code changed nothing except
-          # to post a red annotation on a green job. The report JSON in
-          # static-results carries every assertion either way.
-          # Output captured to a file so the FAIL lines can go in the annotation as
-          # well as the log. "see the log above" is not a usable pointer here: one
-          # ANSI-coloured line anywhere in the job makes the whole log
-          # unretrievable through the API, so on a passing job the failing check
-          # names were readable in the web UI and nowhere else.
-          #
-          # Redirect, NOT `| tee`, and `|| rc=$?` rather than PIPESTATUS. The first
-          # version of this used `set -o pipefail` plus `rc=${PIPESTATUS[0]}`, which
-          # is right about tee (a pipeline reports tee's status, always 0) and wrong
-          # about everything else: a workflow `run:` is `bash -e`, so with pipefail
-          # on, a failing python aborts the step AT THE PIPELINE and the line reading
-          # PIPESTATUS never executes. The annotation could not fire, and a suite
-          # failure took the whole job red — which is what it had been rewritten to
-          # avoid. Measured on run #257: exit code 1, no annotation.
-          #
-          # No pipe means no pipefail question, and `|| rc=$?` keeps `set -e` from
-          # aborting while still capturing the code.
-          rc=0
-          python -m functional.runner --endpoint store --allow-mutations \
-            > /tmp/functional-store.log 2>&1 || rc=$?
-          cat /tmp/functional-store.log
-
-          # ANSI stripped before matching. functional/reporting.py gates colour on
-          # `sys.stdout.isatty()`, so a redirect already yields plain text and the
-          # patterns below work — but they anchor on `^\s*FAIL`, which a single
-          # escape sequence would silently defeat, turning every annotation into
-          # "(none captured)" with nothing to say why. Cheap insurance, and it
-          # documents that the greps depend on that gating.
-          plain=$(sed $'s/\033\\[[0-9;]*m//g' /tmp/functional-store.log)
-          counts=$(printf '%s\n' "${plain}" | grep -E 'Results: ' | tail -1 | tr -s ' ')
-
-          # The tally and the SKIPs go out on EVERY run, as a notice, not only when
-          # something fails. A green run with a skipped check reported nothing at
-          # all before this, so "20 passed, 2 failed, 1 skipped" left the identity
-          # of that skip unknowable without opening the run — and a skip that
-          # nobody can see is indistinguishable from coverage. This is what makes
-          # the standing "is media-upload passing or skipping?" question answerable
-          # from the annotation alone.
-          skips=$(printf '%s\n' "${plain}" | grep -E '^\s*SKIP ' | head -8 \
-            | tr '\n' '~' | sed 's/~/%0A/g' | cut -c1-900)
-          echo "::notice::Store API functional tests. ${counts:-(no tally line)}%0A${skips:-No skipped checks.}"
-
-          if [ "${rc}" -ne 0 ]; then
-            fails=$(printf '%s\n' "${plain}" | grep -E '^\s*FAIL ' | head -8 \
-              | tr '\n' '~' | sed 's/~/%0A/g' | cut -c1-1200)
-            echo "::warning::Store API functional tests reported failures. ${counts}%0A${fails:-(no FAIL lines captured)}"
-          fi
+        # --allow-mutations: the UCP journey commits, because the plugin rolls
+        # every dry run back and a rolled-back cart cannot be the next step's
+        # precondition. Safe here and nowhere else: this instance is destroyed
+        # with the job.
+        #
+        # --advisory: an unexpected failure is a warning and the step stays
+        # green, as it always has. The runner posts the annotations itself, from
+        # its records: new failures as a warning, known ones as a notice naming
+        # the issue they wait for (functional/known_failures.py), and with
+        # --annotate-skips the tally and every skip, so a skipped check cannot
+        # pass for coverage. That replaced ~60 lines of shell that grepped the
+        # log for FAIL and SKIP lines.
+        run: python -m functional.runner --endpoint store --allow-mutations --advisory --annotate-skips
 
       - name: Detect snapshot changes worth committing
         id: snapshot
@@ -740,7 +708,7 @@ jobs:
     name: Redis session store
     needs: static
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     services:
       redis:
@@ -833,7 +801,7 @@ jobs:
     name: Protocol ${{ matrix.revision }}
     needs: static
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -874,18 +842,20 @@ jobs:
         # read through tools/list, toolsets and calls, all at this revision.
         run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals
 
-      # Commits like static's store step, and warns like it: the second order
-      # (agentic-commerce#163) fails on every revision, which would otherwise
-      # turn each of these jobs red for the same known bug.
+      # Commits like static's store step, and is advisory like it. --advisory
+      # rather than continue-on-error: an allowed-to-fail step still posts
+      # GitHub's bare "Process completed with exit code 1" error on a green job,
+      # which named neither the step nor the check. The known second order
+      # (agentic-commerce#163) is a notice naming the issue; anything new is a
+      # warning that says so.
       - name: Functional suite, store
         if: ${{ !cancelled() && needs.static.outputs.store_ready == 'true' && steps.lane.outputs.sc_access_key != '' }}
-        continue-on-error: true
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
-        run: python -m functional.runner --endpoint store --allow-mutations --protocol-version "${REVISION}"
+        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version "${REVISION}"
 
       - name: Upload results
         if: always()
@@ -923,7 +893,7 @@ jobs:
           && (github.event_name == 'schedule'
               || github.event.inputs.next_major == 'true'
               || contains(github.event.pull_request.labels.*.name, 'run-next-major')) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     continue-on-error: true
     steps:
@@ -972,18 +942,18 @@ jobs:
             --deactivated-plugins "${INCOMPATIBLE}" --provision-principals
 
       # The UCP journey commits, as in static: a rolled-back cart cannot be the
-      # next step's precondition, and this instance dies with the job. Its one
-      # known failure, the second order (agentic-commerce#163), would otherwise
-      # turn the step red every night, so the step warns like static's does.
+      # next step's precondition, and this instance dies with the job. Advisory
+      # through --advisory, not continue-on-error, for the reason on the
+      # revisions' store step: known failures are notices naming their issue,
+      # new ones a warning, and no bare "exit code 1" on a green job.
       - name: Functional suite, store
         if: ${{ !cancelled() && steps.lane.outputs.sc_access_key != '' }}
-        continue-on-error: true
         env:
           SW_BASE_URL: ${{ env.APP_URL }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
-        run: python -m functional.runner --endpoint store --allow-mutations --protocol-version 2025-11-25
+        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version 2025-11-25
 
       - name: Upload results
         if: always()
@@ -1015,7 +985,7 @@ jobs:
     # is still worth the eval's diagnosis, and the store steps inside it can no
     # longer fail the job at all.
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Checkout evals repo
@@ -1336,7 +1306,7 @@ jobs:
     # store_ready is the preflight's verdict: if one UCP tool cannot run, none of
     # the 45 fixtures measure anything, and the run is pure spend.
     if: ${{ !cancelled() && needs.static.result != 'skipped' && needs.static.outputs.store_plugin_ok == 'true' && needs.static.outputs.store_ready == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Checkout evals repo
@@ -1439,7 +1409,7 @@ jobs:
     name: Report
     needs: [static, session-store, admin-eval, store-eval]
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 25, not 15: the reconciliation waits up to 10 minutes for the PR's lint.
     timeout-minutes: 25
     # Job-level, so it replaces the workflow's permissions for this job and has

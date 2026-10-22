@@ -57,6 +57,13 @@ inputs:
       that does not boot under them is deactivated and named in
       `incompatible_plugins`.
     default: ''
+  announce:
+    description: >-
+      Post the lane's happy-path facts as notices: the installed ucp-php-sdk and
+      the UCP profile the lane serves. Every lane installs the same thing, so one
+      job saying it is enough, and seven saying it buried everything else. Only
+      the notices: a warning about a broken lane is posted on every lane.
+    default: 'false'
   plugins_pat:
     description: Token that can read the private plugin repositories.
     required: true
@@ -349,6 +356,7 @@ runs:
         SESSION_STORE: ${{ inputs.session_store }}
         REDIS_URL: ${{ inputs.redis_url }}
         FEATURE_FLAGS: ${{ inputs.feature_flags }}
+        ANNOUNCE: ${{ inputs.announce }}
       run: |
         set -euo pipefail
 
@@ -422,7 +430,9 @@ runs:
           # `internal` too, from StaticAgentProfileFetcher, and that inference
           # invited the wrong conclusion for several runs.
           if [ -f vendor/ucp-php-sdk/core/src/Exception/AgentProfileException.php ]; then
-            echo "::notice::ucp-php-sdk ${SDK_VERSION:-unknown} installed, AgentProfileException present (#108). A profile-fetch failure will be typed and answered 424 rather than flattened to 500 — but \`internal\` has other causes (APP_ENV=test wires a profile-fetcher test double), so this rules one out, it does not identify the fault."
+            if [ "${ANNOUNCE}" = "true" ]; then
+              echo "::notice::ucp-php-sdk ${SDK_VERSION:-unknown} installed, AgentProfileException present (#108). A profile-fetch failure will be typed and answered 424 rather than flattened to 500 — but \`internal\` has other causes (APP_ENV=test wires a profile-fetcher test double), so this rules one out, it does not identify the fault."
+            fi
           else
             echo "::warning::ucp-php-sdk ${SDK_VERSION:-unknown} has no AgentProfileException, so #107/#108 are MISSING and a profile-fetch failure will report a bare \`internal\`. Most likely the requested constraint resolved below 0.0.3 — check the \`composer require\` resolver output earlier in this step."
           fi
@@ -917,6 +927,7 @@ runs:
       env:
         APP_URL: ${{ inputs.app_url }}
         FEATURE_FLAGS: ${{ inputs.feature_flags }}
+        ANNOUNCE: ${{ inputs.announce }}
       run: |
         set -euo pipefail
         TOKEN=$(curl -fsS -X POST "${APP_URL}/api/oauth/token" \
@@ -1244,7 +1255,7 @@ runs:
         curl -sS --max-time 15 -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
           "${APP_URL}/.well-known/ucp" -o served-profile.json || true
         python3 <<'PY'
-        import json, pathlib
+        import json, os, pathlib
 
         try:
             profile = json.loads(pathlib.Path("served-profile.json").read_text())
@@ -1272,14 +1283,17 @@ runs:
             effective, _ = json.JSONDecoder().raw_decode(raw[raw.index("{"):])
         except Exception:  # noqa: BLE001 — a diagnostic must not raise
             pass
-        print(
-            f"::notice::UCP profile served by this lane: capabilities="
-            f"{list(capabilities) or 'NONE'}%0Aservices={list(services) or 'NONE'}%0A"
-            f"signing_keys={len(keys)}%0AEffective config (ucp:config:show): "
-            f"active={effective.get('active')}, "
-            f"enabledTransports={effective.get('enabledTransports') or []}, "
-            f"enabledCapabilities={effective.get('enabledCapabilities') or []}"
-        )
+        # Only the announcing lane posts it. An empty profile still warns on
+        # every lane, below.
+        if os.environ.get("ANNOUNCE") == "true":
+            print(
+                f"::notice::UCP profile served by this lane: capabilities="
+                f"{list(capabilities) or 'NONE'}%0Aservices={list(services) or 'NONE'}%0A"
+                f"signing_keys={len(keys)}%0AEffective config (ucp:config:show): "
+                f"active={effective.get('active')}, "
+                f"enabledTransports={effective.get('enabledTransports') or []}, "
+                f"enabledCapabilities={effective.get('enabledCapabilities') or []}"
+            )
         print(f"Served profile: services={list(services)} capabilities={list(capabilities)} "
               f"signing_keys={len(keys)}")
         if not capabilities:

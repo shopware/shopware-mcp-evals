@@ -12,10 +12,14 @@ concurrency:
   group: lint-${{ github.ref }}
   cancel-in-progress: true
 
+# ubuntu-24.04, not ubuntu-latest, in every job. GitHub moves ubuntu-latest to
+# Ubuntu 26 from 2026-10-19 and posts a notice about it in every job that uses
+# the label. A pinned image changes only in a commit here, which is the
+# point of pinning anything else in this repo.
 jobs:
   lint:
     name: Lint & unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout

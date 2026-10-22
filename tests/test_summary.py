@@ -363,6 +363,25 @@ def test_main_appends_once_to_the_step_summary(
     capsys.readouterr()
 
 
+def test_the_summary_size_is_a_notice_only_near_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """At a few KB it is a line in the log. Past half the cap it is worth a look."""
+    rows_dir = write_rows(tmp_path, [row("admin · primary", "gpt-4o", 0.92, 90)])
+    cmp_path = tmp_path / "cmp.json"
+    cmp_path.write_text(json.dumps(comparison()))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+    monkeypatch.setattr(sys, "argv", ["summary.py", "--rows", str(rows_dir), "--comparison", str(cmp_path)])
+
+    assert S.main() == 0
+    out = capsys.readouterr().out
+    assert "job summary is" in out and "::notice::job summary" not in out
+
+    monkeypatch.setattr(S, "GITHUB_SUMMARY_LIMIT", 100)
+    assert S.main() == 0
+    assert "::notice::job summary" in capsys.readouterr().out
+
+
 def test_main_survives_a_missing_comparison_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
