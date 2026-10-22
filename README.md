@@ -1058,17 +1058,24 @@ shopware:
 `http://127.0.0.1/callback` matches any port, because a loopback IP literal
 does (RFC 8252), so the script picks one and nothing listens there: it reads
 the code off the consent decision, which it posts with the suite's admin token.
-`localhost` is matched exactly, so Claude Code needs its fixed callback port:
+`localhost` is matched exactly, so Claude Code needs its fixed callback port.
+It also refuses to send a token request over plain http to any host but
+`localhost`, `127.0.0.1` and `::1`, so point it at the lane's own port rather
+than a `*.localhost` name behind a proxy. The shop builds every discovery URL
+from the host it was asked on, so either name is self-consistent:
 
 ```bash
 claude mcp add --transport http --client-id claude-code --callback-port 53682 \
-  shopware-lane http://trunk.localhost:8088/api/_mcp
+  shopware-lane http://localhost:8100/api/_mcp
+claude mcp login shopware-lane   # opens the consent page; --no-browser prints the URL
 ```
 
-`MCP_EVALS_OAUTH_CLIENT` names another client for the script. Two checks fail
-until a follow-up on #21862 lands, and are known failures: the system health
-check and the Administration snippets still answer an MCP-bound token like an
-Admin API token.
+The consent page is built Administration JavaScript. A lane serving a bundle
+from before resource support drops `resource` from the decision, and the token
+request is then refused with "The authorization was granted without a
+resource": rebuild the Administration (`composer build:js:admin`).
+
+`MCP_EVALS_OAUTH_CLIENT` names another client for the script.
 
 ## Output format
 

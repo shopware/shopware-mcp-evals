@@ -23,9 +23,10 @@ Three things it does not do:
   * clean up. Each run leaves a few authorization codes and refresh tokens for the
     administrator and the probe client, which is what any sign-in leaves.
 
-Two checks are known to fail until the follow-up on #21862 lands, and are listed
-in functional/known_failures.py: the system health check and the Administration
-snippets still answer an MCP-bound token as if it were an Admin API token.
+Two endpoints check a bearer token themselves rather than through the Admin API
+firewall: the system health check and the Administration snippets. Both are
+asked whether they refuse an MCP-bound token, because the first draft of #21862
+let it through on both.
 
 With `--provision-principals` it signs in twice more, as two non-admin users it
 creates through the Admin API and deletes after (functional/principals.py): one
@@ -79,11 +80,10 @@ UNREGISTERED = (
     f"{CONFIG_FILE} under shopware.api.oauth_clients; set {CLIENT_ENV} to use another client"
 )
 
-# Known failures, see functional/known_failures.py. Spelled out there too.
-HEALTH_CHECK_GAP = "MCP-bound token refused on /api/_info/system-health-check"
-HEALTH_CHECK_ERROR = "answered HTTP 200 with the health report"
-SNIPPETS_GAP = "MCP-bound token gets only the anonymous admin snippets"
-SNIPPETS_ERROR = "answered the full Administration snippet set"
+# What ShopwareAuthCodeGrantType says when the consent decision dropped the
+# resource the authorization request named: an Administration built before
+# resource support. A bare "does not match" sent people looking at the client.
+GRANTED_WITHOUT_RESOURCE = "granted without a resource"
 
 ACCEPT_MCP = {"Accept": "application/json, text/event-stream"}
 
@@ -313,11 +313,14 @@ class OAuthFlow:
         redirect: str = REDIRECT,
         decide: bool = True,
         consent_token: str = "",
+        forward_resource: bool = True,
     ) -> Grant:
         """GET authorize as the client, then post the consent decision as the
         admin, or as whoever `consent_token` belongs to.
 
         `resource=""` means the MCP endpoint, None leaves the parameter out.
+        `forward_resource=False` posts the decision without it, as a consent
+        page built before resource support does.
         """
         verifier, challenge = pkce()
         state = secrets.token_urlsafe(8)
@@ -336,10 +339,11 @@ class OAuthFlow:
         location = reply.header("Location") or reply.text[:300]
         if not decide or reply.status != 302 or "error=" in location:
             return Grant(reply.status, location, "", verifier, state)
+        decided = {k: v for k, v in query.items() if forward_resource or k != "resource"}
         decision = self.http(
             "POST",
             "/api/oauth/authorize",
-            json_body={**query, "approved": approved},
+            json_body={**decided, "approved": approved},
             headers=self.bearer(consent_token or self.admin_token),
         )
         redirect_uri = str(decision.json().get("redirectUri", ""))
@@ -469,6 +473,15 @@ class OAuthFlow:
             f"HTTP {grant.status} {grant.location[:140]}",
         )
         self.check("consent page receives the resource", "resource=" in grant.location, grant.location[:140])
+        # What the consent page asks before it renders: the resource is what
+        # lets it say the access is limited to the MCP endpoint.
+        consent_query = grant.location.split("?", 1)[1] if "?" in grant.location else ""
+        info = self.http("GET", "/api/oauth/authorize/info?" + consent_query, headers=self.bearer(self.admin_token))
+        self.check(
+            "consent information names the MCP endpoint as the resource",
+            info.status == 200 and info.json().get("resource") == self.mcp_url,
+            f"HTTP {info.status} resource={info.json().get('resource')!r}",
+        )
         params = grant.params
         self.check(
             "approval redirect carries the code and the state",
@@ -524,22 +537,22 @@ class OAuthFlow:
             self.check(f"MCP-bound token refused on {path}", reply.status == 401, f"HTTP {reply.status}")
 
         health = self.http("GET", "/api/_info/system-health-check", headers=self.bearer(access))
-        if health.status == 200:
-            self.rep.check_fail(HEALTH_CHECK_GAP, f"{HEALTH_CHECK_ERROR}, expected 401")
-        else:
-            self.check(HEALTH_CHECK_GAP, health.status == 401, f"HTTP {health.status}, expected 401")
+        self.check(
+            "MCP-bound token refused on /api/_info/system-health-check",
+            health.status == 401,
+            f"HTTP {health.status}, expected 401" + (" with the health report" if health.status == 200 else ""),
+        )
 
         # The endpoint is public: anonymously it answers the login page's
         # snippets. A token that may not use the Admin API must not get more.
         path = "/api/_admin/snippets?locale=en-GB"
         anonymous = snippet_groups(self.http("GET", path))
         bound = snippet_groups(self.http("GET", path, headers=self.bearer(access)))
-        if len(bound) > len(anonymous):
-            self.rep.check_fail(
-                SNIPPETS_GAP, f"{SNIPPETS_ERROR}: {len(bound)} groups, {len(anonymous)} without a token"
-            )
-        else:
-            self.check(SNIPPETS_GAP, bound == anonymous, f"{sorted(bound)} != {sorted(anonymous)}")
+        self.check(
+            "MCP-bound token gets only the anonymous admin snippets",
+            bool(anonymous) and bound == anonymous,
+            f"{len(bound)} groups with the token, {len(anonymous)} without",
+        )
 
     def refresh(self, refresh_token: str) -> None:
         if not self.check("refresh token issued", bool(refresh_token), "none in the token response"):
@@ -559,17 +572,34 @@ class OAuthFlow:
         )
         me = self.http("GET", "/api/_info/me", headers=self.bearer(access))
         self.check("refreshed token still refused on the Admin API", me.status == 401, f"HTTP {me.status}")
+        renewed_refresh = str(renewed.get("refresh_token", ""))
+        if not renewed_refresh:
+            # A refusal of an empty token proves nothing about the resource.
+            self.rep.check_fail("refresh for a different resource refused", "no refresh token to try it with")
+            return
         other = self.http(
             "POST",
             "/api/oauth/token",
             form={
                 "grant_type": "refresh_token",
                 "client_id": self.client,
-                "refresh_token": str(renewed.get("refresh_token", "")),
+                "refresh_token": renewed_refresh,
                 "resource": f"{self.base}/api/other",
             },
         )
         self.check("refresh for a different resource refused", other.status >= 400, f"HTTP {other.status}")
+
+    def refused(self, label: str, grant: Grant, reply: Reply, *, says: str = "") -> None:
+        """A token request that must fail, for the reason under test only: with
+        no code to exchange, any refusal would pass."""
+        if "code" not in grant.params:
+            self.rep.check_fail(label, f"no code to exchange: {grant.redirect[:120] or grant.location[:120]}")
+            return
+        self.check(
+            label,
+            reply.status >= 400 and says in reply.text,
+            f"HTTP {reply.status} {reply.text[:160]}",
+        )
 
     def negatives(self) -> None:
         foreign = self.authorize(resource="https://evil.example/api/_mcp")
@@ -578,10 +608,21 @@ class OAuthFlow:
             "invalid_target" in foreign.location + foreign.redirect,
             (foreign.location or foreign.redirect)[:160],
         )
-        other = self.token(self.authorize(), resource=f"{self.base}/api/other")
-        self.check("token request for a different resource refused", other.status >= 400, f"HTTP {other.status}")
-        wrong = self.token(self.authorize(), verifier="wrong-verifier-" + "x" * 40)
-        self.check("wrong PKCE verifier refused", wrong.status >= 400, f"HTTP {wrong.status}")
+        grant = self.authorize()
+        self.refused(
+            "token request for a different resource refused",
+            grant,
+            self.token(grant, resource=f"{self.base}/api/other"),
+        )
+        grant = self.authorize()
+        self.refused("wrong PKCE verifier refused", grant, self.token(grant, verifier="wrong-verifier-" + "x" * 40))
+        grant = self.authorize(forward_resource=False)
+        self.refused(
+            "consent without the resource: the token request is refused and names the consent page",
+            grant,
+            self.token(grant),
+            says=GRANTED_WITHOUT_RESOURCE,
+        )
         denied = self.authorize(approved=False)
         self.check(
             "denied consent redirects with access_denied and iss",

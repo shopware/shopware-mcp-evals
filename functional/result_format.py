@@ -63,7 +63,6 @@ PREDATES_REVISION_FORMAT = (
     f"the server predates {FORMAT_FIX} ({FORMAT_FIX_URL}): it sends one result format on every revision, "
     "so neither the format per revision nor the model metadata in structuredContent can be checked"
 )
-# Spelled out in functional/known_failures.py, which matches on this prefix.
 MODEL_META_IN_STRUCTURED = "model metadata in structuredContent"
 MODEL_META_IN_TEXT = "model metadata in the legacy text"
 NO_STRUCTURED_META = "no _meta in structuredContent"
@@ -294,6 +293,6 @@ def verify_format_per_revision(rep: Reporter, replies: Sequence[tuple[str, Probe
         where = MODEL_META_IN_TEXT
         if spec:
             # A result without metadata gets a label of its own: passing it says
-            # nothing about the known gap, and must not ask for its entry to go.
+            # nothing about whether the metadata reaches structuredContent.
             where = MODEL_META_IN_STRUCTURED if outcome.model_meta else NO_MODEL_META_IN_STRUCTURED
         _report(rep, f"{where} {revision}: {probe.label} ({probe.tool})", metadata_problems(outcome, probe, revision))

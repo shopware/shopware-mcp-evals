@@ -1,10 +1,11 @@
-"""The MCP OAuth flow against a fake shop: skipped without discovery, gaps known.
+"""The MCP OAuth flow against a fake shop: skipped without discovery, passing on #21862.
 
 The fake answers the way the trunk lane on shopware/shopware integration/mcp-iteration-4
-answered the scripted flow, with switches for what older or fixed shops do
-differently: no discovery at all (before #21862), no registered client, and the
-two gaps closed. Users who sign in with a password are held to the allowlist
-they were given, as `McpAllowlistProvider` does for a bearer token.
+answered the flow, with switches for what older shops do differently: no
+discovery at all (before #21862), no registered client, and the first draft of
+#21862, whose system health check and admin snippets still honoured an MCP-bound
+token. Users who sign in with a password are held to the allowlist they were
+given, as `McpAllowlistProvider` does for a bearer token.
 """
 
 import base64
@@ -57,7 +58,7 @@ def reply(status: int, body: object = None, **headers: str) -> O.Reply:
 class FakeShop:
     """Just enough of Shopware's OAuth and MCP endpoints for the flow."""
 
-    def __init__(self, *, discovery: bool = True, registered: bool = True, gaps: bool = True) -> None:
+    def __init__(self, *, discovery: bool = True, registered: bool = True, gaps: bool = False) -> None:
         self.discovery: bool = discovery
         self.registered: bool = registered
         self.gaps: bool = gaps
@@ -106,6 +107,8 @@ class FakeShop:
             return reply(200, {"resource": MCP, "authorization_servers": [ISSUER]})
         if path == "/.well-known/oauth-authorization-server/api":
             return reply(200, {"issuer": ISSUER, "code_challenge_methods_supported": ["S256"]})
+        if path == "/api/oauth/authorize/info":
+            return reply(200, {"client": {"id": query.get("client_id")}, "resource": query.get("resource")})
         if path == "/api/oauth/authorize":
             bearer = headers.get("Authorization", "").removeprefix("Bearer ")
             if bearer.startswith("user-"):
@@ -194,6 +197,9 @@ class FakeShop:
         digest = hashlib.sha256(form["code_verifier"].encode()).digest()
         if base64.urlsafe_b64encode(digest).rstrip(b"=").decode() != challenge:
             return reply(400, {"error": "invalid_grant"})
+        if form.get("resource") and not resource:
+            hint = f"The authorization was {O.GRANTED_WITHOUT_RESOURCE}."
+            return reply(400, {"error": "invalid_target", "hint": hint})
         if form.get("resource", resource) != resource:
             return reply(400, {"error": "invalid_target"})
         return self.issue(form["client_id"], resource, user)
@@ -245,24 +251,25 @@ def test_a_shop_without_discovery_is_one_skip_naming_the_pr(monkeypatch: pytest.
     assert "shopware/shopware#21862" in record.get("reason", "")
 
 
-def test_the_whole_flow_passes_on_the_lane_with_both_gaps_known(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_whole_flow_passes_on_the_lane(monkeypatch: pytest.MonkeyPatch) -> None:
     rep = run(FakeShop(), monkeypatch)
 
-    assert failures(rep) == [O.HEALTH_CHECK_GAP, O.SNIPPETS_GAP]
-    assert rep.expected_failed == 2 and rep.exit_code == 0
-    assert rep.passed == 35 and rep.skipped == 1
+    assert failures(rep) == [] and rep.exit_code == 0
+    assert rep.passed == 39 and rep.skipped == 1
     assert rep.records[-1].get("reason") == O.NEEDS_PROVISIONING
-    [notice] = rep.annotations("Admin")
-    assert notice.startswith("::notice") and O.FIX_URL in notice
 
 
-def test_closing_the_gaps_asks_for_the_entries_to_go(monkeypatch: pytest.MonkeyPatch) -> None:
-    rep = run(FakeShop(gaps=False), monkeypatch)
+def test_the_first_drafts_gaps_are_new_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing in the registry excuses them any more: a regression is reported as new."""
+    rep = run(FakeShop(gaps=True), monkeypatch)
 
-    assert rep.failed == 0 and rep.passed == 37
-    assert [label for label, _ in rep.recovered] == [O.HEALTH_CHECK_GAP, O.SNIPPETS_GAP]
-    [warning] = rep.annotations("Admin")
-    assert warning.startswith("::warning") and "2 known failure(s) passed" in warning
+    assert failures(rep) == [
+        "MCP-bound token refused on /api/_info/system-health-check",
+        "MCP-bound token gets only the anonymous admin snippets",
+    ]
+    assert rep.unexpected_failed == 2 and rep.exit_code != 0
+    errors = [str(r.get("error")) for r in rep.records if r["status"] == "fail"]
+    assert errors == ["HTTP 200, expected 401 with the health report", "4 groups with the token, 2 without"]
 
 
 def test_an_unregistered_client_skips_after_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,19 +287,75 @@ def test_the_client_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) 
     assert rep.failed == 0, failures(rep)
 
 
-def test_a_gap_failing_another_way_is_not_the_known_one() -> None:
-    """A 500 on the health check is new, not the gap the registry describes."""
-    shop = FakeShop(gaps=False)
+def test_consent_info_without_the_resource_fails_one_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server from before the consent page showed the resource."""
+    shop = FakeShop()
     real = shop.__call__
 
-    def broken(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
-        return reply(500, "boom") if url.endswith("/system-health-check") else real(method, url, headers, body)
+    def old_info(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        if "/api/oauth/authorize/info" in url:
+            return reply(200, {"client": {"id": "x"}})
+        return real(method, url, headers, body)
 
-    rep = Reporter(BASE, color=False)
-    O.verify_oauth_flow(rep, ADMIN, send=broken)
+    rep = run(cast(FakeShop, old_info), monkeypatch)
 
-    assert failures(rep) == [O.HEALTH_CHECK_GAP]
-    assert rep.unexpected_failed == 1
+    assert failures(rep) == ["consent information names the MCP endpoint as the resource"]
+
+
+def test_a_refusal_without_the_consent_page_hint_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare "does not match" sends people to the client instead of the Administration."""
+    shop = FakeShop()
+    real = shop.__call__
+
+    def no_hint(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        answer = real(method, url, headers, body)
+        if O.GRANTED_WITHOUT_RESOURCE in answer.text:
+            return reply(400, {"error": "invalid_target"})
+        return answer
+
+    rep = run(cast(FakeShop, no_hint), monkeypatch)
+
+    assert failures(rep) == ["consent without the resource: the token request is refused and names the consent page"]
+
+
+def test_refusals_need_a_code_to_refuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When consent yields no code, every token request fails, so a refusal proves nothing."""
+    shop = FakeShop()
+    real = shop.__call__
+    calls = {"approve": 0}
+
+    def codeless(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        if method == "POST" and url.endswith("/api/oauth/authorize"):
+            calls["approve"] += 1
+            if calls["approve"] > 1:
+                return reply(500, "boom")
+        return real(method, url, headers, body)
+
+    rep = run(cast(FakeShop, codeless), monkeypatch)
+
+    refusals = [
+        "token request for a different resource refused",
+        "wrong PKCE verifier refused",
+        "consent without the resource: the token request is refused and names the consent page",
+    ]
+    for label in refusals:
+        [record] = [r for r in rep.records if r["label"] == label]
+        assert record["status"] == "fail" and "no code to exchange" in str(record.get("error"))
+
+
+def test_a_refresh_that_breaks_does_not_pass_the_resource_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    shop = FakeShop()
+    real = shop.__call__
+
+    def broken_refresh(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        if b"grant_type=refresh_token" in (body or b""):
+            return reply(500, "boom")
+        return real(method, url, headers, body)
+
+    rep = run(cast(FakeShop, broken_refresh), monkeypatch)
+
+    [record] = [r for r in rep.records if r["label"] == "refresh for a different resource refused"]
+    assert record["status"] == "fail" and record.get("error") == "no refresh token to try it with"
 
 
 def test_a_failed_admin_sign_in_stops_the_flow() -> None:

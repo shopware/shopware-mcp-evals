@@ -495,7 +495,9 @@ def test_a_server_since_21844_passes_every_check(monkeypatch: pytest.MonkeyPatch
     assert "model metadata in the legacy text 2024-11-05: toolsets-list (shopware-toolsets-list)" not in found
 
 
-def test_a_server_before_a5c30a4_is_a_known_failure_naming_the_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_server_before_a5c30a4_fails_the_structured_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-revision format without the model metadata in structuredContent:
+    only a draft of shopware/shopware#21844 sent that, so it is a new failure."""
     rep = run(monkeypatch, RevisionServer(structured_meta=False), probes=(OK, DRY_RUN))
 
     failed = [r for r in rep.records if r.get("status") == "fail"]
@@ -503,9 +505,7 @@ def test_a_server_before_a5c30a4_is_a_known_failure_naming_the_pr(monkeypatch: p
         "model metadata in structuredContent 2025-06-18: dry-run upsert (shopware-entity-upsert)",
         "model metadata in structuredContent 2025-11-25: dry-run upsert (shopware-entity-upsert)",
     ]
-    assert rep.expected_failed == 2 and rep.exit_code == 0
-    [notice] = rep.annotations("Admin")
-    assert notice.startswith("::notice") and "https://github.com/shopware/shopware/pull/21844" in notice
+    assert rep.unexpected_failed == 2 and rep.exit_code != 0
 
 
 def test_formats_on_the_wrong_side_of_the_boundary_fail(monkeypatch: pytest.MonkeyPatch) -> None:
