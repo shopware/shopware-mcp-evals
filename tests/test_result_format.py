@@ -313,7 +313,8 @@ def test_a_refused_call_is_no_evidence_of_an_old_server(monkeypatch: pytest.Monk
 
     assert server.opened == list(R.FORMAT_REVISIONS)
     assert not [r for r in rep.records if r.get("reason") == R.PREDATES_RENDERER]
-    assert rep.failed == len(R.FORMAT_REVISIONS) * 2
+    # With no reply in either format, the revision check has nothing to pass on.
+    assert rep.failed == len(R.FORMAT_REVISIONS) * 2 + (replies == "all-refused")
 
 
 def test_a_session_that_will_not_open_fails_that_revision_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -515,3 +516,14 @@ def test_formats_on_the_wrong_side_of_the_boundary_fail(monkeypatch: pytest.Monk
     assert found[R.FOLLOWS_REVISION] == "fail"
     record = next(r for r in rep.records if r.get("label") == R.FOLLOWS_REVISION)
     assert "2024-11-05 toolsets-list: spec, expected legacy" in str(record.get("error"))
+
+
+def test_replies_in_no_format_fail_the_revision_check_rather_than_pass_it() -> None:
+    """Every probe refused: nothing shows the format follows the revision."""
+    rep = Reporter("test", color=False)
+    refused = read_result({"error": {"code": -32602, "message": "nope"}})
+
+    R.verify_format_per_revision(rep, [(revision, OK, refused) for revision in R.FORMAT_REVISIONS])
+
+    assert statuses(rep) == {R.FOLLOWS_REVISION: "fail"}
+    assert "no reply came back" in str(rep.records[-1].get("error"))

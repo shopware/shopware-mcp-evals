@@ -413,6 +413,13 @@ def test_the_verdict_tells_the_generations_apart() -> None:
     assert M.format_verdict([("2024-11-05", spec), ("2025-06-18", legacy)]) == "mixed"
 
 
+def test_the_verdict_names_a_run_without_a_rendered_reply() -> None:
+    refused = read_result({"error": {"code": -32602, "message": "nope"}})
+
+    assert M.format_verdict([]) == "no_format"
+    assert M.format_verdict([("2024-11-05", refused), ("2025-06-18", refused)]) == "no_format"
+
+
 def _structured(data: object, structured: object, meta: dict[str, object], summary: str | None = None) -> ToolOutcome:
     texts = [json.dumps(data), *([summary] if summary else []), json.dumps({"_meta": meta})]
     return read_result(

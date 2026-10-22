@@ -401,7 +401,7 @@ def from_text(text: str, is_error: bool = False) -> ToolOutcome:
     return read_result({"result": {"content": [{"type": "text", "text": text}], "isError": is_error}})
 
 
-type FormatVerdict = Literal["by_revision", "one_format", "mixed"]
+type FormatVerdict = Literal["by_revision", "one_format", "mixed", "no_format"]
 
 
 def format_verdict(replies: Iterable[tuple[str, ToolOutcome]]) -> FormatVerdict:
@@ -412,9 +412,13 @@ def format_verdict(replies: Iterable[tuple[str, ToolOutcome]]) -> FormatVerdict:
     is a server from before it (the legacy envelope everywhere, or the
     `v6.8.0.0` flag's spec format everywhere). `mixed`: neither, which no
     server is meant to send. Protocol errors and plain text say nothing about
-    the format and are left out.
+    the format and are left out. `no_format`: nothing was left, so nothing
+    shows which generation the server is. Counting that as `by_revision` would
+    pass a check on a server that answered every probe with an error.
     """
     rendered = [(revision, outcome.shape) for revision, outcome in replies if outcome.shape in ("legacy", "spec")]
+    if not rendered:
+        return "no_format"
     if all(shape == format_for(revision) for revision, shape in rendered):
         return "by_revision"
     if len({shape for _, shape in rendered}) == 1:

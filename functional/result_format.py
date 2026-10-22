@@ -275,6 +275,9 @@ def verify_format_per_revision(rep: Reporter, replies: Sequence[tuple[str, Probe
     if verdict == "one_format":
         rep.check_skip(FOLLOWS_REVISION, PREDATES_REVISION_FORMAT)
         return
+    if verdict == "no_format":
+        rep.check_fail(FOLLOWS_REVISION, "no reply came back in the legacy or the spec format, so none shows it")
+        return
     wrong = [
         f"{revision} {probe.label}: {outcome.shape}, expected {format_for(revision)}"
         for revision, probe, outcome in replies

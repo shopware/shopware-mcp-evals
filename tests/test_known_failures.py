@@ -114,6 +114,15 @@ def test_the_printed_line_marks_the_failure_as_expected(capsys: pytest.CaptureFi
     assert "1 failed (1 expected)" in out
 
 
+def test_a_local_run_says_a_known_failure_passed(capsys: pytest.CaptureFixture[str]) -> None:
+    """The warning annotation only reaches GitHub, so the summary says it too."""
+    rep = reporter()
+    rep.check_pass("a check")
+    rep.summary()
+
+    assert "Known failure passed: a check. Was waiting on org/repo#1" in capsys.readouterr().out
+
+
 def test_the_report_counts_expected_failures(tmp_path: Path) -> None:
     rep = reporter()
     rep.check_fail("a check", "the known cause")
