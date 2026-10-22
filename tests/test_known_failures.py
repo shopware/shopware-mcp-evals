@@ -53,7 +53,9 @@ def test_every_entry_names_a_check_the_suite_still_has() -> None:
 def test_every_entry_says_what_it_waits_for() -> None:
     for entry in KNOWN_FAILURES:
         assert entry.error and entry.waiting_for and entry.why
-        assert entry.url.startswith("https://github.com/") and entry.issue in entry.url.replace("/issues/", "#")
+        # An issue or the pull request that fixes it.
+        assert entry.url.startswith("https://github.com/")
+        assert entry.issue in entry.url.replace("/issues/", "#").replace("/pull/", "#")
 
 
 def test_match_needs_both_the_label_and_the_error() -> None:

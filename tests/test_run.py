@@ -399,11 +399,12 @@ def _wire(monkeypatch: pytest.MonkeyPatch, fake: FakeServer) -> None:
     # lives there so the eval suite shares one definition of "a cart that can
     # be checked out". Unpatched, these two tests reached the network.
     monkeypatch.setattr(lane, "mcp_call", fake.call)
-    # Both open sessions of their own through their own imports, so unpatched
+    # They open sessions of their own through their own imports, so unpatched
     # they reach whatever server .env names. Each has its own tests.
     monkeypatch.setattr(R, "verify_result_format", const(None))
     monkeypatch.setattr(R, "verify_large_results", const(None))
     monkeypatch.setattr(R, "verify_stateless_era", const(None))
+    monkeypatch.setattr(R, "verify_oauth_flow", const(None))
 
 
 def test_run_store_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -698,7 +699,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, endpoint_name: str, revision: str) -> 
 
         return record
 
-    for name in ("verify_result_format", "verify_large_results", "verify_stateless_era"):
+    for name in ("verify_result_format", "verify_large_results", "verify_stateless_era", "verify_oauth_flow"):
         monkeypatch.setattr(R, name, recorder(name))
     rep = Reporter(endpoint_name, color=False)
     session, _ = fake.init()
@@ -709,7 +710,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, endpoint_name: str, revision: str) -> 
     return rep, called
 
 
-GATE_LABEL = "result format, large results, stateless era"
+GATE_LABEL = "result format, large results, stateless era, OAuth flow"
 
 
 @pytest.mark.parametrize("endpoint_name", ["admin", "store"])
@@ -720,6 +721,7 @@ def test_the_default_revision_runs_the_checks_that_compare_revisions(
 
     assert "verify_result_format" in called
     assert "verify_stateless_era" in called
+    assert ("verify_oauth_flow" in called) == (endpoint_name == "admin"), "OAuth is an Admin API flow"
     assert not [r for r in rep.records if r["label"] == GATE_LABEL]
 
 

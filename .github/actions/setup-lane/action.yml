@@ -582,6 +582,38 @@ runs:
                         enabled: false
         YAML
 
+        # A public OAuth client for functional/oauth.py, which walks the MCP OAuth
+        # flow (shopware/shopware#21862). Public clients are configuration, not
+        # data: `shopware.api.oauth_clients`, keyed by client id. Clients merge by
+        # key, so the `shopware-cli` client from core's defaults stays.
+        #
+        # The redirect is a loopback IP literal, which matches on any port (RFC
+        # 8252 7.3), so the probe can pick one and nothing has to listen there.
+        # `localhost` is matched exactly instead. To sign in from Claude Code on a
+        # lane, register a second client with
+        # `http://localhost:53682/callback` and start it with
+        # `claude mcp add --transport http --client-id <id> --callback-port 53682`
+        # (README, "OAuth").
+        #
+        # Only where the checkout knows the key: an unknown key under `shopware:`
+        # stops the container from compiling, which is every later bin/console.
+        if grep -q "arrayNode('oauth_clients')" src/Core/Framework/DependencyInjection/Configuration.php 2>/dev/null; then
+          cat > config/packages/zzz-mcp-evals-oauth.yaml <<'YAML'
+        # Written by .github/actions/setup-lane. CI lane only.
+        shopware:
+            api:
+                oauth_clients:
+                    mcp-evals-probe:
+                        name: 'mcp-evals probe'
+                        redirect_uris:
+                            - 'http://127.0.0.1/callback'
+        YAML
+          echo "Wrote config/packages/zzz-mcp-evals-oauth.yaml (public OAuth client mcp-evals-probe)"
+        else
+          rm -f config/packages/zzz-mcp-evals-oauth.yaml
+          echo "Skipped config/packages/zzz-mcp-evals-oauth.yaml: this Shopware has no shopware.api.oauth_clients."
+        fi
+
         # The Redis session store, as products/tools/mcp-server/configuration.md
         # in shopware/docs configures it for production: both servers on
         # `store: cache` over one Redis pool. The active-session registries this

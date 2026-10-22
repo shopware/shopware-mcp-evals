@@ -64,6 +64,31 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
             "lane and every protocol revision."
         ),
     ),
+    KnownFailure(
+        # functional/oauth.py HEALTH_CHECK_GAP / HEALTH_CHECK_ERROR.
+        label="MCP-bound token refused on /api/_info/system-health-check",
+        error="answered HTTP 200 with the health report",
+        issue="shopware/shopware#21862",
+        url="https://github.com/shopware/shopware/pull/21862",
+        waiting_for="the follow-up on shopware/shopware#21862",
+        why=(
+            "A token bound to /api/_mcp is refused on the rest of the Admin API, but the system "
+            "health check still answers it with the full report. Without a token it is a 401."
+        ),
+    ),
+    KnownFailure(
+        # functional/oauth.py SNIPPETS_GAP / SNIPPETS_ERROR.
+        label="MCP-bound token gets only the anonymous admin snippets",
+        error="answered the full Administration snippet set",
+        issue="shopware/shopware#21862",
+        url="https://github.com/shopware/shopware/pull/21862",
+        waiting_for="the follow-up on shopware/shopware#21862",
+        why=(
+            "/api/_admin/snippets is public and answers the login page's snippets without a token. "
+            "With a token bound to /api/_mcp it answers every Administration snippet, as it does "
+            "for an Admin API token."
+        ),
+    ),
 )
 
 

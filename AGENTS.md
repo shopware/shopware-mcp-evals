@@ -534,6 +534,11 @@ write. An integration that shows "All" while toolsets-list answers `[]` most
 likely still has `NULL` stored, and the admin JS rendering it is a build from
 before #20600.
 
+Since shopware/shopware#21862 `/api/_mcp` also takes an OAuth access token bound
+to it by audience. The suite still authenticates with access keys;
+`functional/oauth.py` walks the OAuth flow on its own, with the public client
+setup-lane writes to `config/packages/zzz-mcp-evals-oauth.yaml`.
+
 The session must be initialized with `method: initialize` before any other call;
 the `Mcp-Session-Id` response header scopes toolset enablement.
 
@@ -569,6 +574,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
+| `functional/oauth.py` | The MCP OAuth flow (shopware/shopware#21862) with no browser: the 401 challenge, both metadata documents, authorization code with PKCE for the public client setup-lane registers (`mcp-evals-probe`), the consent decision posted with the suite's admin token, an audience-bound token that works on `/api/_mcp` and is refused on the rest of the Admin API, refresh, and the refusals. A shop without discovery is one skip naming the PR. Two gaps are known failures |
 | `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. A server older than the renderer is one skip naming the PR |
 | `functional/stateless.py` | The stateless 2026-07-28 revision: `server/discover` with no session. Today a skip naming `withoutModernEra()` and shopware/shopware#19969, accepted only when the refusal names that revision. An answer fails until the scenarios in the plan exist |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
