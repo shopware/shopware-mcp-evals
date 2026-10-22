@@ -113,15 +113,56 @@ missing axis value:
 | client | credential | redirect | revision | tool loading | how tested |
 |---|---|---|---|---|---|
 | a script with access keys (this suite) | key | none | all three handshake revisions | enables toolsets | auto: every functional job |
-| Claude Code | OAuth | loopback, any port on `127.0.0.1` | unknown | unknown | auto: the flow with the probe client; manual: the real client against `localhost:8100` |
+| Claude Code | OAuth, or headers | loopback, any port on `127.0.0.1` | tries stateless 2026-07-28 first, falls back to 2025-11-25 | enables toolsets; follows `list_changed` | auto: the flow with the probe client; manual: the real client against `localhost:8100` |
 | claude.ai | OAuth | https | unknown | reads once, needs `?toolsets=` | manual. `?toolsets=` with OAuth was probed by hand (round 3) and becomes a check |
 | Cursor | OAuth | `cursor://` | unknown | unknown | manual: the redirect was probed by hand; becomes a check with the third client |
 | ChatGPT connector | OAuth | https | unknown | unknown | none |
-| MCP Inspector | either | loopback | unknown | enables toolsets | none |
+| MCP Inspector | either | loopback | 2025-11-25 | enables toolsets | none |
 
 Every "unknown" is the same open question as protocol-eras Phase 6 item 1:
 which revision each client negotiates and what it passes to the model. Finding
 out fills the column and decides which combinations need automation.
+
+### Measured: Claude Code and MCP Inspector
+
+Measured 2026-10-22 on the trunk lane at `71b350a48e6`, through a logging proxy
+in front of `localhost:8100`, authenticated with the admin user key in headers.
+
+| | Claude Code 2.1.308 | MCP Inspector CLI 2.12.0 |
+|---|---|---|
+| first request | `server/discover` at 2026-07-28 | `initialize` |
+| after the refusal | `initialize` at 2025-11-25 | (none) |
+| negotiated | 2025-11-25 | 2025-11-25 |
+| hands the model | `structuredContent`, as compact JSON | no model; prints the whole result |
+| after toolset-enable | re-reads `tools/list` on `list_changed` | not tested |
+
+What follows from it:
+
+- **Claude Code moves to the stateless era the day core serves it.** It probes
+  `server/discover` before every `initialize`, and today's refusal (-32022,
+  listing the four handshake revisions) is what keeps it on the handshake. So
+  the stateless column is not hypothetical: once
+  https://github.com/shopware/shopware/issues/19969 lands, every Claude Code
+  user is on it with no client change.
+- **Claude Code's model never sees the text blocks.** The session transcript
+  records the tool result it handed the model, and it equals the call's
+  `structuredContent` byte for byte. On this lane that is the data with `_meta`
+  merged in; the text is two blocks, the data and a separate `_meta` block. The
+  eval feeds the text blocks, so it grades a different payload than Claude Code
+  sends.
+- **`list_changed` arrives late but works.** The toolset-enable answer was plain
+  JSON. The notification came on the event stream of the next call, and Claude
+  Code then re-read `tools/list` and found the enabled tools.
+- **Claude Code defers MCP tools behind its own tool search.** Every server tool
+  is loaded through Claude Code's ToolSearch before its first call, so its model
+  meets the server's tools through two layers of discovery.
+
+Not yet measured: claude.ai and Cursor, which need a person, and the ChatGPT
+connector. The `{"success", "data", "_meta"}` envelope was not seen either: at
+this commit, with `V6_8_0_0` off, the lane already sent the text as plain data
+followed by a `_meta` block. Why it does is not yet understood, and it decides
+whether the eval's text and Claude Code's `structuredContent` differ by more than
+where `_meta` sits.
 
 The era column is mostly empty for now. Every client above uses the handshake
 era, and stateless is switched off in core until
