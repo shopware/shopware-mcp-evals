@@ -1032,7 +1032,10 @@ resource metadata, the client signs in with the authorization code grant and
 PKCE, and the token is bound to `/api/_mcp` by its audience. The suite keeps
 using access keys; `functional/oauth.py` walks the OAuth flow on its own, as
 part of the admin suite at the default revision. A shop without discovery is
-one skip naming the PR.
+one skip naming the PR. With `--provision-principals` it also signs in as two
+throwaway non-admin users, one allowlisted three tools and one without an
+allowlist, and checks that `tools/list` with `?toolsets=all` shows exactly the
+allowlist plus the meta-tools and that a tool outside it is refused.
 
 It needs a public OAuth client. setup-lane registers one; on a local lane put
 the same in a gitignored `config/packages/zzz-mcp-evals-oauth.yaml` and clear
