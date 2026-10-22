@@ -937,9 +937,14 @@ jobs:
         # The plugins setup-lane deactivated are skips naming that, not failures.
         # The principals cover missing_privilege and pointer isolation under
         # the 6.8 result format.
+        #
+        # --advisory, like the store step below: the job is continue-on-error,
+        # so a non-zero exit here changed nothing but to post GitHub's bare
+        # "exit code 1" error on a green run. A new failure is a warning that
+        # names the check instead.
         run: |
           python -m functional.runner --endpoint admin --protocol-version 2025-11-25 \
-            --deactivated-plugins "${INCOMPATIBLE}" --provision-principals
+            --deactivated-plugins "${INCOMPATIBLE}" --provision-principals --advisory
 
       # The UCP journey commits, as in static: a rolled-back cart cannot be the
       # next step's precondition, and this instance dies with the job. Advisory
