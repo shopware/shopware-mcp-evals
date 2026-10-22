@@ -265,6 +265,38 @@ def _ucp_default_published(session: str, endpoint: Endpoint) -> frozenset[str]:
     return frozenset(ucp.all_classified()) - in_toolsets
 
 
+# The server before shopware/shopware#21772: the pin changes what tools/list
+# advertises, but toolsets-list, while listing every toolset, reports none of
+# them enabled. The pinned trunk predates the fix, so this exact symptom is
+# recorded as a skip naming the PR rather than failed. It covers the pinned
+# cases only; the plain connect is still checked. Delete the tolerance once
+# `shopware.sha` includes the fix: after that, the same symptom is a regression.
+PINNED_REPORTED_DISABLED = (
+    "toolsets-list reports pinned toolsets as enabled (shopware/shopware#21772 not on this build: "
+    "every pinned toolset is advertised, but listed with enabled=false)"
+)
+
+
+@dataclass(frozen=True)
+class _PinCase:
+    """One connect-time case: what the URL pins, and what the server must make of it."""
+
+    names: tuple[str, ...]
+    tools: frozenset[str]
+    enabled: frozenset[str]
+    ok: str
+    fail: str
+
+
+@dataclass(frozen=True)
+class _ToolsetsReport:
+    """What toolsets-list answered on one session: every toolset it listed, and
+    the ones among them it reported enabled."""
+
+    listed: frozenset[str]
+    enabled: frozenset[str]
+
+
 def verify_connect_time_toolsets(
     rep: Reporter, endpoint: Endpoint, also_expected: frozenset[str] = NO_EXTRA_DEFAULT_TOOLS
 ) -> None:
@@ -276,6 +308,12 @@ def verify_connect_time_toolsets(
     work" but "is the catalogue already correct on the FIRST enumeration", and
     every case below therefore opens a fresh session and never calls
     toolset-enable at all.
+
+    Each case also asks toolsets-list, on the same session, which toolsets are
+    enabled. The pin and that report have to agree: a model reads the list to
+    decide what to enable, and a pinned toolset listed `enabled: false` sends it
+    to enable tools it already has. tools/list alone cannot see that, which is
+    how shopware/shopware#21772 passed this check.
 
     Toolset names are read off the live server rather than hardcoded: the
     taxonomy is regrouped upstream from time to time, and a hardcoded name would
@@ -292,73 +330,136 @@ def verify_connect_time_toolsets(
 
     # Everything a fresh session already sees, so each case asserts only what the
     # parameter ADDED. On store that is the meta-tools plus the UCP tools.
-    floor = set(META_TOOLS) | set(also_expected)
+    floor = frozenset(META_TOOLS) | also_expected
 
-    def advertised_with(*names: str) -> set[str] | None:
-        pinned = endpoint.with_toolsets(*names)
-        try:
-            session, _ = mcp_init(endpoint=pinned)
-        except (RuntimeError, requests.exceptions.RequestException) as exc:
-            rep.check_fail(f"?toolsets={','.join(names)}", f"could not open a session: {exc}")
-            return None
-        got = _advertised(rep, session, pinned, f"?toolsets={','.join(names)} tools/list")
-        return set(got) if got is not None else None
-
-    # One toolset: exactly its tools, and nothing from any sibling.
     first = sorted(named)[0]
-    if (got := advertised_with(first)) is not None:
-        expected = floor | named[first]
-        if got == expected:
-            rep.check_pass(f"?toolsets={first} advertises exactly that toolset ({len(named[first])} tools)")
-        else:
-            rep.check_fail(
-                f"?toolsets={first}",
-                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
-            )
-
-    # Several: the union, which is the case a real client actually sends.
     several = sorted(named)[:4]
-    if len(several) > 1 and (got := advertised_with(*several)) is not None:
-        expected = floor | {tool for n in several for tool in named[n]}
-        if got == expected:
-            rep.check_pass(f"?toolsets={','.join(several)} advertises the union ({len(expected)} tools)")
-        else:
-            rep.check_fail(
+    union = floor | {tool for n in several for tool in named[n]}
+    cases = [
+        # One toolset: exactly its tools, and nothing from any sibling.
+        _PinCase(
+            (first,),
+            floor | named[first],
+            frozenset({first}),
+            f"?toolsets={first} advertises exactly that toolset ({len(named[first])} tools)",
+            f"?toolsets={first}",
+        ),
+    ]
+    # Several: the union, which is the case a real client actually sends.
+    if len(several) > 1:
+        cases.append(
+            _PinCase(
+                tuple(several),
+                union,
+                frozenset(several),
+                f"?toolsets={','.join(several)} advertises the union ({len(union)} tools)",
                 f"?toolsets={','.join(several)}",
-                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
             )
-
+        )
     # `all`, spelled out upstream rather than "*" so it survives clients that
-    # escape wildcards.
-    if (got := advertised_with(ALL_TOOLSETS)) is not None:
-        expected = floor | {tool for tools in named.values() for tool in tools}
-        if got == expected:
-            rep.check_pass(f"?toolsets={ALL_TOOLSETS} advertises the whole catalogue ({len(expected)} tools)")
-        else:
-            rep.check_fail(
-                f"?toolsets={ALL_TOOLSETS}",
-                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
-            )
-
+    # escape wildcards. Every listed toolset counts as enabled, empty or not.
+    everything = floor | {tool for tools in named.values() for tool in tools}
+    cases.append(
+        _PinCase(
+            (ALL_TOOLSETS,),
+            everything,
+            frozenset(ts["name"] for ts in toolsets),
+            f"?toolsets={ALL_TOOLSETS} advertises the whole catalogue ({len(everything)} tools)",
+            f"?toolsets={ALL_TOOLSETS}",
+        )
+    )
     # An unknown name must be ignored, not fatal. A client that pins a toolset
     # the shop does not have — a plugin it lacks — has to keep the rest.
-    if (got := advertised_with("no-such-toolset", first)) is not None:
-        expected = floor | named[first]
-        if got == expected:
-            rep.check_pass(f"?toolsets=no-such-toolset,{first} ignores the unknown name")
-        else:
-            rep.check_fail(
-                "?toolsets with an unknown name",
-                f"missing: {sorted(expected - got)} unexpected: {sorted(got - expected)}",
-            )
-
+    cases.append(
+        _PinCase(
+            ("no-such-toolset", first),
+            floor | named[first],
+            frozenset({first}),
+            f"?toolsets=no-such-toolset,{first} ignores the unknown name",
+            "?toolsets with an unknown name",
+        )
+    )
     # And a plain connect is unchanged, asserted last so a regression in the
     # parameter cannot be mistaken for one in the default surface.
-    if (got := advertised_with()) is not None:
-        if got == floor:
-            rep.check_pass("a plain connect is unaffected by the feature")
+    cases.append(_PinCase((), floor, frozenset(), "a plain connect is unaffected by the feature", "plain connect"))
+
+    reports: list[tuple[_PinCase, _ToolsetsReport]] = []
+    for case in cases:
+        seen = _connect_pinned(rep, endpoint, case.names)
+        if seen is None:
+            continue
+        advertised, report = seen
+        if advertised == case.tools:
+            rep.check_pass(case.ok)
+            # Only a pin that took effect has a report worth checking. Where
+            # tools/list already failed, a wrong report is the same failure again.
+            if report is not None:
+                reports.append((case, report))
+        elif case.names:
+            rep.check_fail(
+                case.fail,
+                f"missing: {sorted(case.tools - advertised)} unexpected: {sorted(advertised - case.tools)}",
+            )
         else:
-            rep.check_fail("plain connect", f"default surface moved: {sorted(got ^ floor)}")
+            rep.check_fail(case.fail, f"default surface moved: {sorted(advertised ^ case.tools)}")
+
+    _verify_pinned_reported_enabled(rep, reports, frozenset(ts["name"] for ts in toolsets))
+
+
+def _connect_pinned(
+    rep: Reporter, endpoint: Endpoint, names: tuple[str, ...]
+) -> tuple[frozenset[str], _ToolsetsReport | None] | None:
+    """Open a session with these toolsets pinned, and return what it advertises
+    and what its toolsets-list reports. None (after recording a fail) when the
+    session or tools/list fails; the report alone is None when only
+    toolsets-list does."""
+    pinned = endpoint.with_toolsets(*names)
+    label = f"?toolsets={','.join(names)}"
+    try:
+        session, _ = mcp_init(endpoint=pinned)
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        rep.check_fail(label, f"could not open a session: {exc}")
+        return None
+    got = _advertised(rep, session, pinned, f"{label} tools/list")
+    if got is None:
+        return None
+    try:
+        listed = load_toolsets(session, pinned)
+    except (RuntimeError, ValueError, requests.exceptions.RequestException) as exc:
+        rep.check_fail(f"{label} toolsets-list", str(exc))
+        return frozenset(got), None
+    return frozenset(got), _ToolsetsReport(
+        listed=frozenset(ts["name"] for ts in listed),
+        enabled=frozenset(ts["name"] for ts in listed if ts.get("enabled")),
+    )
+
+
+def _verify_pinned_reported_enabled(
+    rep: Reporter, reports: list[tuple[_PinCase, _ToolsetsReport]], listed: frozenset[str]
+) -> None:
+    """Does toolsets-list, on every session, list the same toolsets as a plain
+    connect and report exactly the pinned ones enabled?
+
+    `listed` is what the plain probe session listed. A pin changes visibility,
+    not the allowlist, so every session must list the same toolsets; that also
+    keeps an empty or missing `toolsets` array from passing as "none enabled"."""
+    pinned = [report for case, report in reports if case.names]
+    if pinned and all(r.listed == listed and not r.enabled for r in pinned):
+        rep.skip(PINNED_REPORTED_DISABLED)
+        reports = [(case, report) for case, report in reports if not case.names]
+    for case, report in reports:
+        label = f"?toolsets={','.join(case.names)} toolsets-list" if case.names else "plain connect toolsets-list"
+        if report.listed != listed:
+            rep.check_fail(
+                label,
+                f"lists different toolsets than a plain connect: missing {sorted(listed - report.listed)} "
+                + f"unexpected {sorted(report.listed - listed)}",
+            )
+        elif report.enabled == case.enabled:
+            what = "the pinned toolsets" if case.names else "nothing"
+            rep.check_pass(f"{label} reports {what} enabled")
+        else:
+            rep.check_fail(label, f"reported enabled: {sorted(report.enabled)}, pinned: {sorted(case.enabled)}")
 
 
 def verify_tool_schemas(rep: Reporter, session: str, endpoint: Endpoint) -> None:
