@@ -16,6 +16,7 @@ import pytest
 import requests
 
 from eval.result_schema import JsonObject, as_list, as_object
+from functional import journeys
 from functional import runner as R
 from functional.reporting import Reporter
 from tests.stubs import const, never, raiser
@@ -30,6 +31,8 @@ def isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(R, "mcp_init", const(("session-1", "")))
     monkeypatch.setattr(R, "run_admin", const(None))
     monkeypatch.setattr(R, "run_store", const(None))
+    # CI sets it, and it switches annotations on by default.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
 
 
 def run(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int:
@@ -202,3 +205,85 @@ def test_the_report_filename_names_the_endpoint(monkeypatch: pytest.MonkeyPatch,
     run(monkeypatch, "--endpoint", "store")
 
     assert list((tmp_path / "results").glob("functional-store-*.json"))
+
+
+# ---------------------------------------------------------------------------
+# Annotations and --advisory
+# ---------------------------------------------------------------------------
+def fail_known(rep: Reporter, *_args: object, **_kwargs: object) -> None:
+    rep.check_fail(journeys.SECOND_ORDER_CHECK, "update_checkout: Completed checkout sessions cannot be updated.")
+
+
+def fail_new(rep: Reporter, *_args: object, **_kwargs: object) -> None:
+    rep.check_fail("a check", "boom")
+
+
+def test_a_known_failure_exits_zero(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(R, "run_store", fail_known)
+
+    assert run(monkeypatch, "--endpoint", "store") == 0
+    assert report_of(tmp_path)["expected_fail"] == 1
+
+
+def test_advisory_exits_zero_on_a_new_failure_and_warns(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(R, "run_store", fail_new)
+
+    assert run(monkeypatch, "--endpoint", "store", "--advisory", "--annotate") == 0
+    out = capsys.readouterr().out
+    assert "::warning title=Store functional suite%2C MCP 2025-11-25::1 unexpected failure(s)" in out
+
+
+def test_annotations_default_on_under_github_actions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(R, "run_admin", fail_new)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+    assert run(monkeypatch) == 1
+    assert "::error title=Admin functional suite" in capsys.readouterr().out
+
+
+def test_annotations_default_off_elsewhere_and_can_be_switched_off(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(R, "run_admin", fail_new)
+    run(monkeypatch)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    run(monkeypatch, "--no-annotate")
+
+    assert "::" not in capsys.readouterr().out
+
+
+def test_skips_are_annotated_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def skip_one(rep: Reporter, *_args: object, **_kwargs: object) -> None:
+        rep.skip("a skipped check")
+
+    monkeypatch.setattr(R, "run_store", skip_one)
+    run(monkeypatch, "--endpoint", "store", "--annotate")
+    assert "::notice" not in capsys.readouterr().out
+
+    run(monkeypatch, "--endpoint", "store", "--annotate", "--annotate-skips")
+    assert "SKIP a skipped check" in capsys.readouterr().out
+
+
+def test_a_session_that_will_not_open_is_annotated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(R, "mcp_init", raiser(requests.exceptions.ConnectionError("Connection refused")))
+
+    assert run(monkeypatch, "--annotate") == 1
+    assert "::error title=Admin functional suite%2C MCP 2025-11-25::No check ran" in capsys.readouterr().out
+
+
+def test_an_advisory_suite_whose_session_will_not_open_warns_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(R, "mcp_init", const(("", "")))
+
+    assert run(monkeypatch, "--endpoint", "store", "--advisory", "--annotate") == 0
+    out = capsys.readouterr().out
+    assert "::warning title=" in out and "Check credentials" in out

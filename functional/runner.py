@@ -58,7 +58,7 @@ from functional.principals import (
     ProvisioningFailed,
     provisioned,
 )
-from functional.reporting import Reporter
+from functional.reporting import Reporter, workflow_command
 from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
 from functional.stateless import verify_stateless_era
 from mcp_client import (
@@ -1500,6 +1500,29 @@ def main() -> int:
             "allowlist state reaches; they are deleted afterwards. Admin endpoint only."
         ),
     )
+    parser.add_argument(
+        "--annotate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Post GitHub annotations saying which failures are new, which are known and what they "
+            "wait for (functional/known_failures.py). Default: on under GitHub Actions."
+        ),
+    )
+    parser.add_argument(
+        "--advisory",
+        action="store_true",
+        help=(
+            "Exit 0 even on an unexpected failure, and annotate it as a warning rather than an "
+            "error. For a suite whose step must not fail the job: allowing the step to fail "
+            "instead posts GitHub's bare 'exit code 1' error on a job that stays green."
+        ),
+    )
+    parser.add_argument(
+        "--annotate-skips",
+        action="store_true",
+        help="Also post the tally and every skip as a notice, so a skip cannot pass for coverage.",
+    )
     args = parser.parse_args()
     endpoint_name = cast(str, args.endpoint)
 
@@ -1514,15 +1537,25 @@ def main() -> int:
     rep = Reporter(SW_BASE_URL, protocol_version=endpoint.protocol_version)
     rep.banner(f"Shopware MCP Functional Tests — {endpoint_name} (v2 discovery)")
     rep.info(f"Endpoint: {endpoint.url} (MCP {endpoint.protocol_version})\n")
+    annotate = cast(bool | None, args.annotate)
+    if annotate is None:
+        annotate = os.environ.get("GITHUB_ACTIONS") == "true"
+    advisory = cast(bool, args.advisory)
+    title = f"{endpoint_name.capitalize()} functional suite, MCP {endpoint.protocol_version}"
+
     rep.info("Initializing MCP session...")
     try:
         session, _ = mcp_init(endpoint=endpoint)
+        init_error = "" if session else "no session id. Check credentials."
     except Exception as exc:  # noqa: BLE001 — surface any connection/auth failure clearly
-        print(f"ERROR: Failed to initialize MCP session: {exc}")
-        return 1
+        session, init_error = "", str(exc)
     if not session:
-        print("ERROR: Failed to initialize MCP session. Check credentials.")
-        return 1
+        print(f"ERROR: Failed to initialize MCP session: {init_error}")
+        if annotate:
+            # No check ran, so there is nothing known to match it against.
+            level = "warning" if advisory else "error"
+            print(workflow_command(level, title, [f"No check ran: the MCP session did not initialize. {init_error}"]))
+        return 0 if advisory else 1
     rep.info(f"Session: {session}")
 
     try:
@@ -1541,7 +1574,11 @@ def main() -> int:
     # Stable filename: the eval job consumes this as an artifact, so it cannot
     # be timestamped like the report.
     rep.write_health(BASE / "results" / f"tool-health-{endpoint_name}.json")
-    return rep.exit_code
+
+    if annotate:
+        for line in rep.annotations(title, advisory=advisory, skips=cast(bool, args.annotate_skips)):
+            print(line)
+    return 0 if advisory else rep.exit_code
 
 
 if __name__ == "__main__":

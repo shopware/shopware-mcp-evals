@@ -353,6 +353,9 @@ class FunctionalRecord(TypedDict, total=False):
     preview: str
     error: str
     reason: str
+    # On a failure functional/known_failures.py explains: the issue it waits on.
+    # Still status "fail", so a reader that predates the field sees what it saw.
+    known_issue: str
 
 
 # `pass`/`fail`/`skip` are the historical bash runner's key names and `pass` is a
@@ -371,6 +374,8 @@ FunctionalReport = TypedDict(
         "health": dict[str, ToolHealth],
         # The MCP revision the run negotiated; absent before it was recorded.
         "protocol_version": NotRequired[str],
+        # How many of `fail` are known failures; absent before they were told apart.
+        "expected_fail": NotRequired[int],
     },
 )
 

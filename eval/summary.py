@@ -850,9 +850,12 @@ def main() -> int:
         #
         # Truncating keeps the tables, which are the part worth reading; the
         # byte count goes to stdout either way so "no summary" can be told apart
-        # from "summary too big" without another run to find out.
+        # from "summary too big" without another run to find out. A notice only
+        # once it is past half the limit: at 16 KB it was one more annotation on
+        # every run that said nothing a reader could act on.
         encoded = (markdown + "\n").encode()
-        print(f"::notice::job summary is {len(encoded):,} bytes (GitHub drops anything over {GITHUB_SUMMARY_LIMIT:,})")
+        size = f"job summary is {len(encoded):,} bytes (GitHub drops anything over {GITHUB_SUMMARY_LIMIT:,})"
+        print(f"::notice::{size}" if len(encoded) > GITHUB_SUMMARY_LIMIT // 2 else size)
         if len(encoded) > GITHUB_SUMMARY_LIMIT:
             note = (
                 "\n\n---\n\n**Truncated** — the full summary exceeded GitHub's 1 MiB limit. "

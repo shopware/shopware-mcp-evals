@@ -129,6 +129,17 @@ sequenceDiagram
   real order. CI sets it because the instance dies with the job; a developer's
   shop does not. If you add anything that commits, gate it the same way and
   record the skip rather than omitting it silently.
+- **Say whether a failure is known.** A functional failure that is already
+  filed goes in `functional/known_failures.py`: check label, error fragment,
+  issue, what it waits for. The runner then posts it as a notice naming the
+  issue, leaves it out of the exit code, and posts a warning when the check
+  passes again so the entry gets deleted. Anything else is an error, or a
+  warning under `--advisory`, saying it is new. An advisory step uses
+  `--advisory`, never `continue-on-error`: an allowed-to-fail step still posts
+  GitHub's bare "Process completed with exit code 1" on a green job, and that
+  names neither the step nor the check. Annotations are on by default under
+  GitHub Actions. Only the static lane posts setup-lane's happy-path notices
+  (`announce: 'true'`), because seven identical copies buried the rest.
 - **The eval workflow is opt-in on PRs.** It runs nightly and on
   `workflow_dispatch` unconditionally, but on a pull request only when the PR
   carries the **`run-evals`** label — it costs a Shopware install and real OpenAI
@@ -539,6 +550,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `mcp_result.py` | **The only reader of tool results.** Legacy envelope, 6.8 spec format, plain text, `structuredContent`, `resource_link`, error codes |
 | `functional/runner.py` | v2 discovery mechanics + per-tool minimal-payload calls (`--endpoint admin\|store`) |
 | `functional/reporting.py` | Reusable pass/fail/skip harness, JSON report writer, and the per-tool health map the eval gate consumes. Skips are **recorded with a reason**, not just counted: proven-working, proven-broken and nobody-tried have to stay distinguishable |
+| `functional/known_failures.py` | Failures already filed, and what each waits for. Matched by check label and error, so a new cause on a known check still reads as new |
 | `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
 | `functional/sessions.py` | Where the sessions live: Redis keys, TTL, endpoint separation, `DELETE`, and refusal once the key is gone. Needs `--redis-url` / `MCP_EVALS_REDIS_URL`, skips without. See [Session store](#session-store) |
 | `functional/resp.py` | The four Redis commands `sessions.py` needs, over a socket, so the check needs no Redis client library |
