@@ -1198,7 +1198,7 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
         verify_result_format(rep, endpoint, ADMIN_PROBES)
         verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
         verify_stateless_era(rep, endpoint)
-        verify_oauth_flow(rep, endpoint)
+        verify_oauth_flow(rep, endpoint, provision=cast(bool, args.provision_principals))
     run_admin_tools(rep, session, endpoint, args)
 
 

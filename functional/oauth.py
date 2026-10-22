@@ -26,6 +26,14 @@ Three things it does not do:
 Two checks are known to fail until the follow-up on #21862 lands, and are listed
 in functional/known_failures.py: the system health check and the Administration
 snippets still answer an MCP-bound token as if it were an Admin API token.
+
+With `--provision-principals` it signs in twice more, as two non-admin users it
+creates through the Admin API and deletes after (functional/principals.py): one
+allowlisted a few tools, one without an allowlist. The allowlist applies to a
+bearer token like to an access key (`McpAllowlistProvider::forCurrentRequest()`),
+so with `?toolsets=all` the first is listed exactly its tools plus the three
+discovery meta-tools, which every principal keeps, and the second the meta-tools
+only. A tool outside the allowlist is refused on a direct call.
 """
 
 from __future__ import annotations
@@ -35,16 +43,19 @@ import hashlib
 import json
 import os
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import cast
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import requests
 
-from eval.result_schema import JsonObject, as_list, as_object
+from eval.result_schema import JsonObject, McpResponse, as_list, as_object
+from functional.principals import AdminApi, ProvisioningFailed, SignInUser, sign_in_users
 from functional.reporting import Reporter
-from mcp_client import DEFAULT_PROTOCOL_VERSION, Endpoint
+from mcp_client import ALL_TOOLSETS, DEFAULT_PROTOCOL_VERSION, META_TOOLS, Endpoint
+from mcp_result import read_result
 
 FIX = "shopware/shopware#21862"
 FIX_URL = "https://github.com/shopware/shopware/pull/21862"
@@ -75,6 +86,18 @@ SNIPPETS_GAP = "MCP-bound token gets only the anonymous admin snippets"
 SNIPPETS_ERROR = "answered the full Administration snippet set"
 
 ACCEPT_MCP = {"Accept": "application/json, text/event-stream"}
+
+RESTRICTED_CHECK = "OAuth as a non-admin user"
+NEEDS_PROVISIONING = (
+    "needs --provision-principals: it creates two non-admin users, one with an MCP allowlist and one without"
+)
+# Allowed for the allowlisted user (its role holds currency:read), and in the
+# same toolset as the refused one, so a refusal is the allowlist's, not the
+# toolset's or the role's.
+ALLOWED_CALL: tuple[str, JsonObject] = ("shopware-entity-search", {"entity": "currency", "limit": 1})
+REFUSED_TOOL = "shopware-entity-read"
+
+Users = Callable[[], AbstractContextManager[Sequence[SignInUser]]]
 
 
 @dataclass(frozen=True)
@@ -177,8 +200,9 @@ class Grant:
 class OAuthFlow:
     """One walk through the flow against one shop."""
 
-    def __init__(self, rep: Reporter, endpoint: Endpoint, client: str, send: Send):
+    def __init__(self, rep: Reporter, endpoint: Endpoint, client: str, send: Send, users: Users | None = None):
         self.rep: Reporter = rep
+        self.users: Users | None = users
         self.base: str = endpoint.base_url
         self.mcp_url: str = f"{endpoint.base_url}{endpoint.path}"
         self.access_key: str = endpoint.auth_headers.get("sw-access-key", "")
@@ -211,16 +235,18 @@ class OAuthFlow:
     def bearer(self, token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
-    def mcp(self, payload: JsonObject, *, token: str = "", session: str = "") -> tuple[Reply, JsonObject]:
+    def mcp(
+        self, payload: JsonObject, *, token: str = "", session: str = "", query: str = ""
+    ) -> tuple[Reply, JsonObject]:
         headers = {**ACCEPT_MCP, "MCP-Protocol-Version": DEFAULT_PROTOCOL_VERSION}
         if token:
             headers.update(self.bearer(token))
         if session:
             headers["Mcp-Session-Id"] = session
-        reply = self.http("POST", self.mcp_url, json_body=payload, headers=headers)
+        reply = self.http("POST", self.mcp_url + query, json_body=payload, headers=headers)
         return reply, mcp_body(reply.text)
 
-    def initialize(self, token: str) -> tuple[Reply, str]:
+    def initialize(self, token: str, query: str = "") -> tuple[Reply, str]:
         reply, _ = self.mcp(
             {
                 "jsonrpc": "2.0",
@@ -233,11 +259,42 @@ class OAuthFlow:
                 },
             },
             token=token,
+            query=query,
         )
         session = reply.header("Mcp-Session-Id")
         if reply.status == 200 and session:
-            _ = self.mcp({"jsonrpc": "2.0", "method": "notifications/initialized"}, token=token, session=session)
+            _ = self.mcp(
+                {"jsonrpc": "2.0", "method": "notifications/initialized"}, token=token, session=session, query=query
+            )
         return reply, session
+
+    def tool_names(self, token: str, session: str, query: str) -> list[str]:
+        """Every tool tools/list advertises, following nextCursor."""
+        names: list[str] = []
+        cursor: object = None
+        for page in range(50):
+            params: JsonObject = {} if cursor is None else {"cursor": cursor}
+            _, body = self.mcp(
+                {"jsonrpc": "2.0", "id": 10 + page, "method": "tools/list", "params": params},
+                token=token,
+                session=session,
+                query=query,
+            )
+            result = as_object(body.get("result"))
+            names += [str(as_object(t).get("name")) for t in as_list(result.get("tools"))]
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        return names
+
+    def call_tool(self, token: str, session: str, query: str, name: str, arguments: JsonObject) -> McpResponse:
+        _, body = self.mcp(
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
+            token=token,
+            session=session,
+            query=query,
+        )
+        return cast(McpResponse, cast(object, body))
 
     # -- reporting ----------------------------------------------------------
     def check(self, label: str, ok: bool, detail: str = "") -> bool:
@@ -249,9 +306,16 @@ class OAuthFlow:
 
     # -- the grant ----------------------------------------------------------
     def authorize(
-        self, *, resource: str | None = "", approved: bool = True, redirect: str = REDIRECT, decide: bool = True
+        self,
+        *,
+        resource: str | None = "",
+        approved: bool = True,
+        redirect: str = REDIRECT,
+        decide: bool = True,
+        consent_token: str = "",
     ) -> Grant:
-        """GET authorize as the client, then post the consent decision as the admin.
+        """GET authorize as the client, then post the consent decision as the
+        admin, or as whoever `consent_token` belongs to.
 
         `resource=""` means the MCP endpoint, None leaves the parameter out.
         """
@@ -276,7 +340,7 @@ class OAuthFlow:
             "POST",
             "/api/oauth/authorize",
             json_body={**query, "approved": approved},
-            headers=self.bearer(self.admin_token),
+            headers=self.bearer(consent_token or self.admin_token),
         )
         redirect_uri = str(decision.json().get("redirectUri", ""))
         return Grant(reply.status, location, redirect_uri or decision.text[:300], verifier, state)
@@ -310,6 +374,7 @@ class OAuthFlow:
         self.refresh(str(token.get("refresh_token", "")))
         self.negatives()
         self.unbound()
+        self.restricted()
 
     def discovery(self) -> bool:
         """The 401 challenge and both metadata documents. False: nothing to test."""
@@ -547,14 +612,95 @@ class OAuthFlow:
             f"token HTTP {reply.status}, /api/_info/me HTTP {me.status if me else '-'}",
         )
 
+    # -- a non-admin user ---------------------------------------------------
+    def restricted(self) -> None:
+        """Sign in as a non-admin user: the allowlist holds for its token."""
+        if self.users is None:
+            self.rep.check_skip(RESTRICTED_CHECK, NEEDS_PROVISIONING)
+            return
+        try:
+            with self.users() as users:
+                for user in users:
+                    self.restricted_user(user)
+        except ProvisioningFailed as exc:
+            self.rep.check_fail(RESTRICTED_CHECK, f"could not provision the users: {exc}")
+
+    def restricted_user(self, user: SignInUser) -> None:
+        who = "allowlisted user" if user.tools is not None else "user without an allowlist"
+        login = self.http(
+            "POST",
+            "/api/oauth/token",
+            json_body={
+                "grant_type": "password",
+                "client_id": "administration",
+                "scope": "write",
+                "username": user.username,
+                "password": user.password,
+            },
+        )
+        consent = str(login.json().get("access_token", ""))
+        if not self.check(f"{who}: signs in to the Administration", bool(consent), f"HTTP {login.status}"):
+            return
+        reply = self.token(self.authorize(consent_token=consent))
+        access = str(reply.json().get("access_token", ""))
+        if not self.check(f"{who}: consents and gets an MCP-bound token", bool(access), f"HTTP {reply.status}"):
+            return
+
+        query = f"?toolsets={ALL_TOOLSETS}"
+        init, session = self.initialize(access, query)
+        if not self.check(f"{who}: opens an MCP session", init.status == 200 and bool(session), f"HTTP {init.status}"):
+            return
+        listed = set(self.tool_names(access, session, query))
+        want = set(META_TOOLS) | set(user.tools or ())
+        self.check(
+            f"{who}: tools/list with ?toolsets=all shows only its allowlist and the meta-tools",
+            listed == want,
+            f"missing {sorted(want - listed) or '-'}, extra {sorted(listed - want)[:8] or '-'}",
+        )
+
+        name, arguments = ALLOWED_CALL
+        allowed = read_result(self.call_tool(access, session, query, name, arguments))
+        # Without an allowlist even the tool the other user may call is refused.
+        refused_tool = REFUSED_TOOL if user.tools is not None else name
+        refused_args: JsonObject = {"entity": "currency", "id": "0" * 32} if user.tools is not None else arguments
+        refused = read_result(self.call_tool(access, session, query, refused_tool, refused_args))
+        if user.tools is not None:
+            self.check(f"{who}: calls {name}", allowed.ok, allowed.failure[:160])
+        self.check(
+            f"{who}: is refused {refused_tool}, which is not allowlisted",
+            "allowlist" in f"{refused.failure} {refused.text}".lower(),
+            f"the call answered: {refused.failure[:160] or 'ok'}",
+        )
+        _ = self.http("DELETE", self.mcp_url + query, headers={**self.bearer(access), "Mcp-Session-Id": session})
+
 
 def snippet_groups(reply: Reply) -> set[str]:
     """The top-level snippet groups of every locale in an admin snippets answer."""
     return {group for locale in reply.json().values() for group in as_object(locale)}
 
 
-def verify_oauth_flow(rep: Reporter, endpoint: Endpoint, send: Send = send_http) -> None:
-    """Walk the MCP OAuth flow; a skip naming #21862 on a shop without it."""
+def provisioned_users(endpoint: Endpoint) -> Users:
+    """The two sign-in users, created with the suite's own credential."""
+
+    def users() -> AbstractContextManager[Sequence[SignInUser]]:
+        api = AdminApi(
+            endpoint.base_url,
+            endpoint.auth_headers.get("sw-access-key", ""),
+            endpoint.auth_headers.get("sw-secret-access-key", ""),
+        )
+        return sign_in_users(api)
+
+    return users
+
+
+def verify_oauth_flow(
+    rep: Reporter, endpoint: Endpoint, send: Send = send_http, *, provision: bool = False, users: Users | None = None
+) -> None:
+    """Walk the MCP OAuth flow; a skip naming #21862 on a shop without it.
+
+    `provision` adds the non-admin users; `users` replaces how they are made."""
     rep.section(f"MCP OAuth ({FIX})")
     client = os.environ.get(CLIENT_ENV, "").strip() or DEFAULT_CLIENT
-    OAuthFlow(rep, endpoint, client, send).run()
+    if provision and users is None:
+        users = provisioned_users(endpoint)
+    OAuthFlow(rep, endpoint, client, send, users if provision else None).run()

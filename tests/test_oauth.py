@@ -3,22 +3,25 @@
 The fake answers the way the trunk lane on shopware/shopware integration/mcp-iteration-4
 answered the scripted flow, with switches for what older or fixed shops do
 differently: no discovery at all (before #21862), no registered client, and the
-two gaps closed.
+two gaps closed. Users who sign in with a password are held to the allowlist
+they were given, as `McpAllowlistProvider` does for a bearer token.
 """
 
 import base64
 import hashlib
 import json
-from collections.abc import Mapping
-from typing import cast
+from collections.abc import Generator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
+from typing import cast, override
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import pytest
 
 from eval.result_schema import JsonObject, as_object
 from functional import oauth as O
+from functional.principals import OAUTH_TOOLS, ProvisioningFailed, SignInUser
 from functional.reporting import Reporter
-from mcp_client import Endpoint, admin_endpoint
+from mcp_client import META_TOOLS, Endpoint, admin_endpoint
 
 BASE = "http://shop.example"
 MCP = f"{BASE}/api/_mcp"
@@ -28,9 +31,22 @@ LOGIN_SNIPPETS: JsonObject = {"en-GB": {"global": {}, "sw-login": {}}}
 ALL_SNIPPETS: JsonObject = {"en-GB": {"global": {}, "sw-login": {}, "sw-product": {}, "sw-order": {}}}
 
 
-def jwt(aud: list[str]) -> str:
-    claims = base64.urlsafe_b64encode(json.dumps({"aud": aud}).encode()).rstrip(b"=").decode()
+ALLOWLISTED = SignInUser("allowlisted", "mcp-evals-x-oauth-allowlisted", "pw-1", OAUTH_TOOLS)
+UNSET = SignInUser("unset", "mcp-evals-x-oauth-unset", "pw-2", None)
+EVERYTHING = sorted({*META_TOOLS, *OAUTH_TOOLS, O.REFUSED_TOOL, "shopware-order-state"})
+
+
+def jwt(aud: list[str], sub: str = "admin") -> str:
+    claims = base64.urlsafe_b64encode(json.dumps({"aud": aud, "sub": sub}).encode()).rstrip(b"=").decode()
     return f"header.{claims}.signature"
+
+
+def subject(token: str) -> str:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return ""
+    claims = as_object(cast(object, json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))))
+    return str(claims.get("sub", ""))
 
 
 def reply(status: int, body: object = None, **headers: str) -> O.Reply:
@@ -45,9 +61,22 @@ class FakeShop:
         self.discovery: bool = discovery
         self.registered: bool = registered
         self.gaps: bool = gaps
-        self.codes: dict[str, tuple[str, str]] = {}
-        self.refresh: dict[str, str] = {}
+        self.codes: dict[str, tuple[str, str, str]] = {}
+        self.refresh: dict[str, tuple[str, str]] = {}
         self.requests: list[tuple[str, str]] = []
+        # username -> (password, allowlist); None allowlist means unset.
+        self.users: dict[str, tuple[str, tuple[str, ...] | None]] = {
+            u.username: (u.password, u.tools) for u in (ALLOWLISTED, UNSET)
+        }
+        # The allowlist the server applies, by username; a leak widens it.
+        self.leak: bool = False
+
+    def allowlist(self, headers: Mapping[str, str]) -> set[str]:
+        """What the principal behind a bearer token may reach; admin: everything."""
+        user = subject(headers.get("Authorization", "").removeprefix("Bearer "))
+        if user not in self.users or self.leak:
+            return set(EVERYTHING)
+        return set(META_TOOLS) | set(self.users[user][1] or ())
 
     def bound(self, headers: Mapping[str, str]) -> bool:
         token = headers.get("Authorization", "").removeprefix("Bearer ")
@@ -78,6 +107,9 @@ class FakeShop:
         if path == "/.well-known/oauth-authorization-server/api":
             return reply(200, {"issuer": ISSUER, "code_challenge_methods_supported": ["S256"]})
         if path == "/api/oauth/authorize":
+            bearer = headers.get("Authorization", "").removeprefix("Bearer ")
+            if bearer.startswith("user-"):
+                form["_consenting"] = bearer.removeprefix("user-")
             return self.authorize(method, query, form)
         if path == "/api/oauth/token":
             return self.token(form)
@@ -103,9 +135,22 @@ class FakeShop:
         rpc = as_object(cast(object, json.loads(text)))
         if rpc.get("method") == "initialize":
             return reply(200, {"jsonrpc": "2.0", "id": 1, "result": {}}, Mcp_Session_Id="s-1")
-        if rpc.get("method") == "tools/list":
+        user = subject(auth.removeprefix("Bearer "))
+        if rpc.get("method") == "tools/list" and user not in self.users:
             return reply(200, 'event: message\ndata: {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "a"}]}}')
+        if rpc.get("method") == "tools/list":
+            names = sorted(self.allowlist(headers))
+            cursor = str(as_object(rpc.get("params")).get("cursor", ""))
+            page, rest = (names[:2], names[2:]) if not cursor else (names[2:], [])
+            result: JsonObject = {"tools": [{"name": n} for n in page]}
+            if rest:
+                result["nextCursor"] = "p2"
+            return reply(200, {"jsonrpc": "2.0", "id": 2, "result": result})
         if rpc.get("method") == "tools/call":
+            name = str(as_object(rpc.get("params")).get("name"))
+            if name not in self.allowlist(headers):
+                message = f'Tool "{name}" is not enabled in your MCP allowlist.'
+                return reply(200, {"jsonrpc": "2.0", "id": 3, "error": {"code": -32602, "message": message}})
             return reply(200, {"jsonrpc": "2.0", "id": 3, "result": {"content": []}})
         return reply(202)
 
@@ -122,7 +167,8 @@ class FakeShop:
         if form["approved"] != "True":
             return reply(200, {"redirectUri": f"{redirect}?error=access_denied&iss={ISSUER}"})
         code = f"code-{len(self.codes)}"
-        self.codes[code] = (form.get("resource", ""), form["code_challenge"])
+        consenting = headers_user(form)
+        self.codes[code] = (form.get("resource", ""), form["code_challenge"], consenting)
         return reply(
             200, {"redirectUri": f"{redirect}?{urlencode({'code': code, 'state': form['state'], 'iss': ISSUER})}"}
         )
@@ -131,33 +177,58 @@ class FakeShop:
         grant = form["grant_type"]
         if grant == "client_credentials":
             return reply(200, {"access_token": "admin-token"})
+        if grant == "password":
+            known = self.users.get(form["username"])
+            if known is None or known[0] != form["password"]:
+                return reply(400, {"errors": [{"code": "FRAMEWORK__API_INVALID_CREDENTIALS"}]})
+            return reply(200, {"access_token": f"user-{form['username']}"})
         if grant == "refresh_token":
-            resource = self.refresh.get(form["refresh_token"])
-            if resource is None or form.get("resource", resource) != resource:
+            stored = self.refresh.get(form["refresh_token"])
+            if stored is None or form.get("resource", stored[0]) != stored[0]:
                 return reply(400, {"error": "invalid_grant"})
-            return self.issue(form["client_id"], resource)
-        resource, challenge = self.codes.pop(form["code"])
+            return self.issue(form["client_id"], stored[0], stored[1])
+        issued = self.codes.pop(form.get("code", ""), None)
+        if issued is None:
+            return reply(400, {"error": "invalid_grant"})
+        resource, challenge, user = issued
         digest = hashlib.sha256(form["code_verifier"].encode()).digest()
         if base64.urlsafe_b64encode(digest).rstrip(b"=").decode() != challenge:
             return reply(400, {"error": "invalid_grant"})
         if form.get("resource", resource) != resource:
             return reply(400, {"error": "invalid_target"})
-        return self.issue(form["client_id"], resource)
+        return self.issue(form["client_id"], resource, user)
 
-    def issue(self, client: str, resource: str) -> O.Reply:
+    def issue(self, client: str, resource: str, user: str = "admin") -> O.Reply:
         refresh = f"rt-{len(self.refresh)}"
-        self.refresh[refresh] = resource
+        self.refresh[refresh] = (resource, user)
         aud = [client, resource] if resource else [client]
-        return reply(200, {"access_token": jwt(aud), "refresh_token": refresh})
+        return reply(200, {"access_token": jwt(aud, user), "refresh_token": refresh})
 
 
-def run(shop: FakeShop, monkeypatch: pytest.MonkeyPatch, client: str = "") -> Reporter:
+def headers_user(form: Mapping[str, str]) -> str:
+    """Who posted the consent decision: the fake reads it off the form, where
+    `FakeShop.__call__` puts the bearer token's user."""
+    return form.get("_consenting", "admin")
+
+
+@contextmanager
+def two_users() -> Generator[Sequence[SignInUser]]:
+    yield (ALLOWLISTED, UNSET)
+
+
+def run(
+    shop: FakeShop,
+    monkeypatch: pytest.MonkeyPatch,
+    client: str = "",
+    *,
+    users: O.Users | None = None,
+) -> Reporter:
     if client:
         monkeypatch.setenv(O.CLIENT_ENV, client)
     else:
         monkeypatch.delenv(O.CLIENT_ENV, raising=False)
     rep = Reporter(BASE, color=False)
-    O.verify_oauth_flow(rep, ADMIN, send=shop)
+    O.verify_oauth_flow(rep, ADMIN, send=shop, provision=users is not None, users=users)
     return rep
 
 
@@ -179,7 +250,8 @@ def test_the_whole_flow_passes_on_the_lane_with_both_gaps_known(monkeypatch: pyt
 
     assert failures(rep) == [O.HEALTH_CHECK_GAP, O.SNIPPETS_GAP]
     assert rep.expected_failed == 2 and rep.exit_code == 0
-    assert rep.passed == 35 and rep.skipped == 0
+    assert rep.passed == 35 and rep.skipped == 1
+    assert rep.records[-1].get("reason") == O.NEEDS_PROVISIONING
     [notice] = rep.annotations("Admin")
     assert notice.startswith("::notice") and O.FIX_URL in notice
 
@@ -259,8 +331,8 @@ def test_no_refresh_token_is_a_failure_not_a_crash(monkeypatch: pytest.MonkeyPat
     shop = FakeShop(gaps=False)
     real = shop.issue
 
-    def without_refresh(client: str, resource: str) -> O.Reply:
-        issued = real(client, resource).json()
+    def without_refresh(client: str, resource: str, user: str = "admin") -> O.Reply:
+        issued = real(client, resource, user).json()
         return reply(200, {"access_token": issued["access_token"]})
 
     monkeypatch.setattr(shop, "issue", without_refresh)
@@ -331,3 +403,141 @@ def test_send_http_does_not_follow_redirects(monkeypatch: pytest.MonkeyPatch) ->
 
     assert answer.header("location") == "http://x/admin"
     assert seen["allow_redirects"] is False and seen["timeout"] == O.TIMEOUT_S
+
+
+# --- a non-admin user -------------------------------------------------------------
+
+
+def restricted(rep: Reporter) -> dict[str, str]:
+    return {
+        str(r["label"]): str(r["status"])
+        for r in rep.records
+        if str(r["label"]).startswith(("allowlisted user", "user without", O.RESTRICTED_CHECK))
+    }
+
+
+def test_the_allowlist_holds_for_a_users_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(gaps=False), monkeypatch, users=two_users)
+
+    assert rep.failed == 0, failures(rep)
+    assert restricted(rep) == {
+        "allowlisted user: signs in to the Administration": "pass",
+        "allowlisted user: consents and gets an MCP-bound token": "pass",
+        "allowlisted user: opens an MCP session": "pass",
+        "allowlisted user: tools/list with ?toolsets=all shows only its allowlist and the meta-tools": "pass",
+        "allowlisted user: calls shopware-entity-search": "pass",
+        f"allowlisted user: is refused {O.REFUSED_TOOL}, which is not allowlisted": "pass",
+        "user without an allowlist: signs in to the Administration": "pass",
+        "user without an allowlist: consents and gets an MCP-bound token": "pass",
+        "user without an allowlist: opens an MCP session": "pass",
+        "user without an allowlist: tools/list with ?toolsets=all shows only its allowlist and the meta-tools": "pass",
+        "user without an allowlist: is refused shopware-entity-search, which is not allowlisted": "pass",
+    }
+
+
+def test_the_lists_are_read_with_every_toolset_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+    shop = FakeShop(gaps=False)
+    real = shop.__call__
+
+    def recording(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        if subject(headers.get("Authorization", "").removeprefix("Bearer ")) == ALLOWLISTED.username:
+            seen.append(url)
+        return real(method, url, headers, body)
+
+    rep = run(cast(FakeShop, recording), monkeypatch, users=two_users)
+
+    assert rep.failed == 0, failures(rep)
+    assert seen and all(url == f"{MCP}?toolsets=all" for url in seen)
+
+
+def test_a_server_ignoring_the_allowlist_fails_both_users(monkeypatch: pytest.MonkeyPatch) -> None:
+    shop = FakeShop(gaps=False)
+    shop.leak = True
+    rep = run(shop, monkeypatch, users=two_users)
+
+    assert failures(rep) == [
+        "allowlisted user: tools/list with ?toolsets=all shows only its allowlist and the meta-tools",
+        f"allowlisted user: is refused {O.REFUSED_TOOL}, which is not allowlisted",
+        "user without an allowlist: tools/list with ?toolsets=all shows only its allowlist and the meta-tools",
+        "user without an allowlist: is refused shopware-entity-search, which is not allowlisted",
+    ]
+
+
+def test_a_user_who_cannot_sign_in_stops_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def wrong_password() -> Generator[Sequence[SignInUser]]:
+        yield (SignInUser("x", ALLOWLISTED.username, "wrong", OAUTH_TOOLS),)
+
+    rep = run(FakeShop(gaps=False), monkeypatch, users=wrong_password)
+
+    assert restricted(rep) == {"allowlisted user: signs in to the Administration": "fail"}
+
+
+def test_a_refused_code_exchange_for_the_user_stops_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    shop = FakeShop(gaps=False)
+    real = shop.__call__
+
+    def refusing(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        if method == "POST" and url.endswith("/api/oauth/authorize") and "user-" in headers.get("Authorization", ""):
+            return reply(403, {"errors": []})
+        return real(method, url, headers, body)
+
+    rep = run(cast(FakeShop, refusing), monkeypatch, users=two_users)
+
+    assert restricted(rep)["allowlisted user: consents and gets an MCP-bound token"] == "fail"
+    assert "allowlisted user: opens an MCP session" not in restricted(rep)
+
+
+def test_a_session_the_user_cannot_open_stops_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    shop = FakeShop(gaps=False)
+    real = shop.__call__
+
+    def no_session(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        token = headers.get("Authorization", "").removeprefix("Bearer ")
+        if url.startswith(MCP + "?") and subject(token) in shop.users:
+            return reply(500, "boom")
+        return real(method, url, headers, body)
+
+    rep = run(cast(FakeShop, no_session), monkeypatch, users=two_users)
+
+    assert restricted(rep)["allowlisted user: opens an MCP session"] == "fail"
+    assert "allowlisted user: calls shopware-entity-search" not in restricted(rep)
+
+
+class Refused(AbstractContextManager[Sequence[SignInUser]]):
+    """Users the Admin API refused to create."""
+
+    @override
+    def __enter__(self) -> Sequence[SignInUser]:  # pyright: ignore[reportMissingSuperCall] -- refuses, as the API did
+        raise ProvisioningFailed("POST /api/user answered HTTP 400")
+
+    @override
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+
+def test_users_that_cannot_be_created_fail_one_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(gaps=False), monkeypatch, users=Refused)
+
+    assert restricted(rep) == {O.RESTRICTED_CHECK: "fail"}
+    assert "HTTP 400" in str(rep.records[-1].get("error"))
+
+
+def test_provisioning_builds_the_users_from_the_suites_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    made: list[tuple[str, str, str]] = []
+
+    def admin_api(base: str, key: str, secret: str) -> object:
+        made.append((base, key, secret))
+        return object()
+
+    monkeypatch.setattr(O, "AdminApi", admin_api)
+
+    def sign_in_users(_api: object) -> AbstractContextManager[Sequence[SignInUser]]:
+        return two_users()
+
+    monkeypatch.setattr(O, "sign_in_users", sign_in_users)
+
+    with O.provisioned_users(ADMIN)() as users:
+        assert list(users) == [ALLOWLISTED, UNSET]
+    assert made == [(BASE, "SWUAadmin", "secret")]
