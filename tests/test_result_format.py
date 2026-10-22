@@ -5,7 +5,7 @@ tested against what a server on each revision really answers.
 """
 
 import json
-from typing import cast
+from typing import cast, override
 
 import pytest
 
@@ -266,12 +266,18 @@ def run(monkeypatch: pytest.MonkeyPatch, server: FakeServer, probes: tuple[R.Pro
     return rep
 
 
-def test_every_probe_passes_on_every_revision_against_a_correct_server(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_every_probe_passes_on_every_revision_against_a_server_from_before_21844(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy text on every revision: the probes pass, and the format per
+    revision is one skip naming the PR."""
     server = FakeServer()
     rep = run(monkeypatch, server)
 
     assert server.opened == list(R.FORMAT_REVISIONS)
-    assert (rep.passed, rep.failed, rep.skipped) == (len(R.FORMAT_REVISIONS) * 2, 0, 0)
+    assert (rep.passed, rep.failed, rep.skipped) == (len(R.FORMAT_REVISIONS) * 2, 0, 1)
+    assert rep.records[-1].get("label") == R.FOLLOWS_REVISION
+    assert rep.records[-1].get("reason") == R.PREDATES_REVISION_FORMAT
     assert [r.get("label") for r in rep.records][:2] == [
         "result format 2024-11-05: toolsets-list (shopware-toolsets-list)",
         "result format 2024-11-05: unknown entity (shopware-entity-schema)",
@@ -330,7 +336,7 @@ def test_a_wrong_result_fails_its_probe_with_the_problems(monkeypatch: pytest.Mo
     }
     rep = run(monkeypatch, FakeServer({"shopware-toolsets-list": plain}), probes=(OK,))
 
-    assert [r.get("status") for r in rep.records] == ["pass", "fail", "fail"]
+    assert [r.get("status") for r in rep.records] == ["pass", "fail", "fail", "skipped"]
     assert "no structuredContent on 2025-06-18" in str(rep.records[1].get("error"))
 
 
@@ -341,3 +347,171 @@ def test_the_check_skip_counts_and_records_a_reason() -> None:
     assert rep.skipped == 1
     assert rep.records[0].get("status") == "skipped"
     assert rep.records[0].get("reason") == "waits for shopware/shopware#1"
+
+
+# --- since shopware/shopware#21844: the format follows the revision ------------------
+
+DRY_RUN = R.Probe("shopware-entity-upsert", {}, "dry-run upsert", meta=("dryRun",))
+ROWS: list[object] = [{"entity": "tax", "ids": ["0" * 31 + "1"], "operation": "upsert"}]
+
+
+def by_revision(
+    revision: str, data: object, meta: JsonObject, *, structured_meta: bool = True, summary: str | None = None
+) -> McpResponse:
+    """A success as a server since #21844 renders it: the legacy text before
+    2025-06-18; from it on the plain data, the summary, `{"_meta": …}`, and
+    (since a5c30a4) the model's metadata in `structuredContent._meta`."""
+    if revision < R.STRUCTURED_SINCE:
+        envelope: JsonObject = {"success": True, "data": data}
+        if meta:
+            envelope["_meta"] = meta
+        return response({"content": [{"type": "text", "text": json.dumps(envelope)}], "isError": False, "_meta": STAMP})
+    texts = [json.dumps(data), *([summary] if summary else []), *([json.dumps({"_meta": meta})] if meta else [])]
+    is_object = isinstance(data, dict)
+    structured: JsonObject = cast(JsonObject, data) if is_object else {"result": data}
+    model = {k: v for k, v in meta.items() if k not in ("responseSize", "resourceUri")}
+    if summary:
+        model["summary"] = summary
+    if structured_meta and model:
+        structured = {**structured, "_meta": model}
+    return response(
+        {
+            "content": [{"type": "text", "text": t} for t in texts],
+            "isError": False,
+            "structuredContent": structured,
+            "_meta": {**STAMP, **{f"shopware/{k}": v for k, v in meta.items()}},
+        }
+    )
+
+
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_the_dry_run_flag_in_structured_content_is_clean(revision: str) -> None:
+    outcome = read_result(by_revision(revision, ROWS, {"dryRun": True}))
+
+    assert outcome.structured == {"result": ROWS, "_meta": {"dryRun": True}}
+    assert R.format_problems(outcome, DRY_RUN, revision) == []
+    assert R.metadata_problems(outcome, DRY_RUN, revision) == []
+
+
+def test_the_dry_run_flag_in_the_legacy_text_is_clean() -> None:
+    outcome = read_result(by_revision("2024-11-05", ROWS, {"dryRun": True}))
+
+    assert not outcome.has_structured
+    assert R.metadata_problems(outcome, DRY_RUN, "2024-11-05") == []
+
+
+def test_a_missing_flag_in_the_legacy_text_is_named() -> None:
+    outcome = read_result(by_revision("2024-11-05", ROWS, {}))
+
+    assert R.metadata_problems(outcome, DRY_RUN, "2024-11-05") == ["no dryRun in the text's _meta"]
+
+
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_metadata_only_in_the_text_is_the_known_gap(revision: str) -> None:
+    """What #21844 sent before a5c30a4, and the trunk lane still does."""
+    outcome = read_result(by_revision(revision, ROWS, {"dryRun": True}, structured_meta=False))
+
+    assert R.format_problems(outcome, DRY_RUN, revision) == []
+    assert R.metadata_problems(outcome, DRY_RUN, revision) == [f'{R.NO_STRUCTURED_META}, expected {{"dryRun": true}}']
+
+
+def test_an_object_gains_the_key_and_the_bookkeeping_stays_out() -> None:
+    data: JsonObject = {"toolsets": []}
+    meta: JsonObject = {"total": 3, "responseSize": 10}
+    outcome = read_result(by_revision("2025-06-18", data, meta, summary="3 toolsets"))
+
+    assert outcome.structured == {"toolsets": [], "_meta": {"total": 3, "summary": "3 toolsets"}}
+    assert R.format_problems(outcome, OK, "2025-06-18") == []
+    assert R.metadata_problems(outcome, OK, "2025-06-18") == []
+
+
+def test_metadata_that_differs_from_the_text_is_named() -> None:
+    reply_ = as_object(by_revision("2025-06-18", ROWS, {"dryRun": True}))
+    structured = as_object(as_object(reply_["result"])["structuredContent"])
+    structured["_meta"] = {"dryRun": False}
+    outcome = read_result(cast(McpResponse, cast(object, reply_)))
+
+    assert R.metadata_problems(outcome, DRY_RUN, "2025-06-18") == [
+        'structuredContent._meta {"dryRun": false} differs from the metadata {"dryRun": true}'
+    ]
+
+
+def test_a_meta_key_without_metadata_is_a_problem() -> None:
+    """Without metadata there is no wrapping and no key."""
+    reply_ = as_object(by_revision("2025-06-18", ROWS, {}))
+    as_object(reply_["result"])["structuredContent"] = {"result": ROWS, "_meta": {"x": 1}}
+    outcome = read_result(cast(McpResponse, cast(object, reply_)))
+
+    assert R.metadata_problems(outcome, OK, "2025-06-18") == [
+        "a _meta in structuredContent for a result without metadata: {'x': 1}"
+    ]
+
+
+def test_data_with_its_own_meta_key_is_left_alone() -> None:
+    data: JsonObject = {"_meta": {"own": True}, "rows": []}
+    outcome = read_result(by_revision("2025-06-18", data, {"total": 0}, structured_meta=False))
+
+    assert outcome.structured_meta is None
+    assert R.format_problems(outcome, OK, "2025-06-18") == []
+    assert R.metadata_problems(outcome, OK, "2025-06-18") == []
+
+
+class RevisionServer(FakeServer):
+    """A server since #21844, optionally from before a5c30a4."""
+
+    def __init__(self, *, structured_meta: bool = True, swapped: bool = False) -> None:
+        super().__init__()
+        self.structured_meta: bool = structured_meta
+        self.swapped: bool = swapped
+
+    @override
+    def call(self, session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:
+        del session_id, arguments
+        revision = endpoint.protocol_version
+        if self.swapped:
+            revision = "2025-06-18" if revision < R.STRUCTURED_SINCE else "2024-11-05"
+        if tool == "shopware-entity-upsert":
+            return by_revision(revision, ROWS, {"dryRun": True}, structured_meta=self.structured_meta)
+        return by_revision(revision, {"toolsets": []}, {}, structured_meta=self.structured_meta)
+
+
+def statuses(rep: Reporter) -> dict[str, str]:
+    return {str(r.get("label")): str(r.get("status")) for r in rep.records}
+
+
+def test_a_server_since_21844_passes_every_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(monkeypatch, RevisionServer(), probes=(OK, DRY_RUN))
+
+    found = statuses(rep)
+    assert rep.failed == 0, found
+    assert found[R.FOLLOWS_REVISION] == "pass"
+    assert found["model metadata in the legacy text 2024-11-05: dry-run upsert (shopware-entity-upsert)"] == "pass"
+    for revision in ("2025-06-18", "2025-11-25"):
+        assert found[f"model metadata in structuredContent {revision}: dry-run upsert (shopware-entity-upsert)"] == (
+            "pass"
+        )
+        label = f"{R.NO_MODEL_META_IN_STRUCTURED} {revision}: toolsets-list (shopware-toolsets-list)"
+        assert found[label] == "pass"
+    assert "model metadata in the legacy text 2024-11-05: toolsets-list (shopware-toolsets-list)" not in found
+
+
+def test_a_server_before_a5c30a4_is_a_known_failure_naming_the_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(monkeypatch, RevisionServer(structured_meta=False), probes=(OK, DRY_RUN))
+
+    failed = [r for r in rep.records if r.get("status") == "fail"]
+    assert [r.get("label") for r in failed] == [
+        "model metadata in structuredContent 2025-06-18: dry-run upsert (shopware-entity-upsert)",
+        "model metadata in structuredContent 2025-11-25: dry-run upsert (shopware-entity-upsert)",
+    ]
+    assert rep.expected_failed == 2 and rep.exit_code == 0
+    [notice] = rep.annotations("Admin")
+    assert notice.startswith("::notice") and "https://github.com/shopware/shopware/pull/21844" in notice
+
+
+def test_formats_on_the_wrong_side_of_the_boundary_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(monkeypatch, RevisionServer(swapped=True), probes=(OK,))
+
+    found = statuses(rep)
+    assert found[R.FOLLOWS_REVISION] == "fail"
+    record = next(r for r in rep.records if r.get("label") == R.FOLLOWS_REVISION)
+    assert "2024-11-05 toolsets-list: spec, expected legacy" in str(record.get("error"))

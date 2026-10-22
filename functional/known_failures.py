@@ -89,6 +89,22 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
             "for an Admin API token."
         ),
     ),
+    KnownFailure(
+        # functional/result_format.py MODEL_META_IN_STRUCTURED / NO_STRUCTURED_META.
+        label="model metadata in structuredContent",
+        error="no _meta in structuredContent",
+        issue="shopware/shopware#21844",
+        url="https://github.com/shopware/shopware/pull/21844",
+        waiting_for=(
+            "a lane on shopware/shopware@a5c30a4 or later "
+            "(https://github.com/shopware/shopware/commit/a5c30a4704b0e2fbb86aa100b9a593fe7e4ea5c0)"
+        ),
+        why=(
+            "Since 2025-06-18 structuredContent carries the model's metadata (dryRun, total, the summary) "
+            "under _meta. A server with the per-revision format from before that commit sends it in the "
+            "text blocks and the result _meta only, which Claude Code, Codex and VS Code never show the model."
+        ),
+    ),
 )
 
 

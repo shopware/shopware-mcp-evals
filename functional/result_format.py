@@ -9,6 +9,21 @@ it sends depends on the revision:
                     `{"result": …}` when it is not a JSON object), or
                     `{"error": {"code", "message", "details"}}` on a failure
 
+shopware/shopware#21844 then made the revision pick the text as well:
+
+  before 2025-06-18 the deprecated legacy `{"success": …}` envelope, unchanged
+  2025-06-18 on     the MCP format: the plain data as JSON, the summary and
+                    `{"_meta": …}` as blocks of their own, and the model's
+                    metadata (`dryRun`, `total`, the summary) also inside
+                    `structuredContent._meta`, because Claude Code, Codex and
+                    VS Code show the model `structuredContent` and drop the text
+
+The first is checked per probe and revision; the second once per run
+("the format follows the revision"), because only replies on both sides of
+2025-06-18 tell a server since #21844 from an older one that sends one format
+everywhere. An older server records that as one skip naming the PR, and the
+metadata checks with it.
+
 The rest of the suite negotiates one revision. This section opens a session per
 revision in `FORMAT_REVISIONS` and calls the same probes in each, so a renderer
 that sends `structuredContent` to a client that cannot read it, or forgets it for
@@ -20,13 +35,14 @@ hold under the `v6.8.0.0` format as well. Under that format a client below
 and that is accepted, not failed.
 """
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from eval.result_schema import JsonObject, as_object
 from functional.reporting import Reporter
 from mcp_client import Endpoint, mcp_call, mcp_init
-from mcp_result import ToolOutcome, read_result
+from mcp_result import ToolOutcome, format_for, format_verdict, read_result
 
 # Oldest, boundary, newest. The renderer changes behaviour at one revision only,
 # so the ones in between add calls without adding information.
@@ -40,9 +56,25 @@ PREDATES_RENDERER = (
     "so there is no result format to check"
 )
 
+FORMAT_FIX = "shopware/shopware#21844"
+FORMAT_FIX_URL = "https://github.com/shopware/shopware/pull/21844"
+FOLLOWS_REVISION = f"result format follows the revision ({FORMAT_FIX})"
+PREDATES_REVISION_FORMAT = (
+    f"the server predates {FORMAT_FIX} ({FORMAT_FIX_URL}): it sends one result format on every revision, "
+    "so neither the format per revision nor the model metadata in structuredContent can be checked"
+)
+# Spelled out in functional/known_failures.py, which matches on this prefix.
+MODEL_META_IN_STRUCTURED = "model metadata in structuredContent"
+MODEL_META_IN_TEXT = "model metadata in the legacy text"
+NO_STRUCTURED_META = "no _meta in structuredContent"
+NO_MODEL_META_IN_STRUCTURED = "no model metadata, no _meta in structuredContent"
+
 # A UUID no row has. Hex, 32 characters, so it passes validation and reaches the
 # lookup: the point is the not-found code, not a rejected argument.
 PHANTOM_ID = "0" * 32
+# A tax rate that does not exist, upserted as a dry run: the write is rolled
+# back, and the reply is the one dry-run result every lane can produce.
+DRY_RUN_TAX: JsonObject = {"id": "0" * 31 + "1", "name": "mcp-evals dry run", "taxRate": 1}
 
 
 @dataclass(frozen=True)
@@ -53,12 +85,21 @@ class Probe:
     args: JsonObject
     label: str
     code: str | None = None
+    # Metadata keys the model has to be shown, in the text's `_meta` on every
+    # revision and in `structuredContent._meta` from 2025-06-18 on.
+    meta: tuple[str, ...] = ()
 
 
 ADMIN_PROBES: tuple[Probe, ...] = (
     Probe("shopware-toolsets-list", {}, "toolsets-list"),
     # A list of rows, so the wrapping rule is exercised and not only the object case.
-    Probe("shopware-entity-search", {"entity": "currency", "limit": 2}, "entity-search"),
+    Probe("shopware-entity-search", {"entity": "currency", "limit": 2}, "entity-search", meta=("total",)),
+    Probe(
+        "shopware-entity-upsert",
+        {"entity": "tax", "payload": json.dumps([DRY_RUN_TAX]), "dryRun": True},
+        "dry-run upsert",
+        meta=("dryRun",),
+    ),
     Probe("shopware-entity-schema", {"entity": "no_such_entity"}, "unknown entity", "invalid_arguments"),
     Probe("shopware-entity-read", {"entity": "product", "id": PHANTOM_ID}, "missing record", "not_found"),
 )
@@ -136,7 +177,9 @@ def format_problems(outcome: ToolOutcome, probe: Probe, revision: str) -> list[s
                     )
                 if probe.code is not None and got_error.get("code") != probe.code:
                     problems.append(f"structuredContent.error.code {got_error.get('code')!r}, expected {probe.code!r}")
-            elif outcome.structured != want:
+            # The model's `_meta` next to the data is checked by
+            # `metadata_problems`; here only the data has to agree.
+            elif outcome.structured_data != want:
                 problems.append("structuredContent does not carry the same data as the text")
     else:
         if outcome.has_structured:
@@ -146,6 +189,41 @@ def format_problems(outcome: ToolOutcome, probe: Probe, revision: str) -> list[s
     return problems
 
 
+def metadata_problems(outcome: ToolOutcome, probe: Probe, revision: str) -> list[str]:
+    """What is wrong with the metadata a model is shown, on a server since
+    shopware/shopware#21844; [] for nothing. Only for a probe that worked.
+
+    Legacy era: the probe's keys in the envelope's `_meta`, the only place an
+    old client has. MCP format: the same keys in the `{"_meta": …}` text block,
+    and `structuredContent._meta` holding exactly the model's metadata (the
+    result's metadata without `responseSize` and `resourceUri`, plus the
+    summary), or no such key when there is none.
+    """
+    problems = [f"no {key} in the text's _meta" for key in probe.meta if key not in outcome.meta]
+    if format_for(revision) == "legacy" or outcome.data_has_meta_key:
+        return problems
+    want = outcome.model_meta
+    got = outcome.structured_meta
+    if not want:
+        if got is not None:
+            problems.append(f"a _meta in structuredContent for a result without metadata: {got}")
+    elif got is None:
+        problems.append(f"{NO_STRUCTURED_META}, expected {json.dumps(want, sort_keys=True)[:200]}")
+    elif got != want:
+        problems.append(
+            f"structuredContent._meta {json.dumps(got, sort_keys=True)[:200]} differs from the metadata "
+            f"{json.dumps(want, sort_keys=True)[:200]}"
+        )
+    return problems
+
+
+def _report(rep: Reporter, label: str, problems: list[str]) -> None:
+    if problems:
+        rep.check_fail(label, "; ".join(problems))
+    else:
+        rep.check_pass(label)
+
+
 def verify_result_format(
     rep: Reporter,
     endpoint: Endpoint,
@@ -153,7 +231,8 @@ def verify_result_format(
     revisions: Sequence[str] = FORMAT_REVISIONS,
 ) -> None:
     """Call every probe on a fresh session per revision and check its format."""
-    rep.section("Result format per protocol revision (shopware/shopware#20948)")
+    rep.section("Result format per protocol revision (shopware/shopware#20948, #21844)")
+    replies: list[tuple[str, Probe, ToolOutcome]] = []
     for revision in revisions:
         pinned = endpoint.with_protocol(revision)
         try:
@@ -181,9 +260,40 @@ def verify_result_format(
             return
 
         for probe, outcome in outcomes:
-            label = f"result format {revision}: {probe.label} ({probe.tool})"
-            problems = format_problems(outcome, probe, revision)
-            if problems:
-                rep.check_fail(label, "; ".join(problems))
-            else:
-                rep.check_pass(label)
+            _report(
+                rep,
+                f"result format {revision}: {probe.label} ({probe.tool})",
+                format_problems(outcome, probe, revision),
+            )
+            replies.append((revision, probe, outcome))
+
+    verify_format_per_revision(rep, replies)
+
+
+def verify_format_per_revision(rep: Reporter, replies: Sequence[tuple[str, Probe, ToolOutcome]]) -> None:
+    """The text format follows the revision, and the model sees the metadata."""
+    verdict = format_verdict((revision, outcome) for revision, _, outcome in replies)
+    if verdict == "one_format":
+        rep.check_skip(FOLLOWS_REVISION, PREDATES_REVISION_FORMAT)
+        return
+    wrong = [
+        f"{revision} {probe.label}: {outcome.shape}, expected {format_for(revision)}"
+        for revision, probe, outcome in replies
+        if outcome.shape in ("legacy", "spec") and outcome.shape != format_for(revision)
+    ]
+    _report(rep, FOLLOWS_REVISION, wrong)
+
+    for revision, probe, outcome in replies:
+        # A failure has no metadata to show, and a call that went wrong has
+        # been reported above already.
+        if not outcome.ok or probe.code is not None:
+            continue
+        spec = format_for(revision) == "spec"
+        if not spec and not probe.meta:
+            continue
+        where = MODEL_META_IN_TEXT
+        if spec:
+            # A result without metadata gets a label of its own: passing it says
+            # nothing about the known gap, and must not ask for its entry to go.
+            where = MODEL_META_IN_STRUCTURED if outcome.model_meta else NO_MODEL_META_IN_STRUCTURED
+        _report(rep, f"{where} {revision}: {probe.label} ({probe.tool})", metadata_problems(outcome, probe, revision))
