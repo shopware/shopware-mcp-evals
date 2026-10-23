@@ -9,12 +9,14 @@ all of them.
 from __future__ import annotations
 
 import itertools
+import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 import requests
 
-from eval.result_schema import JsonObject, McpResponse
+from eval.result_schema import JsonObject, McpResponse, as_object
 from functional import sessions as S
 from functional.reporting import Reporter
 from functional.resp import RedisError
@@ -271,6 +273,15 @@ def main(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int:
 def test_without_a_redis_url_it_skips_with_the_reason(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert main(monkeypatch) == 0
     assert list((tmp_path / "results").glob("functional-sessions-*.json"))
+
+
+@pytest.mark.usefixtures("credentials")
+def test_the_report_names_the_redis_lane(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert main(monkeypatch, "--lane", "redis") == 0
+
+    [path] = (tmp_path / "results").glob("functional-sessions-*.json")
+    report = as_object(cast(object, json.loads(path.read_text())))
+    assert (report["lane"], report["endpoint"]) == ("redis", "sessions")
 
 
 @pytest.mark.usefixtures("credentials")

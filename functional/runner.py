@@ -59,7 +59,7 @@ from functional.principals import (
     ProvisioningFailed,
     provisioned,
 )
-from functional.reporting import Reporter, workflow_command
+from functional.reporting import LANES, Reporter, workflow_command
 from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
 from functional.stateless import verify_stateless_era
 from mcp_client import (
@@ -1107,15 +1107,25 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
     fix to one leaves the others free to disagree. The report that started this
     was one of them — toolsets-list empty for an integration whose allowlist the
     Administration showed as "All capabilities".
+
+    Recorded as the caller the credential belongs to: `oauth` for a bearer
+    token, whoever asked for the check, and `allowlist` for an access key.
     """
+    with rep.as_principal("oauth" if principal.bearer else "allowlist"):
+        _verify_principal(rep, principal, cat, suite)
+
+
+def _verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite: Endpoint) -> None:
     who = principal.label.split("-", 3)[-1]
     expect = principal.expect
 
     def check(ok: bool, claim: str, detail: str) -> None:
+        # One label for both outcomes, so the job summary can line up a check
+        # that passed on one lane with the same check failing on another.
         if ok:
             rep.check_pass(f"{who}: {claim}")
         else:
-            rep.check_fail(f"allowlist: {who}", f"expected it {claim}, but {detail}")
+            rep.check_fail(f"{who}: {claim}", detail)
 
     endpoint = Endpoint("admin", "/api/_mcp", principal.auth_headers(), base_url=suite.base_url).with_protocol(
         suite.protocol_version
@@ -1269,6 +1279,11 @@ def verify_allowlist_matrix(rep: Reporter, endpoint: Endpoint, provision: bool) 
     in setup-lane would drift from the one the Administration writes.
     """
     rep.section("Allowlist matrix (integrations and users)")
+    with rep.as_principal("allowlist"):
+        _verify_allowlist_matrix(rep, endpoint, provision)
+
+
+def _verify_allowlist_matrix(rep: Reporter, endpoint: Endpoint, provision: bool) -> None:
     if not provision:
         rep.skip("allowlist matrix needs --provision-principals: it creates integrations, users and a role")
         return
@@ -1503,6 +1518,15 @@ def main() -> int:
         default=DEFAULT_PROTOCOL_VERSION,
         help=f"MCP revision the suite's sessions negotiate (default {DEFAULT_PROTOCOL_VERSION}).",
     )
+    parser.add_argument(
+        "--lane",
+        choices=LANES,
+        default=None,
+        help=(
+            "The CI lane this run is, recorded in the report so the job summary can put it in its row. "
+            "Absent: the report names no lane, rather than guessing one from the revision."
+        ),
+    )
     parser.add_argument("--skip-media-upload", action="store_true")
     parser.add_argument("--skip-dev-tools", action="store_true")
     parser.add_argument(
@@ -1565,7 +1589,12 @@ def main() -> int:
     else:
         require("SW_SC_ACCESS_KEY (sales-channel access key)", SW_SC_ACCESS_KEY)
 
-    rep = Reporter(SW_BASE_URL, protocol_version=endpoint.protocol_version)
+    rep = Reporter(
+        SW_BASE_URL,
+        protocol_version=endpoint.protocol_version,
+        endpoint=endpoint_name,
+        lane=cast(str | None, args.lane),
+    )
     rep.banner(f"Shopware MCP Functional Tests — {endpoint_name} (v2 discovery)")
     rep.info(f"Endpoint: {endpoint.url} (MCP {endpoint.protocol_version})\n")
     annotate = cast(bool | None, args.annotate)

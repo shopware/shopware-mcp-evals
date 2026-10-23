@@ -33,6 +33,7 @@ from typing import cast
 import toollint
 from eval.compare_runs import render_actionable, render_detail, render_split, render_unmatched
 from eval.cost import combine
+from eval.functional_summary import load_functional, render_eval_revision, render_functional
 from eval.result_schema import (
     Comparison,
     CostBlock,
@@ -740,6 +741,7 @@ def render(
     reports: list[Report] | None = None,
     admin_snapshot: Snapshot | None = None,
     store_snapshot: Snapshot | None = None,
+    functional: str = "",
 ) -> str:
     """The whole job on one page, verdict first.
 
@@ -753,12 +755,18 @@ def render(
     lint workflow, a Store-only catalogue listing in the static job, a
     comparison note in the eval job — so whether you saw a finding depended on
     which job you happened to click.
+
+    `functional` is the rendered lane table (eval/functional_summary.py), built
+    by the caller because it reads its own files.
     """
     return "\n".join(
         [
             "## MCP evals",
             "",
             render_runs(rows),
+            # The eval runs at one revision, the functional suite at several:
+            # said once, under the eval's rates, so neither is read as the other.
+            render_eval_revision(reports or []),
             render_cost(rows),
             # Directly under the rates, deliberately: the denominator they are
             # computed over belongs next to them, not in an appendix.
@@ -766,6 +774,7 @@ def render(
             render_tiers(rows),
             render_tool_scorecard(results or [], catalog or {}),
             render_comparison(cmp_),
+            functional,
             # Reference from here down.
             nest("Context prompt — what the tool guide is worth", render_prompt_delta(reports or [])),
             nest("Triage — which arm located each failure", render_arm_matrix(reports or [])),
@@ -809,6 +818,28 @@ def main() -> int:
             "static job did not snapshot it, which simply omits that section."
         ),
     )
+    parser.add_argument(
+        "--functional",
+        help=(
+            "Directory holding this run's functional reports, one artifact per lane "
+            "(functional-<lane>/functional-*.json). Read at any depth. Absent: no lane table."
+        ),
+    )
+    parser.add_argument(
+        "--functional-lanes",
+        nargs="*",
+        default=[],
+        help="Lanes this run started, so one that wrote no report still gets a row.",
+    )
+    parser.add_argument(
+        "--functional-unawaited",
+        nargs="*",
+        default=[],
+        help=(
+            "Lanes the report job does not wait for (next-major). Without a report they read "
+            "'not finished' rather than 'no report'."
+        ),
+    )
     args = parser.parse_args()
     # argparse types every attribute as Any; naming them once here keeps that
     # from spreading into every call below.
@@ -817,6 +848,7 @@ def main() -> int:
     rows_dir = cast(str, args.rows)
     tools_path = cast(str, args.tools)
     store_tools_path = cast(str, args.store_tools)
+    functional_dir = cast(str | None, args.functional)
 
     cmp_: Comparison | None = None
     if comparison_path:
@@ -837,6 +869,11 @@ def main() -> int:
         reports,
         admin_snapshot=load_snapshot(tools_path),
         store_snapshot=load_snapshot(store_tools_path),
+        functional=render_functional(
+            load_functional(Path(functional_dir) if functional_dir else None),
+            cast(list[str], args.functional_lanes),
+            cast(list[str], args.functional_unawaited),
+        ),
     )
     print(markdown)
 
