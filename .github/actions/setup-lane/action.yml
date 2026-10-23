@@ -831,8 +831,15 @@ runs:
         # 2 whatever else it managed to read, so the earlier one-liner could
         # not be written as a fallback chain — it was the failure, not a
         # tolerated one.
-        APP_ENV_NAME=""
+        #
+        # The job environment comes first. setup-shopware writes APP_ENV=dev to
+        # $GITHUB_ENV, not to any .env file, and a real environment variable
+        # overrides the dotenv files in Symfony. Reading the files alone fell
+        # back to `test` on a server running dev, and the OAuth redirect check
+        # then expected a refusal dev never gives.
+        APP_ENV_NAME="${APP_ENV:-}"
         for envfile in .env.local .env; do
+          [ -n "${APP_ENV_NAME}" ] && break
           [ -f "${envfile}" ] || continue
           APP_ENV_NAME=$(sed -n 's/^APP_ENV=//p' "${envfile}" | tr -d '"' | tail -1)
           [ -n "${APP_ENV_NAME}" ] && break
