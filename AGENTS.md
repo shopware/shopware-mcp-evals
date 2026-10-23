@@ -102,7 +102,7 @@ sequenceDiagram
   workflow `run:` blocks via `scripts/lint_workflow_shell.py`; `toollint` also
   runs there — its prose findings advisory, its two parameter counts ratcheted
   against `tool-history/lint-budget.json`). `mcp-evals.yml` runs
-  `static` → (`admin-eval`, `store-eval`, `session-store`) → `report`, each
+  `static` → (`admin-eval`, `store-eval`, `session-store`, `revisions`) → `report`, each
   building its own lane via `.github/actions/setup-lane` on the commit `static`
   resolved (`session-store`: see [Session store](#session-store)). It installs
   Shopware at the pinned `shopware.sha` and checks the plugin repos out at their **default branch**, so
@@ -161,6 +161,20 @@ sequenceDiagram
   `compare_runs.py` still prints its full report (including the per-model rate
   table) to stdout for local use — only the CI render is centralized, and it
   drops the rates because `summary.py` already shows them per suite.
+  The functional suite is in the same page, one row per **lane** (default,
+  2024-11-05, 2025-06-18, 6.8, Redis), endpoint and **caller** (the suite's own
+  key, the allowlist principals, OAuth), with new and expected failures apart,
+  then one "Differs by lane" line, or the checks whose result changes between
+  lanes. It reads fields, not labels: `--lane` on `functional.runner` and
+  `functional.sessions` puts `lane` (and `endpoint`) on the report, and the
+  Reporter stamps `principal` on each record — a section running as another
+  caller wraps itself in `rep.as_principal(...)`; `verify_principal` picks
+  `oauth` or `allowlist` from the credential. Each lane uploads its reports as
+  `functional-<lane>`, and `report` reads those (`--functional`), never the
+  merged `results/`, where the eval jobs re-upload static's. `report` waits for
+  `revisions`, not for `next-major`, whose row reads "not finished" when its
+  report is not there yet. A line under the eval rates names the revision the
+  LLM eval ran at, from its reports' `protocol_version`.
 - **Attribute failures to a repository.** `ownership.py` maps a tool name to
   the codebase that owns it (core / dev-tools / merchant-tools /
   agentic-commerce) by longest-matching prefix, and core is gated on its own

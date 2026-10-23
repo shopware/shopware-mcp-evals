@@ -419,7 +419,7 @@ jobs:
         # as an administrator user, which the allowlist does not apply to, so
         # this is the only coverage the allowlist has. Safe here: the lane dies
         # with the job, and the principals are deleted afterwards anyway.
-        run: python -m functional.runner --endpoint admin --provision-principals
+        run: python -m functional.runner --endpoint admin --provision-principals --lane default
 
       # The Store catalogue has never been snapshotted, so everything that
       # derives from one had to be guessed for it: toolclass could not read
@@ -657,7 +657,7 @@ jobs:
         # --annotate-skips the tally and every skip, so a skipped check cannot
         # pass for coverage. That replaced ~60 lines of shell that grepped the
         # log for FAIL and SKIP lines.
-        run: python -m functional.runner --endpoint store --allow-mutations --advisory --annotate-skips
+        run: python -m functional.runner --endpoint store --allow-mutations --advisory --annotate-skips --lane default
 
       - name: Detect snapshot changes worth committing
         id: snapshot
@@ -681,6 +681,20 @@ jobs:
           path: |
             results/
             tool-history/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # The functional reports again, on their own, named after the lane like
+      # every other lane's. `report` reads the functional-* artifacts and nothing
+      # else for the lane table: static-results is re-uploaded inside the eval
+      # jobs' artifacts, so reading the merged results/ would count this lane
+      # three times.
+      - name: Upload functional reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: functional-default
+          path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
 
@@ -750,7 +764,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
         run: |
-          python -m functional.sessions --redis-url redis://localhost:6379/5 \
+          python -m functional.sessions --redis-url redis://localhost:6379/5 --lane redis \
             || { echo "::error::MCP sessions are not (only) in Redis — see the step log for which check failed"; exit 1; }
 
       # Everything else still has to hold on the other store: toolset
@@ -765,13 +779,14 @@ jobs:
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
-        run: python -m functional.runner --endpoint admin
+        run: python -m functional.runner --endpoint admin --lane redis
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: session-store-results
+          # functional-<lane>: the name `report` downloads the lane table from.
+          name: functional-redis
           # The reports only. `report` merges every artifact into one results/,
           # and this lane's tool-health-admin.json would overwrite static's —
           # the one the eval gate is meant to read.
@@ -843,7 +858,9 @@ jobs:
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         # With the principals, as static: what each allowlist state reaches is
         # read through tools/list, toolsets and calls, all at this revision.
-        run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals
+        run: |
+          python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals \
+            --lane "${REVISION}"
 
       # Commits like static's store step, and is advisory like it. --advisory
       # rather than continue-on-error: an allowed-to-fail step still posts
@@ -859,13 +876,16 @@ jobs:
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
-        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version "${REVISION}"
+        run: |
+          python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version "${REVISION}" \
+            --lane "${REVISION}"
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: revision-${{ matrix.revision }}-results
+          # One per matrix entry, or the second upload would collide with the first.
+          name: functional-${{ matrix.revision }}
           # The reports only, for the same reason as session-store: this lane's
           # tool-health files would overwrite the ones the eval gate reads.
           path: results/functional-*.json
@@ -889,6 +909,8 @@ jobs:
   #
   # Nightly, the `next_major` dispatch input, or the `run-next-major` PR label.
   # Not a dependency of `report`: an advisory lane must not hold the summary.
+  # Its row in the lane table reads "not finished" when its report is not
+  # uploaded yet, rather than the lane disappearing.
   next-major:
     name: Next major (V6_8_0_0, advisory)
     needs: static
@@ -949,7 +971,7 @@ jobs:
         # names the check instead.
         run: |
           python -m functional.runner --endpoint admin --protocol-version 2025-11-25 \
-            --deactivated-plugins "${INCOMPATIBLE}" --provision-principals --advisory
+            --deactivated-plugins "${INCOMPATIBLE}" --provision-principals --advisory --lane 6.8
 
       # The UCP journey commits, as in static: a rolled-back cart cannot be the
       # next step's precondition, and this instance dies with the job. Advisory
@@ -964,13 +986,13 @@ jobs:
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
-        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version 2025-11-25
+        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version 2025-11-25 --lane 6.8
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: next-major-results
+          name: functional-6.8
           # The reports only, for the same reason as session-store: this lane's
           # tool-health files would overwrite the ones the eval gate reads.
           path: results/functional-*.json
@@ -1414,11 +1436,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 3. One render, after everything. `!cancelled()` rather than `success()`: a
-  # failed eval is exactly when the summary is worth reading.
+  # failed eval is exactly when the summary is worth reading. `revisions` is
+  # waited for so its lanes are in the functional table; `next-major` is not.
   # ---------------------------------------------------------------------------
   report:
     name: Report
-    needs: [static, session-store, admin-eval, store-eval]
+    needs: [static, session-store, revisions, admin-eval, store-eval]
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-24.04
     # 25, not 15: the reconciliation waits up to 10 minutes for the PR's lint.
@@ -1446,6 +1469,18 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+        continue-on-error: true
+
+      # The lane table's input, kept apart from the merged results/: there two
+      # lanes finishing in the same second overwrite each other's timestamped
+      # report, and static's reports arrive twice more inside the eval jobs'
+      # artifacts. One directory per lane, functional-<lane>. next-major's is
+      # here only if that job uploaded it before this step ran.
+      - name: Download functional reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: functional-*
+          path: functional-reports
         continue-on-error: true
 
       - name: Collect results
@@ -1506,6 +1541,12 @@ jobs:
       # visible; the read paths inside summary.py are the defensive part.
       - name: Write job summary
         if: ${{ !cancelled() && needs.admin-eval.result != 'skipped' }}
+        env:
+          # Whether next-major was started: the same condition as its own `if`.
+          NEXT_MAJOR: >-
+            ${{ github.event_name == 'schedule'
+                || github.event.inputs.next_major == 'true'
+                || contains(github.event.pull_request.labels.*.name, 'run-next-major') }}
         run: |
           # --reports names this job's three reports explicitly. It must not
           # become a glob over results/: that directory is committed and holds
@@ -1522,7 +1563,17 @@ jobs:
           # comment step the same document without rendering it twice. A redirect
           # also keeps python's own exit status, which `| tee` would replace with
           # tee's.
+          #
+          # --functional-lanes are the lanes this run started, so one that wrote
+          # no report keeps its row. The two revisions are the `revisions`
+          # matrix. next-major is not waited for, so --functional-unawaited
+          # makes its missing report read "not finished" rather than "no report".
+          lanes=(default 2024-11-05 2025-06-18 redis)
+          if [ "${NEXT_MAJOR}" = "true" ]; then lanes+=(6.8); fi
           python -m eval.summary \
+            --functional "functional-reports" \
+            --functional-lanes "${lanes[@]}" \
+            --functional-unawaited 6.8 \
             --rows "results/rows" \
             --comparison "results/eval-comparison.json" \
             --tools "tool-history/latest.json" \
