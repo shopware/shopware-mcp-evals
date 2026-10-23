@@ -92,6 +92,7 @@ def test_a_known_failure_does_not_fail_the_run() -> None:
         "status": "fail",
         "error": "the known cause",
         "known_issue": "org/repo#1",
+        "principal": "admin",
     }
 
 

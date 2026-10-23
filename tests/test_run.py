@@ -583,9 +583,12 @@ def test_run_admin_respects_skip_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     args = flags(skip_media_upload=True, skip_dev_tools=True)
     session, _ = fake.init()
     R.run_admin_tools(rep, session, ADMIN, args)
-    labels = " ".join(r["label"] for r in rep.records)
-    assert "shopware-media-upload" not in labels
-    assert "swag-dev-tools" not in labels
+    # Each is one skip naming its flag, and no call.
+    ran = " ".join(r["label"] for r in rep.records if r["status"] != "skipped")
+    assert "shopware-media-upload" not in ran
+    assert "swag-dev-tools" not in ran
+    skipped = [r["label"] for r in rep.records if r["status"] == "skipped"]
+    assert "dev tools (--skip-dev-tools)" in skipped
 
 
 def test_a_deactivated_merchant_plugin_skips_its_tools_and_says_why(monkeypatch: pytest.MonkeyPatch) -> None:
