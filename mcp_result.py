@@ -66,11 +66,11 @@ class ToolError:
     def describe(self) -> str:
         """One line for a report or a model, in the form graders match on.
 
-        `type` is the classification UCP already made, kept in front so the
-        anchored `not_found:` matcher in eval.assertions still sees it.
-        `violations` is where a UCP schema error's actual answer is: the message
-        says only 'Validation failed for schema "checkout.create.request"',
-        and `["$.line_items is required"]` sits next to it.
+        `type` is the classification UCP already made, kept in front for the
+        reader of the report. `violations` is where a UCP schema error's actual
+        answer is: the message says only 'Validation failed for schema
+        "checkout.create.request"', and `["$.line_items is required"]` sits next
+        to it.
         """
         kind = self.details.get("type")
         text = f"{kind!s}: {self.message}".strip(": ").strip() if kind else self.message
