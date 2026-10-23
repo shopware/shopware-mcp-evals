@@ -3,11 +3,14 @@
 Above 100 KB (`McpToolResponse::MAX_RESPONSE_SIZE`) a tool's result is stored
 and the reply carries a pointer instead. shopware/shopware#20951 made that
 pointer a signed token, `<id>.<expiry>.<signature>`, bound to the principal that
-stored it rather than to the MCP session:
+stored it rather than to the MCP session. Where the pointer travels depends on
+the revision only (shopware/shopware#21844):
 
-  every revision    `_meta.resourceUri` and `_meta.expiresAt` in the text
-  2025-06-18 on     a `resource_link` block with the same URI too, and
-                    `shopware/expiresAt` in the result `_meta`
+  before 2025-06-18 `_meta.resourceUri` and `_meta.expiresAt` in the legacy
+                    text, and no `resource_link` block
+  2025-06-18 on     a `resource_link` block and nowhere else: the text has no
+                    `resourceUri`, and the expiry is `shopware/expiresAt` in
+                    the result `_meta`
 
 and `resources/read` on that URI answers the same principal on any later
 session, and nobody else.
@@ -52,8 +55,9 @@ _NOT_FOUND = re.compile(r"tool result .* not found", re.IGNORECASE)
 
 
 def pointer(outcome: ToolOutcome) -> ResultLink | None:
-    """The stored result's pointer, preferring the `resource_link` block."""
-    return outcome.links[0] if outcome.links else None
+    """The stored result's pointer, preferring the `resource_link` block. A
+    link of the tool's own, which the renderer keeps next to it, is not one."""
+    return next((link for link in outcome.links if link.uri.startswith(TOOL_RESULT_URI_PREFIX)), None)
 
 
 def is_signed(uri: str) -> bool:
@@ -83,33 +87,37 @@ def offload_problems(outcome: ToolOutcome, revision: str) -> list[str]:
         problems.append(f"the pointer is not a signed token: {link.uri}")
     if outcome.data is not None:
         problems.append("data was sent inline next to the pointer")
-    # The legacy text keeps the expiry in its envelope. The spec format (the
-    # `v6.8.0.0` flag) does not: McpToolResultParser promotes it to the result's
-    # expiry, which only the result `_meta` carries, on every revision.
-    spec = outcome.shape == "spec"
-    # The pointer itself stays in the text in both formats: the parser removes
-    # only `note` and `expiresAt`. Without this, a reply carrying the link block
-    # alone would pass on 2025-06-18 and later.
     text_uri = outcome.meta.get("resourceUri")
-    if text_uri is None:
-        problems.append("no resourceUri next to the pointer in the text")
-    if not spec and outcome.meta.get("expiresAt") is None:
-        problems.append("no expiresAt next to the pointer in the text")
-    has_block = any(lk.source == "resource_link" for lk in outcome.links)
-    if revision >= LINK_SINCE and not has_block:
-        problems.append(f"no resource_link block on {revision}")
-    if (spec or revision >= LINK_SINCE) and META_PREFIX + "expiresAt" not in outcome.result_meta:
-        problems.append(f"no shopware/expiresAt in the result _meta on {revision}")
+    # `pointer` prefers the block, so the pointer came from the text only
+    # when there is no block.
+    has_block = link.source == "resource_link"
     if revision >= LINK_SINCE:
-        if has_block and text_uri is not None and text_uri != link.uri:
-            problems.append("the resource_link block and the text name different pointers")
-    elif has_block:
-        problems.append(f"resource_link block sent to a {revision} client, which predates it")
+        # The block is the pointer. A copy in the text is what a client below
+        # the boundary reads, so finding one here means the legacy rendering.
+        if not has_block:
+            problems.append(f"no resource_link block on {revision}")
+        if text_uri is not None:
+            problems.append(f"resourceUri in the text on {revision}, where the resource_link block is the pointer")
+        if META_PREFIX + "expiresAt" not in outcome.result_meta:
+            problems.append(f"no shopware/expiresAt in the result _meta on {revision}")
+    else:
+        if text_uri is None:
+            problems.append("no resourceUri next to the pointer in the text")
+        if outcome.meta.get("expiresAt") is None:
+            problems.append("no expiresAt next to the pointer in the text")
+        if has_block:
+            problems.append(f"resource_link block sent to a {revision} client, which predates it")
     return problems
 
 
-def readable_problem(resp: McpResponse) -> str | None:
-    """None when resources/read returned the stored result, else what it returned."""
+def readable_problem(resp: McpResponse, revision: str) -> str | None:
+    """None when resources/read returned the result stored on `revision`, else
+    what it returned.
+
+    The stored form follows the revision that stored it
+    (`McpToolResultStoredFormat`): the legacy envelope below `LINK_SINCE`, the
+    plain data from it on, which for the probe is the list of rows itself.
+    """
     if "error" in resp:
         return f"refused: {as_object(resp.get('error')).get('message')}"
     contents = as_list(as_object(resp.get("result")).get("contents"))
@@ -117,12 +125,16 @@ def readable_problem(resp: McpResponse) -> str | None:
     if not isinstance(text, str):
         return "no text in the resource contents"
     try:
-        stored = as_object(cast(object, json.loads(text)))
+        stored = cast(object, json.loads(text))
     except json.JSONDecodeError:
         return f"the stored result is not JSON: {text[:80]}"
-    if not as_list(stored.get("data")):
-        return "the stored result carries no rows"
-    return None
+    if revision >= LINK_SINCE:
+        if "success" in as_object(stored):
+            return f"the stored result is the legacy envelope, stored on {revision}, which stores the plain data"
+        rows = as_list(stored)
+    else:
+        rows = as_list(as_object(stored).get("data"))
+    return None if rows else "the stored result carries no rows"
 
 
 def refused_problem(resp: McpResponse) -> str | None:
@@ -149,6 +161,7 @@ def verify_large_results(
     """Offload one result per revision, then try its pointer from three callers."""
     rep.section("Large results and signed pointers (shopware/shopware#20951)")
     uri: str | None = None
+    stored_on = endpoint.protocol_version
     for revision in revisions:
         pinned = endpoint.with_protocol(revision)
         try:
@@ -164,15 +177,18 @@ def verify_large_results(
         problems = offload_problems(outcome, revision)
         _report(rep, f"large result {revision}: stored behind a signed pointer", "; ".join(problems))
         if link is not None and not problems:
-            uri = link.uri
+            uri, stored_on = link.uri, revision
 
     if uri is not None:
-        verify_pointer_binding(rep, endpoint, uri, provision)
+        verify_pointer_binding(rep, endpoint, uri, provision, stored_on)
     rep.check_skip("large result pointer: expires after an hour", NOT_TESTED_EXPIRY)
 
 
-def verify_pointer_binding(rep: Reporter, endpoint: Endpoint, uri: str, provision: bool) -> None:
-    """The pointer is the principal's, not the session's."""
+def verify_pointer_binding(
+    rep: Reporter, endpoint: Endpoint, uri: str, provision: bool, stored_on: str = LINK_SINCE
+) -> None:
+    """The pointer is the principal's, not the session's. `stored_on` is the
+    revision whose call stored it, which decides the stored form."""
     try:
         fresh, _ = mcp_init(endpoint=endpoint)
     except RuntimeError as exc:
@@ -181,7 +197,7 @@ def verify_pointer_binding(rep: Reporter, endpoint: Endpoint, uri: str, provisio
     _report(
         rep,
         "large result pointer: the same principal reads it on a new session",
-        readable_problem(mcp_read_resource(fresh, uri, endpoint)),
+        readable_problem(mcp_read_resource(fresh, uri, endpoint), stored_on),
     )
     _report(
         rep,
