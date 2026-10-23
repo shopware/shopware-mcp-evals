@@ -4,8 +4,8 @@ The fake answers the way the trunk lane on shopware/shopware integration/mcp-ite
 answered the flow, with switches for what older shops do differently: no
 discovery at all (before #21862), no registered client, and the first draft of
 #21862, whose system health check and admin snippets still honoured an MCP-bound
-token. Users who sign in with a password are held to the allowlist they were
-given, as `McpAllowlistProvider` does for a bearer token.
+token. Users who sign in with a password hand their token to the allowlist
+matrix; what the matrix then checks is tested in test_allowlist_matrix.py.
 """
 
 import base64
@@ -20,9 +20,9 @@ import pytest
 
 from eval.result_schema import JsonObject, as_object
 from functional import oauth as O
-from functional.principals import OAUTH_TOOLS, ProvisioningFailed, SignInUser
+from functional.principals import PARTIAL, PARTIAL_TOOLS, Principal, ProvisioningFailed, SignInUser
 from functional.reporting import Reporter
-from mcp_client import META_TOOLS, Endpoint, admin_endpoint
+from mcp_client import Endpoint, admin_endpoint
 
 BASE = "http://shop.example"
 MCP = f"{BASE}/api/_mcp"
@@ -32,9 +32,12 @@ LOGIN_SNIPPETS: JsonObject = {"en-GB": {"global": {}, "sw-login": {}}}
 ALL_SNIPPETS: JsonObject = {"en-GB": {"global": {}, "sw-login": {}, "sw-product": {}, "sw-order": {}}}
 
 
-ALLOWLISTED = SignInUser("allowlisted", "mcp-evals-x-oauth-allowlisted", "pw-1", OAUTH_TOOLS)
-UNSET = SignInUser("unset", "mcp-evals-x-oauth-unset", "pw-2", None)
-EVERYTHING = sorted({*META_TOOLS, *OAUTH_TOOLS, O.REFUSED_TOOL, "shopware-order-state"})
+ONE_TOOL = SignInUser("mcp-evals-x-oauth-user-one-tool", "mcp-evals-x-oauth-user-one-tool", "pw-1", PARTIAL, "partial")
+UNSET = SignInUser("mcp-evals-x-oauth-user-unset", "mcp-evals-x-oauth-user-unset", "pw-2", None, "blocked")
+ADMIN_ONE = SignInUser(
+    "mcp-evals-x-oauth-admin-one-tool", "mcp-evals-x-oauth-admin-one-tool", "pw-3", PARTIAL, "all", admin=True
+)
+REDIRECT_URIS = (O.HTTPS_REDIRECT, O.PRIVATE_USE_REDIRECT, O.PLAIN_HTTP_REDIRECT)
 
 
 def jwt(aud: list[str], sub: str = "admin") -> str:
@@ -58,26 +61,24 @@ def reply(status: int, body: object = None, **headers: str) -> O.Reply:
 class FakeShop:
     """Just enough of Shopware's OAuth and MCP endpoints for the flow."""
 
-    def __init__(self, *, discovery: bool = True, registered: bool = True, gaps: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        discovery: bool = True,
+        registered: bool = True,
+        gaps: bool = False,
+        redirect_client: bool = True,
+        app_env: str = "prod",
+    ) -> None:
         self.discovery: bool = discovery
         self.registered: bool = registered
         self.gaps: bool = gaps
+        self.redirect_client: bool = redirect_client
+        self.app_env: str = app_env
         self.codes: dict[str, tuple[str, str, str]] = {}
         self.refresh: dict[str, tuple[str, str]] = {}
         self.requests: list[tuple[str, str]] = []
-        # username -> (password, allowlist); None allowlist means unset.
-        self.users: dict[str, tuple[str, tuple[str, ...] | None]] = {
-            u.username: (u.password, u.tools) for u in (ALLOWLISTED, UNSET)
-        }
-        # The allowlist the server applies, by username; a leak widens it.
-        self.leak: bool = False
-
-    def allowlist(self, headers: Mapping[str, str]) -> set[str]:
-        """What the principal behind a bearer token may reach; admin: everything."""
-        user = subject(headers.get("Authorization", "").removeprefix("Bearer "))
-        if user not in self.users or self.leak:
-            return set(EVERYTHING)
-        return set(META_TOOLS) | set(self.users[user][1] or ())
+        self.users: dict[str, str] = {u.username: u.password for u in (ONE_TOOL, UNSET, ADMIN_ONE)}
 
     def bound(self, headers: Mapping[str, str]) -> bool:
         token = headers.get("Authorization", "").removeprefix("Bearer ")
@@ -97,14 +98,15 @@ class FakeShop:
             if headers.get("Content-Type") == "application/x-www-form-urlencoded"
             else {k: str(v) for k, v in as_object(cast(object, json.loads(text) if text else {})).items()}
         )
+        pinned = f"?{parts.query}" if parts.query else ""
         if path == "/api/_mcp":
-            return self.mcp(method, headers, text)
+            return self.mcp(method, headers, text, pinned)
         if path == "/store-api/_mcp":
             return reply(401, "Unauthorized")
         if path == "/.well-known/oauth-protected-resource/api/_mcp":
             if not self.discovery:
                 return reply(404, "Not Found")
-            return reply(200, {"resource": MCP, "authorization_servers": [ISSUER]})
+            return reply(200, {"resource": MCP + pinned, "authorization_servers": [ISSUER]})
         if path == "/.well-known/oauth-authorization-server/api":
             return reply(200, {"issuer": ISSUER, "code_challenge_methods_supported": ["S256"]})
         if path == "/api/oauth/authorize/info":
@@ -126,44 +128,43 @@ class FakeShop:
             return reply(200, ALL_SNIPPETS if full else LOGIN_SNIPPETS)
         return reply(404, "Not Found")
 
-    def mcp(self, method: str, headers: Mapping[str, str], text: str) -> O.Reply:
+    def mcp(self, method: str, headers: Mapping[str, str], text: str, pinned: str = "") -> O.Reply:
         if method == "DELETE":
             return reply(204)
         auth = headers.get("Authorization", "")
         if "sw-access-key" in headers or (auth and not self.bound(headers)):
             return reply(401, "Unauthorized", WWW_Authenticate='Bearer error="invalid_token"')
         if not auth:
-            challenge = f'Bearer resource_metadata="{BASE}/.well-known/oauth-protected-resource/api/_mcp"'
+            challenge = f'Bearer resource_metadata="{BASE}/.well-known/oauth-protected-resource/api/_mcp{pinned}"'
             return reply(401, "Unauthorized", **({"WWW_Authenticate": challenge} if self.discovery else {}))
         rpc = as_object(cast(object, json.loads(text)))
         if rpc.get("method") == "initialize":
             return reply(200, {"jsonrpc": "2.0", "id": 1, "result": {}}, Mcp_Session_Id="s-1")
-        user = subject(auth.removeprefix("Bearer "))
-        if rpc.get("method") == "tools/list" and user not in self.users:
-            return reply(200, 'event: message\ndata: {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "a"}]}}')
         if rpc.get("method") == "tools/list":
-            names = sorted(self.allowlist(headers))
-            cursor = str(as_object(rpc.get("params")).get("cursor", ""))
-            page, rest = (names[:2], names[2:]) if not cursor else (names[2:], [])
-            result: JsonObject = {"tools": [{"name": n} for n in page]}
-            if rest:
-                result["nextCursor"] = "p2"
-            return reply(200, {"jsonrpc": "2.0", "id": 2, "result": result})
+            return reply(200, 'event: message\ndata: {"jsonrpc": "2.0", "id": 2, "result": {"tools": [{"name": "a"}]}}')
         if rpc.get("method") == "tools/call":
-            name = str(as_object(rpc.get("params")).get("name"))
-            if name not in self.allowlist(headers):
-                message = f'Tool "{name}" is not enabled in your MCP allowlist.'
-                return reply(200, {"jsonrpc": "2.0", "id": 3, "error": {"code": -32602, "message": message}})
             return reply(200, {"jsonrpc": "2.0", "id": 3, "result": {"content": []}})
         return reply(202)
 
     def authorize(self, method: str, query: Mapping[str, str], form: Mapping[str, str]) -> O.Reply:
         if method == "GET":
-            if not self.registered:
-                return reply(403, {"errors": [{"code": "FRAMEWORK__API_INVALID_ACCESS_KEY"}]})
-            if urlsplit(query["redirect_uri"]).hostname != "127.0.0.1":
-                return reply(400, {"errors": [{"code": "FRAMEWORK__OAUTH_INVALID_REDIRECT_URI"}]})
-            if query.get("resource", MCP) != MCP:
+            unknown = reply(403, {"errors": [{"code": "FRAMEWORK__API_INVALID_ACCESS_KEY"}]})
+            invalid = reply(400, {"errors": [{"code": "FRAMEWORK__OAUTH_INVALID_REDIRECT_URI"}]})
+            redirect = query["redirect_uri"]
+            known = {O.DEFAULT_CLIENT, "claude-code"}
+            if self.redirect_client:
+                known.add(O.DEFAULT_REDIRECT_CLIENT)
+            if not self.registered or query["client_id"] not in known:
+                return unknown
+            if query["client_id"] == O.DEFAULT_REDIRECT_CLIENT:
+                if redirect not in REDIRECT_URIS:
+                    return invalid
+                if redirect == O.PLAIN_HTTP_REDIRECT and self.app_env != "dev":
+                    return reply(400, {"errors": [{"code": O.INSECURE_REDIRECT}]})
+            elif urlsplit(redirect).hostname != "127.0.0.1":
+                return invalid
+            # The query a pinned URL carries is no part of the resource it names.
+            if query.get("resource", MCP).split("?", 1)[0] != MCP:
                 return reply(302, Location=f"{query['redirect_uri']}?error=invalid_target")
             return reply(302, Location=f"{BASE}/admin#/oauth/authorize?{urlencode(query)}")
         redirect = form["redirect_uri"]
@@ -181,8 +182,7 @@ class FakeShop:
         if grant == "client_credentials":
             return reply(200, {"access_token": "admin-token"})
         if grant == "password":
-            known = self.users.get(form["username"])
-            if known is None or known[0] != form["password"]:
+            if self.users.get(form["username"]) != form["password"]:
                 return reply(400, {"errors": [{"code": "FRAMEWORK__API_INVALID_CREDENTIALS"}]})
             return reply(200, {"access_token": f"user-{form['username']}"})
         if grant == "refresh_token":
@@ -206,6 +206,7 @@ class FakeShop:
 
     def issue(self, client: str, resource: str, user: str = "admin") -> O.Reply:
         refresh = f"rt-{len(self.refresh)}"
+        resource = resource.split("?", 1)[0]
         self.refresh[refresh] = (resource, user)
         aud = [client, resource] if resource else [client]
         return reply(200, {"access_token": jwt(aud, user), "refresh_token": refresh})
@@ -218,8 +219,8 @@ def headers_user(form: Mapping[str, str]) -> str:
 
 
 @contextmanager
-def two_users() -> Generator[Sequence[SignInUser]]:
-    yield (ALLOWLISTED, UNSET)
+def three_users() -> Generator[Sequence[SignInUser]]:
+    yield (ONE_TOOL, UNSET, ADMIN_ONE)
 
 
 def run(
@@ -228,13 +229,17 @@ def run(
     client: str = "",
     *,
     users: O.Users | None = None,
+    verify: O.Verify | None = None,
+    app_env: str | None = "prod",
+    redirect_client: str = "",
 ) -> Reporter:
-    if client:
-        monkeypatch.setenv(O.CLIENT_ENV, client)
-    else:
-        monkeypatch.delenv(O.CLIENT_ENV, raising=False)
+    for name, value in ((O.CLIENT_ENV, client), (O.REDIRECT_CLIENT_ENV, redirect_client), (O.APP_ENV_VAR, app_env)):
+        if value:
+            monkeypatch.setenv(name, value)
+        else:
+            monkeypatch.delenv(name, raising=False)
     rep = Reporter(BASE, color=False)
-    O.verify_oauth_flow(rep, ADMIN, send=shop, provision=users is not None, users=users)
+    O.verify_oauth_flow(rep, ADMIN, send=shop, provision=users is not None, users=users, verify=verify)
     return rep
 
 
@@ -255,7 +260,7 @@ def test_the_whole_flow_passes_on_the_lane(monkeypatch: pytest.MonkeyPatch) -> N
     rep = run(FakeShop(), monkeypatch)
 
     assert failures(rep) == [] and rep.exit_code == 0
-    assert rep.passed == 39 and rep.skipped == 1
+    assert rep.passed == 49 and rep.skipped == 1
     assert rep.records[-1].get("reason") == O.NEEDS_PROVISIONING
 
 
@@ -468,77 +473,179 @@ def test_send_http_does_not_follow_redirects(monkeypatch: pytest.MonkeyPatch) ->
     assert seen["allow_redirects"] is False and seen["timeout"] == O.TIMEOUT_S
 
 
-# --- a non-admin user -------------------------------------------------------------
+# --- ?toolsets= through discovery --------------------------------------------------
+
+
+def labelled(rep: Reporter, *prefixes: str) -> dict[str, str]:
+    return {str(r["label"]): str(r["status"]) for r in rep.records if str(r["label"]).startswith(prefixes)}
+
+
+PINNED_LABELS = (*O.PINNED_QUERIES, "a grant for the pinned URL", "that token")
+
+
+def test_a_pinned_url_survives_discovery_and_sign_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(), monkeypatch)
+
+    assert labelled(rep, *PINNED_LABELS) == {
+        "?toolsets=all: the challenge's resource metadata URL keeps the query": "pass",
+        "?toolsets=all: the metadata resource keeps the query": "pass",
+        "?toolsets=order,media: the challenge's resource metadata URL keeps the query": "pass",
+        "?toolsets=order,media: the metadata resource keeps the query": "pass",
+        "a grant for the pinned URL yields a token for the bare endpoint": "pass",
+        "that token opens a session on the bare URL": "pass",
+        "that token opens a session on the pinned URL": "pass",
+    }
+
+
+def test_a_challenge_that_drops_the_query_fails_both_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    shop = FakeShop()
+    real = shop.__call__
+
+    def bare(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
+        return real(method, url.split("?", 1)[0] if "_mcp?" in url else url, headers, body)
+
+    rep = run(cast(FakeShop, bare), monkeypatch)
+
+    assert [f for f in failures(rep) if f.startswith(O.PINNED_QUERIES)] == [
+        "?toolsets=all: the challenge's resource metadata URL keeps the query",
+        "?toolsets=all: the metadata resource keeps the query",
+        "?toolsets=order,media: the challenge's resource metadata URL keeps the query",
+        "?toolsets=order,media: the metadata resource keeps the query",
+    ]
+
+
+def test_a_token_bound_to_the_pinned_url_fails_and_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client given the pinned URL would then hold a token the bare URL refuses."""
+    shop = FakeShop()
+    real = shop.issue
+
+    def keeps_query(client: str, resource: str, user: str = "admin") -> O.Reply:
+        if "?" not in resource:
+            return real(client, resource, user)
+        return reply(200, {"access_token": jwt([client, resource], user), "refresh_token": "rt-x"})
+
+    monkeypatch.setattr(shop, "issue", keeps_query)
+    rep = run(shop, monkeypatch)
+
+    assert failures(rep) == ["a grant for the pinned URL yields a token for the bare endpoint"]
+    assert not labelled(rep, "that token")
+
+
+# --- redirect URIs ----------------------------------------------------------------
+
+
+REDIRECT_LABELS = ("https redirect", "private-use", "plain-http", O.REDIRECT_CHECK)
+
+
+def test_https_and_private_use_go_through_and_plain_http_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(), monkeypatch)
+
+    assert labelled(rep, *REDIRECT_LABELS) == {
+        "https redirect URI goes through consent and gets a code": "pass",
+        "private-use (cursor://) redirect URI goes through consent and gets a code": "pass",
+        "plain-http redirect URI outside loopback is refused with FRAMEWORK__OAUTH_INSECURE_REDIRECT_URI "
+        + "under APP_ENV=prod, and nothing is sent to it": "pass",
+    }
+
+
+def test_dev_accepts_plain_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(app_env="dev"), monkeypatch, app_env="dev")
+
+    assert labelled(rep, "plain-http") == {
+        "plain-http redirect URI outside loopback is accepted under APP_ENV=dev": "pass"
+    }
+
+
+def test_plain_http_accepted_outside_dev_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(app_env="dev"), monkeypatch, app_env="prod")
+
+    assert [f for f in failures(rep) if f.startswith("plain-http")] == [
+        "plain-http redirect URI outside loopback is refused with FRAMEWORK__OAUTH_INSECURE_REDIRECT_URI "
+        + "under APP_ENV=prod, and nothing is sent to it"
+    ]
+
+
+def test_an_unknown_environment_skips_only_the_plain_http_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(), monkeypatch, app_env=None)
+
+    [skip] = [r for r in rep.records if str(r["label"]).startswith("plain-http")]
+    assert skip["status"] == "skipped" and skip.get("reason") == O.UNKNOWN_APP_ENV
+    assert labelled(rep, "https redirect")["https redirect URI goes through consent and gets a code"] == "pass"
+
+
+def test_an_unregistered_redirect_client_is_one_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(redirect_client=False), monkeypatch)
+
+    assert labelled(rep, *REDIRECT_LABELS) == {O.REDIRECT_CHECK: "skipped"}
+    [skip] = [r for r in rep.records if r["label"] == O.REDIRECT_CHECK]
+    assert f"'{O.DEFAULT_REDIRECT_CLIENT}'" in skip.get("reason", "") and rep.failed == 0
+
+
+def test_the_redirect_client_comes_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(), monkeypatch, redirect_client="someone-else")
+
+    [skip] = [r for r in rep.records if r["label"] == O.REDIRECT_CHECK]
+    assert "'someone-else'" in skip.get("reason", "")
+
+
+# --- other users ------------------------------------------------------------------
 
 
 def restricted(rep: Reporter) -> dict[str, str]:
-    return {
-        str(r["label"]): str(r["status"])
-        for r in rep.records
-        if str(r["label"]).startswith(("allowlisted user", "user without", O.RESTRICTED_CHECK))
-    }
+    return labelled(rep, "oauth-", O.RESTRICTED_CHECK)
 
 
-def test_the_allowlist_holds_for_a_users_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    rep = run(FakeShop(gaps=False), monkeypatch, users=two_users)
+class Matrix:
+    """Stands in for the allowlist matrix: records the principals it is handed."""
+
+    def __init__(self) -> None:
+        self.seen: list[Principal] = []
+
+    def __call__(self, principal: Principal) -> None:
+        self.seen.append(principal)
+
+
+def test_each_users_token_goes_to_the_allowlist_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
+    matrix = Matrix()
+    rep = run(FakeShop(), monkeypatch, users=three_users, verify=matrix)
 
     assert rep.failed == 0, failures(rep)
     assert restricted(rep) == {
-        "allowlisted user: signs in to the Administration": "pass",
-        "allowlisted user: consents and gets an MCP-bound token": "pass",
-        "allowlisted user: opens an MCP session": "pass",
-        "allowlisted user: tools/list with ?toolsets=all shows only its allowlist and the meta-tools": "pass",
-        "allowlisted user: calls shopware-entity-search": "pass",
-        f"allowlisted user: is refused {O.REFUSED_TOOL}, which is not allowlisted": "pass",
-        "user without an allowlist: signs in to the Administration": "pass",
-        "user without an allowlist: consents and gets an MCP-bound token": "pass",
-        "user without an allowlist: opens an MCP session": "pass",
-        "user without an allowlist: tools/list with ?toolsets=all shows only its allowlist and the meta-tools": "pass",
-        "user without an allowlist: is refused shopware-entity-search, which is not allowlisted": "pass",
+        f"{who}: {step}": "pass"
+        for who in ("oauth-user-one-tool", "oauth-user-unset", "oauth-admin-one-tool")
+        for step in ("signs in to the Administration", "consents and gets an MCP-bound token")
     }
-
-
-def test_the_lists_are_read_with_every_toolset_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[str] = []
-    shop = FakeShop(gaps=False)
-    real = shop.__call__
-
-    def recording(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
-        if subject(headers.get("Authorization", "").removeprefix("Bearer ")) == ALLOWLISTED.username:
-            seen.append(url)
-        return real(method, url, headers, body)
-
-    rep = run(cast(FakeShop, recording), monkeypatch, users=two_users)
-
-    assert rep.failed == 0, failures(rep)
-    assert seen and all(url == f"{MCP}?toolsets=all" for url in seen)
-
-
-def test_a_server_ignoring_the_allowlist_fails_both_users(monkeypatch: pytest.MonkeyPatch) -> None:
-    shop = FakeShop(gaps=False)
-    shop.leak = True
-    rep = run(shop, monkeypatch, users=two_users)
-
-    assert failures(rep) == [
-        "allowlisted user: tools/list with ?toolsets=all shows only its allowlist and the meta-tools",
-        f"allowlisted user: is refused {O.REFUSED_TOOL}, which is not allowlisted",
-        "user without an allowlist: tools/list with ?toolsets=all shows only its allowlist and the meta-tools",
-        "user without an allowlist: is refused shopware-entity-search, which is not allowlisted",
+    assert [(p.label, p.expect, p.acl, p.granted) for p in matrix.seen] == [
+        (ONE_TOOL.label, "partial", True, PARTIAL_TOOLS),
+        (UNSET.label, "blocked", True, ()),
+        (ADMIN_ONE.label, "all", False, ()),
     ]
+    # Each token is the user's own, bound to the MCP endpoint, and nothing else.
+    assert [subject(p.bearer) for p in matrix.seen] == [ONE_TOOL.username, UNSET.username, ADMIN_ONE.username]
+    assert all(MCP in O.jwt_audience(p.bearer) and not p.access_key for p in matrix.seen)
+
+
+def test_without_the_matrix_the_users_are_one_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(), monkeypatch, users=three_users)
+
+    assert restricted(rep) == {O.RESTRICTED_CHECK: "skipped"}
+    assert rep.records[-1].get("reason") == O.NEEDS_PROVISIONING
 
 
 def test_a_user_who_cannot_sign_in_stops_there(monkeypatch: pytest.MonkeyPatch) -> None:
     @contextmanager
     def wrong_password() -> Generator[Sequence[SignInUser]]:
-        yield (SignInUser("x", ALLOWLISTED.username, "wrong", OAUTH_TOOLS),)
+        yield (SignInUser(ONE_TOOL.label, ONE_TOOL.username, "wrong", PARTIAL, "partial"),)
 
-    rep = run(FakeShop(gaps=False), monkeypatch, users=wrong_password)
+    matrix = Matrix()
+    rep = run(FakeShop(), monkeypatch, users=wrong_password, verify=matrix)
 
-    assert restricted(rep) == {"allowlisted user: signs in to the Administration": "fail"}
+    assert restricted(rep) == {"oauth-user-one-tool: signs in to the Administration": "fail"}
+    assert matrix.seen == []
 
 
 def test_a_refused_code_exchange_for_the_user_stops_there(monkeypatch: pytest.MonkeyPatch) -> None:
-    shop = FakeShop(gaps=False)
+    shop = FakeShop()
     real = shop.__call__
 
     def refusing(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
@@ -546,26 +653,11 @@ def test_a_refused_code_exchange_for_the_user_stops_there(monkeypatch: pytest.Mo
             return reply(403, {"errors": []})
         return real(method, url, headers, body)
 
-    rep = run(cast(FakeShop, refusing), monkeypatch, users=two_users)
+    matrix = Matrix()
+    rep = run(cast(FakeShop, refusing), monkeypatch, users=three_users, verify=matrix)
 
-    assert restricted(rep)["allowlisted user: consents and gets an MCP-bound token"] == "fail"
-    assert "allowlisted user: opens an MCP session" not in restricted(rep)
-
-
-def test_a_session_the_user_cannot_open_stops_there(monkeypatch: pytest.MonkeyPatch) -> None:
-    shop = FakeShop(gaps=False)
-    real = shop.__call__
-
-    def no_session(method: str, url: str, headers: Mapping[str, str], body: bytes | None) -> O.Reply:
-        token = headers.get("Authorization", "").removeprefix("Bearer ")
-        if url.startswith(MCP + "?") and subject(token) in shop.users:
-            return reply(500, "boom")
-        return real(method, url, headers, body)
-
-    rep = run(cast(FakeShop, no_session), monkeypatch, users=two_users)
-
-    assert restricted(rep)["allowlisted user: opens an MCP session"] == "fail"
-    assert "allowlisted user: calls shopware-entity-search" not in restricted(rep)
+    assert restricted(rep)["oauth-user-one-tool: consents and gets an MCP-bound token"] == "fail"
+    assert matrix.seen == []
 
 
 class Refused(AbstractContextManager[Sequence[SignInUser]]):
@@ -581,7 +673,7 @@ class Refused(AbstractContextManager[Sequence[SignInUser]]):
 
 
 def test_users_that_cannot_be_created_fail_one_check(monkeypatch: pytest.MonkeyPatch) -> None:
-    rep = run(FakeShop(gaps=False), monkeypatch, users=Refused)
+    rep = run(FakeShop(), monkeypatch, users=Refused, verify=Matrix())
 
     assert restricted(rep) == {O.RESTRICTED_CHECK: "fail"}
     assert "HTTP 400" in str(rep.records[-1].get("error"))
@@ -597,10 +689,10 @@ def test_provisioning_builds_the_users_from_the_suites_credential(monkeypatch: p
     monkeypatch.setattr(O, "AdminApi", admin_api)
 
     def sign_in_users(_api: object) -> AbstractContextManager[Sequence[SignInUser]]:
-        return two_users()
+        return three_users()
 
     monkeypatch.setattr(O, "sign_in_users", sign_in_users)
 
     with O.provisioned_users(ADMIN)() as users:
-        assert list(users) == [ALLOWLISTED, UNSET]
+        assert list(users) == [ONE_TOOL, UNSET, ADMIN_ONE]
     assert made == [(BASE, "SWUAadmin", "secret")]

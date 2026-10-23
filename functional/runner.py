@@ -73,7 +73,6 @@ from mcp_client import (
     SW_SC_ACCESS_KEY,
     SW_SECRET_ACCESS_KEY,
     Endpoint,
-    admin_endpoint,
     enable_all_toolsets,
     enable_toolset,
     endpoint_by_name,
@@ -1118,7 +1117,7 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
         else:
             rep.check_fail(f"allowlist: {who}", f"expected it {claim}, but {detail}")
 
-    endpoint = admin_endpoint(principal.access_key, principal.secret_key, base_url=suite.base_url).with_protocol(
+    endpoint = Endpoint("admin", "/api/_mcp", principal.auth_headers(), base_url=suite.base_url).with_protocol(
         suite.protocol_version
     )
     try:
@@ -1171,10 +1170,11 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
                 _diff(cat.tools, reach),
             )
         else:
+            granted = set(principal.granted or (PROBE_TOOL,))
             check(
-                PROBE_TOOL in reach and control not in reach,
-                f"reaches {PROBE_TOOL} and not {control} with ?toolsets=all",
-                f"reached {_names(reach)}",
+                reach - META_TOOLS == granted,
+                f"reaches exactly {' '.join(sorted(granted))} with ?toolsets=all",
+                _diff(granted, reach - META_TOOLS),
             )
 
         for method, everything in (("resources/list", cat.resources), ("prompts/list", cat.prompts)):
@@ -1208,9 +1208,11 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
         if expect == "partial" and control:
             refused = _refused_by_allowlist(mcp_call(session, control, {}, endpoint=endpoint))
             check(refused, f"is refused {control}", "the call was not refused by the allowlist")
-        if expect == "partial" and principal.user:
+        if expect != "blocked" and principal.acl:
             # Past the allowlist, the role decides, and its refusal carries a
-            # stable code (shopware/shopware#20948) a client can act on.
+            # stable code (shopware/shopware#20948) a client can act on. That
+            # holds for an integration not flagged admin as for a user, and for
+            # "All capabilities" as for one tool.
             denied = read_result(mcp_call(session, PROBE_TOOL, UNPRIVILEGED_ARGS, endpoint=endpoint))
             code = denied.error.code if denied.error else None
             check(
@@ -1220,6 +1222,39 @@ def verify_principal(rep: Reporter, principal: Principal, cat: Catalogue, suite:
             )
     except (RuntimeError, requests.exceptions.RequestException) as exc:
         rep.check_fail(f"allowlist: {who}", f"aborted: {exc}")
+
+
+def reference_catalogue(rep: Reporter, endpoint: Endpoint) -> Catalogue | None:
+    """What the suite's own principal reaches, or None after saying why it is unusable."""
+    try:
+        cat = load_catalogue(endpoint)
+    except (RuntimeError, requests.exceptions.RequestException) as exc:
+        rep.check_fail("allowlist matrix", f"could not read the reference catalogue: {exc}")
+        return None
+    # Everything compares against this, and an empty reference makes "reaches
+    # exactly as much as the administrator" pass for a principal that reaches
+    # nothing.
+    if cat.tools <= META_TOOLS or not cat.toolset_of(PROBE_TOOL):
+        rep.check_fail(
+            "allowlist matrix", f"the suite's own principal reaches no {PROBE_TOOL}, so nothing can be compared"
+        )
+        return None
+    return cat
+
+
+def principal_check(rep: Reporter, endpoint: Endpoint) -> Callable[[Principal], None]:
+    """`verify_principal` for principals made elsewhere: the OAuth users, whose
+    token only exists once the flow has run. The reference catalogue is read on
+    the first one, so a shop without OAuth never pays for it."""
+    loaded: list[Catalogue | None] = []
+
+    def verify(principal: Principal) -> None:
+        if not loaded:
+            loaded.append(reference_catalogue(rep, endpoint))
+        if loaded[0] is not None:
+            verify_principal(rep, principal, loaded[0], endpoint)
+
+    return verify
 
 
 def verify_allowlist_matrix(rep: Reporter, endpoint: Endpoint, provision: bool) -> None:
@@ -1233,23 +1268,13 @@ def verify_allowlist_matrix(rep: Reporter, endpoint: Endpoint, provision: bool) 
     "All capabilities" saves is a snapshot of the catalogue, and a list minted
     in setup-lane would drift from the one the Administration writes.
     """
-    rep.section("Allowlist matrix (integrations and non-admin users)")
+    rep.section("Allowlist matrix (integrations and users)")
     if not provision:
         rep.skip("allowlist matrix needs --provision-principals: it creates integrations, users and a role")
         return
 
-    try:
-        cat = load_catalogue(endpoint)
-    except (RuntimeError, requests.exceptions.RequestException) as exc:
-        rep.check_fail("allowlist matrix", f"could not read the reference catalogue: {exc}")
-        return
-    # Everything below compares against this, and an empty reference makes
-    # "reaches exactly as much as the administrator" pass for a principal that
-    # reaches nothing.
-    if cat.tools <= META_TOOLS or not cat.toolset_of(PROBE_TOOL):
-        rep.check_fail(
-            "allowlist matrix", f"the suite's own principal reaches no {PROBE_TOOL}, so nothing can be compared"
-        )
+    cat = reference_catalogue(rep, endpoint)
+    if cat is None:
         return
 
     try:
@@ -1299,7 +1324,10 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
         verify_result_format(rep, endpoint, ADMIN_PROBES)
         verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
         verify_stateless_era(rep, endpoint)
-        verify_oauth_flow(rep, endpoint, provision=cast(bool, args.provision_principals))
+        provision = cast(bool, args.provision_principals)
+        verify_oauth_flow(
+            rep, endpoint, provision=provision, verify=principal_check(rep, endpoint) if provision else None
+        )
     run_admin_tools(rep, session, endpoint, args)
 
 

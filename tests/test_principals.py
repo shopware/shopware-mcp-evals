@@ -129,29 +129,38 @@ def test_the_matrix_is_created_as_described_and_deleted_afterwards(admin: FakeAd
         "integration-unset": "blocked",
         "integration-all": "all",
         "integration-one-tool": "partial",
+        "integration-acl-one-tool": "partial",
         "user-unset": "blocked",
         "user-one-tool": "partial",
+        "user-all": "all",
+        "admin-one-tool": "all",
+        "admin-empty": "all",
     }
-    assert keys == ["SWIA", "SWIA", "SWIA", "SWUA", "SWUA"]
+    assert keys == ["SWIA"] * 4 + ["SWUA"] * 5
+    assert [p.acl for p in principals] == [False, False, False, True, True, True, True, False, False]
+    assert [p.granted for p in principals if p.expect == "partial"] == [P.PARTIAL_TOOLS] * 3
 
     # Unset means NO allowlist write — writing `null` would also be unset, but
     # not writing is what an integration nobody configured actually looks like.
     saves = [p for p in created if p.endswith("/mcp-allowlist")]
-    assert len(saves) == 3
+    assert len(saves) == 7
+    everything = P.full_selection(P.AdminApi(BASE, "k", "s"))
     saved = [b["allowlist"] for m, p, b in admin.calls if m == "POST" and p.endswith("/mcp-allowlist")]
-    assert saved[0] == P.full_selection(P.AdminApi(BASE, "k", "s"))
-    assert saved[1:] == [P.PARTIAL, P.PARTIAL]
+    assert saved == [everything, P.PARTIAL, P.PARTIAL, P.PARTIAL, everything, P.PARTIAL, P.EMPTY]
 
-    # ACL cannot be what hides a tool from an integration; only the allowlist can.
+    # Only the integration given a role is held to it; the rest are flagged
+    # admin, so only the allowlist can hide a tool from them.
     integrations = [b for m, p, b in admin.calls if (m, p) == ("POST", "/api/integration")]
-    assert all(b["admin"] is True for b in integrations)
-    user = admin.body("/api/user")
-    assert user["admin"] is False
-    assert user["localeId"] == "locale-id"
+    assert [b["admin"] for b in integrations] == [True, True, True, False]
+    assert "aclRoles" in integrations[3] and "aclRoles" not in integrations[0]
+    users = [b for m, p, b in admin.calls if (m, p) == ("POST", "/api/user")]
+    assert [u["admin"] for u in users] == [False, False, False, True, True]
+    assert ["aclRoles" in u for u in users] == [True, True, True, False, False]
+    assert users[0]["localeId"] == "locale-id"
     assert admin.body("/api/acl-role")["privileges"] == P.PROBE_PRIVILEGES
 
     deleted = admin.paths("DELETE")
-    assert len(deleted) == 6
+    assert len(deleted) == 10
     assert deleted[-1].startswith("/api/acl-role/"), "the role outlives the users that hold it"
 
 
@@ -163,8 +172,8 @@ def test_a_failure_half_way_deletes_what_was_already_created(monkeypatch: pytest
         pytest.fail("the body must not run when provisioning failed")
 
     deleted = fake.paths("DELETE")
-    # role, three integrations, the user whose key failed
-    assert len(deleted) == 5
+    # role, four integrations, the user whose key failed
+    assert len(deleted) == 6
     assert deleted[0].startswith("/api/user/")
 
 
@@ -175,16 +184,16 @@ def test_a_failed_delete_does_not_hide_the_result(admin: FakeAdmin) -> None:
     admin.fail = "DELETE"
 
     with P.provisioned(api) as principals:
-        assert len(principals) == 5
+        assert len(principals) == 9
 
-    assert len(admin.paths("DELETE")) == 6
+    assert len(admin.paths("DELETE")) == 10
 
 
 def test_the_body_raising_still_deletes(admin: FakeAdmin) -> None:
     with pytest.raises(KeyError), P.provisioned(P.AdminApi(BASE, "k", "s")):
         raise KeyError("a check blew up")
 
-    assert len(admin.paths("DELETE")) == 6
+    assert len(admin.paths("DELETE")) == 10
 
 
 def test_a_missing_en_gb_locale_falls_back_to_any(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,22 +238,39 @@ def test_another_principal_is_deleted_when_the_check_raises(admin: FakeAdmin) ->
 # --- the OAuth sign-in users --------------------------------------------------------
 
 
-def test_the_sign_in_users_get_a_password_a_role_and_one_allowlist(admin: FakeAdmin) -> None:
+def test_the_sign_in_users_get_a_password_a_role_and_an_allowlist_each(admin: FakeAdmin) -> None:
     api = P.AdminApi(BASE, "SWUAKEY", "secret")
+    everything = P.full_selection(api)
 
-    with P.sign_in_users(api) as (allowlisted, unset):
+    with P.sign_in_users(api) as signed:
+        assert [u.label.split("-", 3)[-1] for u in signed] == [
+            "oauth-user-unset",
+            "oauth-user-one-tool",
+            "oauth-user-all",
+            "oauth-admin-one-tool",
+        ]
+        assert [u.expect for u in signed] == ["blocked", "partial", "all", "all"]
         users = [b for m, p, b in admin.calls if (m, p) == ("POST", "/api/user")]
-        assert [u["username"] for u in users] == [allowlisted.username, unset.username]
-        assert [u["password"] for u in users] == [allowlisted.password, unset.password]
-        assert all(u["admin"] is False for u in users)
-        assert admin.body("/api/acl-role")["privileges"] == P.OAUTH_PRIVILEGES
-        allowlists = [b for m, p, b in admin.calls if m == "POST" and p.endswith("/mcp-allowlist")]
-        assert allowlists == [{"allowlist": {"tools": list(P.OAUTH_TOOLS), "resources": [], "prompts": []}}]
-        assert (allowlisted.tools, unset.tools) == (P.OAUTH_TOOLS, None)
+        assert [u["username"] for u in users] == [u.username for u in signed]
+        assert [u["password"] for u in users] == [u.password for u in signed]
+        assert [u["admin"] for u in users] == [False, False, False, True]
+        assert admin.body("/api/acl-role")["privileges"] == P.PROBE_PRIVILEGES
+        allowlists = [b["allowlist"] for m, p, b in admin.calls if m == "POST" and p.endswith("/mcp-allowlist")]
+        assert allowlists == [P.PARTIAL, everything, P.PARTIAL]
         assert "/api/user-access-key" not in admin.paths("POST")
 
     deleted = admin.paths("DELETE")
-    assert len(deleted) == 3 and deleted[-1].startswith("/api/acl-role/")
+    assert len(deleted) == 5 and deleted[-1].startswith("/api/acl-role/")
+
+
+def test_a_sign_in_user_becomes_a_bearer_principal() -> None:
+    one = P.SignInUser("mcp-evals-x-oauth-user-one-tool", "u", "pw", P.PARTIAL, "partial")
+    admin = P.SignInUser("mcp-evals-x-oauth-admin-one-tool", "a", "pw", P.PARTIAL, "all", admin=True)
+
+    assert one.principal("t") == P.Principal(
+        one.label, "", "", "partial", acl=True, granted=P.PARTIAL_TOOLS, bearer="t"
+    )
+    assert admin.principal("t") == P.Principal(admin.label, "", "", "all", acl=False, bearer="t")
 
 
 def test_the_sign_in_users_are_deleted_when_creation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -255,4 +281,4 @@ def test_the_sign_in_users_are_deleted_when_creation_fails(monkeypatch: pytest.M
     with pytest.raises(P.ProvisioningFailed), P.sign_in_users(api):
         pass
 
-    assert [p.split("/")[2] for p in fake.paths("DELETE")] == ["user", "acl-role"]
+    assert [p.split("/")[2] for p in fake.paths("DELETE")] == ["user", "user", "acl-role"]
