@@ -1,7 +1,8 @@
 """Large results: the pointer's shape per revision, and who may read it.
 
-Replies are built the way `McpToolResponse::success()` and the renderer send
-them since shopware/shopware#20951.
+Replies are built the way `McpToolResultRenderer::linkedResult()` sends them
+since shopware/shopware#21844: the legacy text with the pointer below
+2025-06-18, a `resource_link` block and no pointer in the text from it on.
 """
 
 import json
@@ -11,7 +12,7 @@ from typing import cast, override
 
 import pytest
 
-from eval.result_schema import JsonObject, McpResponse
+from eval.result_schema import JsonObject, McpResponse, as_list, as_object
 from functional import large_results as L
 from functional.principals import Principal, ProvisioningFailed
 from functional.reporting import Reporter
@@ -34,25 +35,43 @@ def error(message: str) -> McpResponse:
     return cast(McpResponse, cast(object, {"error": {"code": -32002, "message": message}}))
 
 
-def offloaded(revision: str, uri: str = URI, *, block_uri: str | None = None) -> McpResponse:
-    """An offloaded reply as the server renders it on `revision`."""
-    meta: JsonObject = {"resourceUri": uri, "responseSize": 346116, "note": "Response too large."}
-    if uri != PLAIN_URI:
-        meta["expiresAt"] = EXPIRES
-    content: list[object] = [{"type": "text", "text": json.dumps({"success": True, "data": None, "_meta": meta})}]
+NOTE = "Response too large for inline delivery."
+
+
+def offloaded(revision: str, uri: str = URI, *, text_uri: bool = False, expiry: bool = True) -> McpResponse:
+    """An offloaded reply as the server renders it on `revision`.
+
+    `text_uri` adds the pointer to the text on the MCP format too, as the
+    renderer did before #21844; `expiry` drops the expiry on either format."""
     result_meta: JsonObject = dict(STAMP)
-    if revision >= L.LINK_SINCE:
-        content.append({"type": "resource_link", "uri": block_uri or uri, "name": "tool-result"})
+    if expiry and uri != PLAIN_URI:
         result_meta["shopware/expiresAt"] = EXPIRES
+    if revision < L.LINK_SINCE:
+        meta: JsonObject = {"responseSize": 346116, "resourceUri": uri, "note": NOTE}
+        if expiry and uri != PLAIN_URI:
+            meta["expiresAt"] = EXPIRES
+        text = json.dumps({"success": True, "data": None, "_meta": meta})
+        return response({"content": [{"type": "text", "text": text}], "isError": False, "_meta": result_meta})
+    block: JsonObject = {"responseSize": 346116, "query": {"tool": L.OFFLOAD_TOOL}}
+    if text_uri:
+        block["resourceUri"] = uri
+    content: list[object] = [
+        {"type": "text", "text": NOTE},
+        {"type": "text", "text": json.dumps({"_meta": block})},
+        {"type": "resource_link", "uri": uri, "name": "tool-result", "mimeType": "application/json", "size": 346116},
+    ]
+    result_meta.update({f"shopware/{k}": v for k, v in block.items()})
     return response({"content": content, "isError": False, "_meta": result_meta})
 
 
-def outcome(revision: str, **kwargs: str) -> ToolOutcome:
-    return read_result(offloaded(revision, **kwargs))
+def outcome(revision: str, uri: str = URI, *, text_uri: bool = False, expiry: bool = True) -> ToolOutcome:
+    return read_result(offloaded(revision, uri, text_uri=text_uri, expiry=expiry))
 
 
-def stored(rows: list[object]) -> McpResponse:
-    text = json.dumps({"success": True, "data": rows})
+def stored(rows: list[object], revision: str = "2024-11-05") -> McpResponse:
+    """resources/read of a result stored on `revision`: the legacy envelope
+    below the boundary, the plain data from it on."""
+    text = json.dumps(rows if revision >= L.LINK_SINCE else {"success": True, "data": rows})
     return response({"contents": [{"uri": URI, "mimeType": "application/json", "text": text}]})
 
 
@@ -115,33 +134,91 @@ def test_data_next_to_a_pointer_is_a_problem() -> None:
     assert L.offload_problems(reply, "2024-11-05") == ["data was sent inline next to the pointer"]
 
 
-def test_from_the_boundary_the_block_and_the_prefixed_expiry_are_required() -> None:
-    """The 2024-11-05 rendering, received by a 2025-06-18 client."""
-    assert L.offload_problems(outcome("2024-11-05"), "2025-06-18") == [
-        "no resource_link block on 2025-06-18",
-        "no shopware/expiresAt in the result _meta on 2025-06-18",
+def test_a_reply_from_the_boundary_carries_no_structured_content_and_no_data() -> None:
+    """Pins the builder to the renderer: a linked result has no data, so
+    `structuredContent` is null and the first text is the note."""
+    reply = outcome("2025-06-18")
+
+    assert (reply.shape, reply.data, reply.has_structured, reply.summary) == ("spec", None, False, NOTE)
+    assert [(link.uri, link.source) for link in reply.links] == [(URI, "resource_link")]
+
+
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_the_legacy_rendering_from_the_boundary_is_two_problems(revision: str) -> None:
+    """The 2024-11-05 rendering, received by a client that gets the MCP format."""
+    assert L.offload_problems(outcome("2024-11-05"), revision) == [
+        f"no resource_link block on {revision}",
+        f"resourceUri in the text on {revision}, where the resource_link block is the pointer",
     ]
 
 
-def test_a_block_naming_another_pointer_is_a_problem() -> None:
-    other = L.TOOL_RESULT_URI_PREFIX + "f" * 32 + ".1760000000.b3RoZXI"
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_a_pointer_in_the_text_next_to_the_block_is_a_problem(revision: str) -> None:
+    """What the renderer sent before #21844: both, naming the same pointer."""
+    assert L.offload_problems(outcome(revision, text_uri=True), revision) == [
+        f"resourceUri in the text on {revision}, where the resource_link block is the pointer"
+    ]
 
-    assert L.offload_problems(outcome("2025-06-18", block_uri=other), "2025-06-18") == [
-        "the resource_link block and the text name different pointers"
+
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_from_the_boundary_the_prefixed_expiry_is_required(revision: str) -> None:
+    assert L.offload_problems(outcome(revision, expiry=False), revision) == [
+        f"no shopware/expiresAt in the result _meta on {revision}"
+    ]
+
+
+def test_below_the_boundary_the_text_expiry_is_required() -> None:
+    assert L.offload_problems(outcome("2024-11-05", expiry=False), "2024-11-05") == [
+        "no expiresAt next to the pointer in the text"
+    ]
+
+
+def test_the_mcp_rendering_below_the_boundary_is_named() -> None:
+    """What the `v6.8.0.0` flag sent a 2024-11-05 client before #21844."""
+    assert L.offload_problems(outcome("2025-06-18"), "2024-11-05") == [
+        "no resourceUri next to the pointer in the text",
+        "no expiresAt next to the pointer in the text",
+        "resource_link block sent to a 2024-11-05 client, which predates it",
     ]
 
 
 def test_a_block_below_the_boundary_is_a_problem() -> None:
-    assert L.offload_problems(outcome("2025-06-18"), "2025-03-26") == [
+    raw = as_object(offloaded("2024-11-05").get("result"))
+    content = as_list(raw.get("content"))
+    content.append({"type": "resource_link", "uri": URI, "name": "tool-result"})
+
+    assert L.offload_problems(read_result(response(raw)), "2025-03-26") == [
         "resource_link block sent to a 2025-03-26 client, which predates it"
     ]
+
+
+def test_a_link_of_the_tools_own_is_not_the_pointer() -> None:
+    """The renderer keeps a tool's own links in front of the pointer's."""
+    raw = as_object(offloaded("2025-06-18").get("result"))
+    content = as_list(raw.get("content"))
+    content.insert(2, {"type": "resource_link", "uri": "https://shop.example/media/1.png", "name": "image"})
+    reply = read_result(response(raw))
+
+    assert L.pointer(reply) == next(link for link in reply.links if link.uri == URI)
+    assert L.offload_problems(reply, "2025-06-18") == []
 
 
 # --- resources/read ---------------------------------------------------------------
 
 
-def test_a_stored_result_with_rows_is_readable() -> None:
-    assert L.readable_problem(stored([{"id": "c1"}])) is None
+@pytest.mark.parametrize("revision", ["2024-11-05", "2025-06-18", "2025-11-25"])
+def test_a_stored_result_with_rows_is_readable_in_the_form_of_its_revision(revision: str) -> None:
+    assert L.readable_problem(stored([{"id": "c1"}], revision), revision) is None
+
+
+def test_an_envelope_stored_from_the_boundary_is_a_problem() -> None:
+    assert L.readable_problem(stored([{"id": "c1"}], "2024-11-05"), "2025-06-18") == (
+        "the stored result is the legacy envelope, stored on 2025-06-18, which stores the plain data"
+    )
+
+
+def test_plain_data_stored_below_the_boundary_carries_no_rows_where_the_envelope_has_them() -> None:
+    assert L.readable_problem(stored([{"id": "c1"}], "2025-06-18"), "2024-11-05") == "the stored result carries no rows"
 
 
 @pytest.mark.parametrize(
@@ -150,11 +227,16 @@ def test_a_stored_result_with_rows_is_readable() -> None:
         (NOT_FOUND, "refused: Tool result"),
         (response({"contents": []}), "no text in the resource contents"),
         (response({"contents": [{"text": "<html>"}]}), "the stored result is not JSON: <html>"),
-        (stored([]), "the stored result carries no rows"),
     ],
 )
-def test_anything_else_is_not_readable(reply: McpResponse, problem: str) -> None:
-    assert str(L.readable_problem(reply)).startswith(problem)
+@pytest.mark.parametrize("revision", ["2024-11-05", "2025-06-18"])
+def test_anything_else_is_not_readable(reply: McpResponse, problem: str, revision: str) -> None:
+    assert str(L.readable_problem(reply, revision)).startswith(problem)
+
+
+@pytest.mark.parametrize("revision", ["2024-11-05", "2025-06-18"])
+def test_a_stored_result_without_rows_is_not_readable(revision: str) -> None:
+    assert L.readable_problem(stored([], revision), revision) == "the stored result carries no rows"
 
 
 def test_the_not_found_error_is_a_refusal() -> None:
@@ -181,6 +263,7 @@ class FakeServer:
         self.leaks: bool = leaks
         self.refuse: str | None = refuse
         self.sessions: dict[str, str] = {}
+        self.stored_on: str = "2024-11-05"
 
     def init(self, endpoint: Endpoint = ADMIN) -> tuple[str, str]:
         if endpoint.protocol_version == self.refuse:
@@ -192,12 +275,13 @@ class FakeServer:
     def call(self, session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:
         assert (tool, arguments) == (L.OFFLOAD_TOOL, L.OFFLOAD_ARGS)
         assert session_id in self.sessions
+        self.stored_on = endpoint.protocol_version
         return offloaded(endpoint.protocol_version, self.uri)
 
     def read(self, session_id: str, uri: str, endpoint: Endpoint = ADMIN) -> McpResponse:
         del endpoint
         owner = self.sessions[session_id] == ADMIN.auth_headers["sw-access-key"]
-        return stored([{"id": "c1"}]) if uri == self.uri and (owner or self.leaks) else NOT_FOUND
+        return stored([{"id": "c1"}], self.stored_on) if uri == self.uri and (owner or self.leaks) else NOT_FOUND
 
 
 @contextmanager
@@ -314,38 +398,6 @@ def test_a_session_that_will_not_open_for_the_read_back_fails_once(monkeypatch: 
     assert statuses(rep) == {"large result pointer: opens a session to read it back": "fail"}
 
 
-def offloaded_spec(revision: str, *, expiry: bool = True) -> McpResponse:
-    """The same reply under the `v6.8.0.0` flag (`McpToolResultRenderer::specTexts`):
-    no data, the note as the summary, then the metadata as its own block. The
-    parser promoted `expiresAt` to the result's expiry, so it is gone from the
-    block and sent as `shopware/expiresAt` on every revision."""
-    block: JsonObject = {"resourceUri": URI, "responseSize": 346116}
-    content: list[object] = [
-        {"type": "text", "text": "Response too large."},
-        {"type": "text", "text": json.dumps({"_meta": block})},
-    ]
-    result_meta: JsonObject = {**STAMP, "shopware/resourceUri": URI, "shopware/responseSize": 346116}
-    if expiry:
-        result_meta["shopware/expiresAt"] = EXPIRES
-    if revision >= L.LINK_SINCE:
-        content.append({"type": "resource_link", "uri": URI, "name": "tool-result"})
-    return response({"content": content, "isError": False, "_meta": result_meta})
-
-
-@pytest.mark.parametrize("revision", L.OFFLOAD_REVISIONS)
-def test_the_spec_format_carries_the_expiry_in_the_result_meta_only(revision: str) -> None:
-    """Measured on the next-major lane: the text block has no expiresAt there,
-    and asking for one failed both revisions."""
-    assert L.offload_problems(read_result(offloaded_spec(revision)), revision) == []
-
-
-@pytest.mark.parametrize("revision", L.OFFLOAD_REVISIONS)
-def test_the_spec_format_without_an_expiry_is_named(revision: str) -> None:
-    problems = L.offload_problems(read_result(offloaded_spec(revision, expiry=False)), revision)
-
-    assert problems == [f"no shopware/expiresAt in the result _meta on {revision}"]
-
-
 def test_the_second_principal_reads_on_the_suites_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     """The offload pins each revision itself; everything after it, including the
     rebuilt endpoint of the second principal, stays on the caller's revision."""
@@ -368,19 +420,3 @@ def test_the_second_principal_reads_on_the_suites_revision(monkeypatch: pytest.M
 
     assert rep.failed == 0
     assert seen == ["2024-11-05", "2025-06-18", "2025-06-18", "2025-06-18"]
-
-
-@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
-def test_a_link_block_without_the_text_pointer_is_a_problem(revision: str) -> None:
-    """Core's parser removes only `note` and `expiresAt` from the metadata, so
-    the text keeps the pointer on every revision. A renderer that drops it must
-    not pass on the link block alone."""
-    meta: JsonObject = {"expiresAt": EXPIRES}
-    content: list[object] = [
-        {"type": "text", "text": json.dumps({"success": True, "data": None, "_meta": meta})},
-        {"type": "resource_link", "uri": URI, "name": "tool-result"},
-    ]
-    result_meta: JsonObject = {**STAMP, "shopware/expiresAt": EXPIRES}
-    reply = read_result(response({"content": content, "isError": False, "_meta": result_meta}))
-
-    assert L.offload_problems(reply, revision) == ["no resourceUri next to the pointer in the text"]
