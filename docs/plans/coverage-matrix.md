@@ -43,40 +43,35 @@ and the MCP allowlist it holds. The allowlist is the gate for everyone except an
 administrator user (https://github.com/shopware/shopware/pull/20600), and ACL applies on top of it for
 anyone not flagged admin.
 
-Today, with https://github.com/shopware/shopware-mcp-evals/pull/103 merged:
+With https://github.com/shopware/shopware-mcp-evals/pull/103 and
+https://github.com/shopware/shopware-mcp-evals/pull/108 merged:
 
 | principal | credential | allowlist unset | "All capabilities" (full selection) | a subset |
 |---|---|---|---|---|
-| integration, flagged admin | access key `SWIA…` | auto: blocked, meta-tools only | auto: reaches what the admin user reaches | auto: one tool, another toolset refused |
-| integration, not flagged admin | access key `SWIA…` | none | none | none |
-| non-admin user | access key `SWUA…` | auto: blocked | **none** | auto: one tool, plus `missing_privilege` from its ACL role |
-| non-admin user | OAuth token | auto: meta-tools only | **none** | auto: three tools, another refused |
-| admin user | access key `SWUA…` | auto: the whole suite, unrestricted | **none**: must still be unrestricted | **none**: must still be unrestricted |
-| admin user | OAuth token | auto: the OAuth flow, unrestricted | **none** | **none** |
+| integration, flagged admin | access key `SWIA…` | auto: blocked, meta-tools only | auto: reaches what the admin user reaches | auto: exactly two tools of one toolset |
+| integration, not flagged admin | access key `SWIA…` | n/a: an integration without an allowlist is the row above | n/a: as above | auto: exactly two tools, plus `missing_privilege` from its role |
+| non-admin user | access key `SWUA…` | auto: blocked | auto: reaches what the admin user reaches, plus `missing_privilege` | auto: exactly two tools, plus `missing_privilege` |
+| non-admin user | OAuth token | auto: blocked | auto: as on a key | auto: as on a key |
+| admin user | access key `SWUA…` | auto: the whole suite, unrestricted | none: a full selection cannot show a bypass | auto: two tools saved, or an empty list, still unrestricted |
+| admin user | OAuth token | auto: the OAuth flow, unrestricted | none: as above | auto: two tools saved, still unrestricted |
 
-The access-key principals are checked on every surface: `tools/list`,
-`?toolsets=all`, toolsets-list, toolset-enable, tool-search, `resources/list`,
-`prompts/list` and a direct call. The OAuth users are checked on `tools/list`
-and calls only.
+Every principal, on a key or on an OAuth token, is checked on the same eight
+surfaces: `tools/list`, `?toolsets=all`, toolsets-list, toolset-enable,
+tool-search, `resources/list`, `prompts/list` and a direct call. The OAuth
+users differ only in how their credential is made. They sign in with a
+password, consent, and hand the MCP-bound token to the same checks.
 
-Gaps to close, in the order they would surprise someone:
+The five gaps this section used to list are closed by #108:
 
-1. **A non-admin user with "All capabilities"**, on a key and on an OAuth
-   token. It is the setting a shop gives a real person, and the one state no
-   check holds a user to. It also needs the snapshot rule stated: a tool added
-   after the save is not granted.
-2. **An admin user with an allowlist saved.** The bypass is the documented
-   rule, and nothing checks that a saved allowlist is ignored for an admin,
-   neither for a subset nor for an empty list.
-3. **An integration not flagged admin.** Every integration in the matrix is
-   flagged admin, so ACL never interferes. One without the flag, allowlisted a
-   tool its role does not grant, must answer `missing_privilege`, as the
-   non-admin user does.
-4. **OAuth users on the other surfaces.** The same eight surfaces the
-   access-key principals run, so a token cannot reach through tool-search or
-   `?toolsets=all` what its allowlist withholds.
-5. **ACL under OAuth.** A non-admin OAuth user allowlisted a tool its role does
-   not grant must get `missing_privilege`, as on a key.
+1. A non-admin user with "All capabilities", on a key and on a token. The
+   snapshot rule, that a tool added after the save is not granted, is stated in
+   `functional/principals.py`. It is not checked, because the lane's catalogue
+   does not change during a run.
+2. An admin user with an allowlist saved, a subset and an empty list.
+3. An integration not flagged admin, held to its role.
+4. OAuth users on all eight surfaces.
+5. ACL under OAuth: the non-admin OAuth users get `missing_privilege` on
+   `product`.
 
 Not applicable, with the reason, so the matrix does not read as gaps:
 
@@ -86,9 +81,9 @@ Not applicable, with the reason, so the matrix does not read as gaps:
 - **The Store endpoint.** It authenticates with a sales-channel key and has no
   principals or allowlist.
 
-Each principal row runs at the default revision only. The allowlist is decided
-before the result is rendered, so a revision cannot change who reaches a tool,
-and the matrix jobs record a skip saying so.
+The access-key principals run on every revision, in `static`, `revisions` and
+`next-major`. The OAuth users run once per job at the default revision, with
+the rest of the OAuth module, and `revisions` records a skip for it.
 
 ## Principal and client are two matrices
 
@@ -114,8 +109,8 @@ missing axis value:
 |---|---|---|---|---|---|
 | a script with access keys (this suite) | key | none | all three handshake revisions | enables toolsets | auto: every functional job |
 | Claude Code | OAuth, or headers | loopback, any port on `127.0.0.1` | tries stateless 2026-07-28 first, falls back to 2025-11-25 | enables toolsets; follows `list_changed` | auto: the flow with the probe client; manual: the real client against `localhost:8100` |
-| claude.ai | OAuth | https | unknown | reads once, needs `?toolsets=` | manual. `?toolsets=` with OAuth was probed by hand (round 3) and becomes a check |
-| Cursor | OAuth | `cursor://` | unknown | unknown | manual: the redirect was probed by hand; becomes a check with the third client |
+| claude.ai | OAuth | https | unknown | reads once, needs `?toolsets=` | auto: `?toolsets=` through discovery and an https redirect, with a probe client; manual: the real client |
+| Cursor | OAuth | `cursor://` | unknown | unknown | auto: a `cursor://` redirect, with a probe client; manual: the real client |
 | ChatGPT connector | OAuth | https | unknown | unknown | none |
 | MCP Inspector | either | loopback | 2025-11-25 | enables toolsets | none |
 
@@ -236,21 +231,21 @@ runs. No test users, roles or integrations were left on the lane. The new
 commits needed no rebuild: the only Administration change was two consent-page
 snippets, with no composer or migration changes.
 
-Probed by hand, not yet in the suite:
+Probed by hand, and checks since https://github.com/shopware/shopware-mcp-evals/pull/108:
 
 - **The `?toolsets=` query is kept in the resource metadata.** For
   `/api/_mcp?toolsets=all` and `?toolsets=order,media`, the challenge's
   `resource_metadata` URL and the metadata `resource` both keep the query. A
   grant with that query in the resource still gets a token whose audience is
-  the bare endpoint, and the token works on both URLs. *Becomes a check in
-  `functional/oauth.py`.*
+  the bare endpoint, and the token works on both URLs.
 - **Plain-http redirect URIs outside loopback are refused.** On the prod-mode
   lane, with a temporary client and one authorize per URI: an http
   non-loopback URI is answered 400 naming `FRAMEWORK__OAUTH_INSECURE_REDIRECT_URI`,
   and nothing is sent to it. An https URI and a `cursor://` private-use URI both
-  go through consent and get a code. *Becomes a check once setup-lane registers
-  a third client with those redirect URIs.* The probe scripts are in
-  `/tmp/oauth-e2e`, which does not survive a reboot.
+  go through consent and get a code. setup-lane registers `mcp-evals-redirects`
+  with those three URIs. CI runs `APP_ENV=dev`, which accepts plain http for
+  every host, so CI checks the acceptance and the refusal runs on a `prod` lane
+  only. It passed on the trunk lane at `0039426566a` on 2026-10-23.
 
 Not tested at all:
 
@@ -264,11 +259,13 @@ are the same at `71b350a48e6`.
 ## Order
 
 1. https://github.com/shopware/shopware-mcp-evals/pull/103 merges.
-2. `docs/coverage.md` with its drift test, one PR. Cheap, and it settles the
-   matrix the summary renders.
-3. The principal gaps above, in `functional/principals.py` and
-   `functional/oauth.py`, one PR. Each adds a principal to the throwaway set,
-   so the cleanup in `provisioned()` covers it.
-4. The two OAuth probes as checks, the third client in setup-lane.
+2. `docs/coverage.md` with its drift test:
+   https://github.com/shopware/shopware-mcp-evals/pull/106.
+3. The principal gaps and the two OAuth probes as checks, with the redirect
+   client in setup-lane: https://github.com/shopware/shopware-mcp-evals/pull/108,
+   stacked on #103 and run against `integration/mcp-iteration-4`.
+4. The OAuth and principal rows in `docs/coverage.md`:
+   https://github.com/shopware/shopware-mcp-evals/pull/109, which needs both
+   #106 and #108.
 5. The summary rework, one PR. Its "who calls" split follows the principal
    table above.
