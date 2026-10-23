@@ -413,6 +413,7 @@ jobs:
           # seeded one. Empty if the seeding could not verify its write, and the
           # discovery still runs then.
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         # --provision-principals creates integrations and non-admin users with
         # each allowlist state and checks what they reach. The suite itself runs
         # as an administrator user, which the allowlist does not apply to, so
@@ -763,6 +764,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         run: python -m functional.runner --endpoint admin
 
       - name: Upload results
@@ -838,6 +840,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         # With the principals, as static: what each allowlist state reaches is
         # read through tools/list, toolsets and calls, all at this revision.
         run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals
@@ -855,6 +858,7 @@ jobs:
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version "${REVISION}"
 
       - name: Upload results
@@ -933,6 +937,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
           INCOMPATIBLE: ${{ steps.lane.outputs.incompatible_plugins }}
         # The plugins setup-lane deactivated are skips naming that, not failures.
         # The principals cover missing_privilege and pointer isolation under
@@ -958,6 +963,7 @@ jobs:
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version 2025-11-25
 
       - name: Upload results

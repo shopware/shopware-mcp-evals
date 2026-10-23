@@ -1032,10 +1032,18 @@ resource metadata, the client signs in with the authorization code grant and
 PKCE, and the token is bound to `/api/_mcp` by its audience. The suite keeps
 using access keys; `functional/oauth.py` walks the OAuth flow on its own, as
 part of the admin suite at the default revision. A shop without discovery is
-one skip naming the PR. With `--provision-principals` it also signs in as two
-throwaway non-admin users, one allowlisted three tools and one without an
-allowlist, and checks that `tools/list` with `?toolsets=all` shows exactly the
-allowlist plus the meta-tools and that a tool outside it is refused.
+one skip naming the PR. With `--provision-principals` it also signs in as four
+throwaway users: no allowlist, two tools, "All capabilities", and an
+administrator with two tools saved. Each token goes through the same allowlist
+checks as an access key, on every surface.
+
+Two more things a client depends on are checked. A URL pinned with `?toolsets=`
+keeps its query through the challenge and the metadata, and a grant for it
+yields a token for the bare endpoint that opens a session on both. An https
+and a `cursor://` redirect URI go through consent. A plain-http one outside
+loopback is refused with `FRAMEWORK__OAUTH_INSECURE_REDIRECT_URI`, except under
+`APP_ENV=dev`. Set `MCP_EVALS_APP_ENV` to the server's environment, or that
+check is a skip.
 
 It needs a public OAuth client. setup-lane registers one; on a local lane put
 the same in a gitignored `config/packages/zzz-mcp-evals-oauth.yaml` and clear
@@ -1049,6 +1057,12 @@ shopware:
                 name: 'mcp-evals probe'
                 redirect_uris:
                     - 'http://127.0.0.1/callback'
+            mcp-evals-redirects:
+                name: 'mcp-evals redirect URIs'
+                redirect_uris:
+                    - 'https://mcp-evals.example/callback'
+                    - 'cursor://mcp-evals/callback'
+                    - 'http://mcp-evals.example/callback'
             claude-code:
                 name: 'Claude Code'
                 redirect_uris:

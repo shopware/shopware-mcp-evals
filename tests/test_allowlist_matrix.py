@@ -4,7 +4,8 @@ Driven through a fake server that enforces an allowlist per access key, so the
 tests can break it the ways a real one has broken or could: fail-open for an
 unset allowlist (#20600 reverted), an "All capabilities" integration that is
 listed no toolsets (the report that started this), a snapshot that misses a
-tool, a one-tool grant that leaks a sibling.
+tool, a one-tool grant that leaks a sibling. A principal may hold a bearer token
+from the OAuth flow instead of a key; the fake reads either.
 """
 
 import json
@@ -54,8 +55,12 @@ class FakeServer:
             "ALL": EVERY_TOOL,
             "ONE": {PROBE_TOOL},
             "USER": {PROBE_TOOL},
+            "ACL-INTEGRATION": {PROBE_TOOL},
+            "USER-ALL": EVERY_TOOL,
+            "TOKEN": {PROBE_TOOL},
         }
-        # Users are held to a role granting currency:read only; None lets them through.
+        # Principals held to a role granting currency:read only; None lets them through.
+        self.role_bound: set[str] = {"USER", "ACL-INTEGRATION", "USER-ALL", "TOKEN"}
         self.acl_code: str | None = "missing_privilege"
         self.refuse_init: set[str] = set()
         # The reported bug: a principal whose toolsets-list is empty whatever it holds.
@@ -66,7 +71,8 @@ class FakeServer:
     @staticmethod
     def key(endpoint: Endpoint | None) -> str:
         assert endpoint is not None
-        return endpoint.auth_headers["sw-access-key"]
+        headers = endpoint.auth_headers
+        return headers.get("sw-access-key") or headers.get("Authorization", "").removeprefix("Bearer ")
 
     def allowed(self, endpoint: Endpoint | None) -> set[str]:
         return self.grants[self.key(endpoint)]
@@ -98,7 +104,7 @@ class FakeServer:
         return []
 
     def call(self, _session: str, tool: str, _args: JsonObject, endpoint: Endpoint | None = None) -> McpResponse:
-        if self.key(endpoint) == "USER" and _args.get("entity") == "product" and self.acl_code:
+        if self.key(endpoint) in self.role_bound and _args.get("entity") == "product" and self.acl_code:
             refusal: JsonObject = {"success": False, "error": "Missing privilege: product:read", "code": self.acl_code}
             return {"result": {"content": [{"type": "text", "text": json.dumps(refusal)}], "isError": True}}
         if tool == "shopware-tool-search":
@@ -359,7 +365,7 @@ def test_the_principal_endpoint_targets_the_suites_server(monkeypatch: pytest.Mo
     assert set(seen) == {"http://shop.example"}
 
 
-ONE_TOOL_USER = Principal("mcp-evals-abc123-user-one-tool", "USER", "s", "partial", user=True)
+ONE_TOOL_USER = Principal("mcp-evals-abc123-user-one-tool", "USER", "s", "partial", acl=True)
 
 
 def test_a_user_past_the_allowlist_is_refused_by_its_role_with_a_code(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -407,3 +413,119 @@ def test_the_principal_endpoint_negotiates_the_suites_revision(monkeypatch: pyte
 
     assert seen
     assert set(seen) == {"2024-11-05"}
+
+
+def test_a_one_tool_grant_that_leaks_a_tool_of_its_own_toolset_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control tool sits in another toolset, so only the exact reach can see this."""
+    fake = FakeServer()
+    fake.grants["ONE"] = {PROBE_TOOL, "shopware-entity-read"}
+
+    fails = failures(run(fake, monkeypatch))
+
+    assert fails == [
+        f"allowlist: integration-one-tool: expected it reaches exactly {PROBE_TOOL} with ?toolsets=all, "
+        "but missing -, extra shopware-entity-read"
+    ]
+
+
+def test_a_partial_principal_is_held_to_exactly_what_it_was_granted(monkeypatch: pytest.MonkeyPatch) -> None:
+    granted = Principal("mcp-evals-abc123-integration-one-tool", "ONE", "s", "partial", granted=(PROBE_TOOL, CONTROL))
+
+    fails = failures(run(FakeServer(), monkeypatch, [granted]))
+
+    assert any(f"missing {CONTROL}, extra -" in f for f in fails)
+
+
+def test_an_integration_without_the_admin_flag_is_refused_by_its_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    acl = Principal("mcp-evals-abc123-integration-acl-one-tool", "ACL-INTEGRATION", "s", "partial", acl=True)
+
+    rep = run(FakeServer(), monkeypatch, [acl])
+
+    assert failures(rep) == []
+    assert "integration-acl-one-tool: is refused shopware-entity-search on product with missing_privilege" in [
+        r["label"] for r in rep.records
+    ]
+
+
+def test_all_capabilities_for_a_role_bound_principal_still_meets_its_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The allowlist lets everything through; the role still decides what a call may touch."""
+    user_all = Principal("mcp-evals-abc123-user-all", "USER-ALL", "s", "all", acl=True)
+    fake = FakeServer()
+
+    rep = run(fake, monkeypatch, [user_all])
+    assert failures(rep) == []
+    assert any(
+        "user-all: is refused" in str(r["label"]) and "missing_privilege" in str(r["label"]) for r in rep.records
+    )
+
+    fake.acl_code = None
+    assert [f for f in failures(run(fake, monkeypatch, [user_all])) if "missing_privilege" in f]
+
+
+def test_an_administrator_with_an_allowlist_saved_is_not_asked_about_a_role(monkeypatch: pytest.MonkeyPatch) -> None:
+    admin = Principal("mcp-evals-abc123-admin-one-tool", "ALL", "s", "all")
+
+    rep = run(FakeServer(), monkeypatch, [admin])
+
+    assert failures(rep) == []
+    assert not any("missing_privilege" in str(r["label"]) for r in rep.records)
+    assert any(str(r["label"]).startswith("admin-one-tool: reaches the whole catalogue") for r in rep.records)
+
+
+def test_a_bearer_principal_is_checked_with_its_token_and_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    token = Principal("mcp-evals-abc123-oauth-user-one-tool", "", "", "partial", acl=True, bearer="TOKEN")
+    fake = FakeServer()
+    headers: list[dict[str, str]] = []
+    inner = fake.init
+
+    def init(endpoint: Endpoint | None = None) -> tuple[str, str]:
+        assert endpoint is not None
+        headers.append(dict(endpoint.auth_headers))
+        return inner(endpoint)
+
+    fake.init = init
+    rep = run(fake, monkeypatch, [token])
+
+    assert failures(rep) == []
+    mine = [h for h in headers if h.get("sw-access-key") != "SUITE"]
+    assert mine and all(h.get("Authorization") == "Bearer TOKEN" and "sw-access-key" not in h for h in mine)
+    assert any(str(r["label"]).startswith("oauth-user-one-tool: ") for r in rep.records)
+
+
+def test_principal_auth_headers() -> None:
+    assert Principal("p", "KEY", "SECRET", "all").auth_headers() == {
+        "sw-access-key": "KEY",
+        "sw-secret-access-key": "SECRET",
+    }
+    assert Principal("p", "", "", "all", bearer="t").auth_headers() == {"Authorization": "Bearer t"}
+
+
+def test_principal_check_reads_the_catalogue_once_for_every_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeServer()
+    _ = wire(monkeypatch, fake)
+    loads: list[str] = []
+    inner = R.load_catalogue
+
+    def load(endpoint: Endpoint) -> R.Catalogue:
+        loads.append(endpoint.base_url)
+        return inner(endpoint)
+
+    monkeypatch.setattr(R, "load_catalogue", load)
+    rep = Reporter("admin", color=False)
+    verify = R.principal_check(rep, SUITE)
+    verify(PRINCIPALS[0])
+    verify(PRINCIPALS[2])
+
+    assert loads == ["http://shop.example"]
+    assert failures(rep) == [] and rep.passed == 8 + 10
+
+
+def test_principal_check_with_an_unusable_catalogue_verifies_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(R, "load_catalogue", raiser(RuntimeError("boom")))
+    monkeypatch.setattr(R, "verify_principal", never("verified against no catalogue"))
+    rep = Reporter("admin", color=False)
+    verify = R.principal_check(rep, SUITE)
+    verify(PRINCIPALS[0])
+    verify(PRINCIPALS[1])
+
+    assert rep.failed == 1 and "could not read the reference catalogue" in failures(rep)[0]
