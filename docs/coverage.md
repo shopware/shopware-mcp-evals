@@ -37,10 +37,10 @@ The jobs that run the functional suite, and where they sit on those axes:
 
 | job | revision | result format | session store | principals | Store suite |
 |---|---|---|---|---|---|
-| `static` | 2025-11-25 | 6.7 | file | admin key, plus the allowlist matrix | yes, advisory |
-| `revisions` | 2024-11-05 and 2025-06-18, one job each | 6.7 | file | admin key, plus the allowlist matrix | yes, advisory |
-| `next-major` | 2025-11-25 | 6.8 (`V6_8_0_0`) | file | admin key, plus the allowlist matrix | yes, advisory |
-| `session-store` | 2025-11-25 | 6.7 | Redis | admin key only | no |
+| `static` | 2025-11-25 | 6.7 | file | admin key, plus the allowlist matrix on keys and OAuth tokens | yes, advisory |
+| `revisions` | 2024-11-05 and 2025-06-18, one job each | 6.7 | file | admin key, plus the allowlist matrix on keys | yes, advisory |
+| `next-major` | 2025-11-25 | 6.8 (`V6_8_0_0`) | file | admin key, plus the allowlist matrix on keys and OAuth tokens | yes, advisory |
+| `session-store` | 2025-11-25 | 6.7 | Redis | admin key, and the OAuth flow as the administrator | no |
 
 Unless a row says otherwise, the principal is the administrator user key.
 
@@ -79,15 +79,30 @@ a direct call.
 | The administrator user key is unrestricted and reaches the whole catalogue. | principal: admin user key. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "all tools reachable" | |
 | An integration with no allowlist sees the meta-tools only, and every call is refused. | principal: integration, flagged admin. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "integration-unset", "is listed no toolsets", "reaches only the meta-tools with ?toolsets=all" | Redis: the allowlist does not depend on where sessions live. |
 | An integration with "All capabilities" reaches exactly what the administrator reaches. | principal: integration, flagged admin. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "integration-all", "is listed every toolset", "is shown every tool-search hit" | Redis: as above. |
-| An integration allowlisted one tool reaches that tool, and a tool from another toolset is refused. | principal: integration, flagged admin. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "integration-one-tool", "is shown only reachable tools by tool-search" | Redis: as above. |
+| An integration allowlisted two tools from one toolset reaches exactly those two, not their siblings, and a tool from another toolset is refused. | principal: integration, flagged admin. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "integration-one-tool", "reaches exactly ", "is shown only reachable tools by tool-search" | Redis: as above. |
 | A non-admin user with no allowlist sees the meta-tools only, and every call is refused. | principal: non-admin user key. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "user-unset" | Redis: as above. |
-| A non-admin user allowlisted one tool reaches it, and its ACL role still refuses it on `product` with `missing_privilege`. | principal: non-admin user key. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "user-one-tool", "on product with missing_privilege" | Redis: as above. |
-| A non-admin user with "All capabilities" reaches the saved selection and nothing added after it. | principal: non-admin user key. | none | Gap 1 in the plan. It is the setting a shop gives a real person. |
-| An administrator user with a saved allowlist, a subset or empty, is still unrestricted. | principal: admin user key. | none | Gap 2 in the plan. The bypass is the documented rule and nothing holds the server to it. |
-| An integration not flagged admin, allowlisted a tool its role does not grant, gets `missing_privilege`. | principal: integration, not flagged admin. | none | Gap 3 in the plan. Every integration in the matrix is flagged admin, so ACL never applies to one. |
+| A non-admin user allowlisted two tools reaches exactly those, and its ACL role still refuses one on `product` with `missing_privilege`. | principal: non-admin user key. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "user-one-tool", "on product with missing_privilege" | Redis: as above. |
+| A non-admin user with "All capabilities" reaches what the administrator reaches, and its role still applies. | principal: non-admin user key. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "user-all", "on product with missing_privilege" | Redis: as above. A tool added after the selection was saved is not checked: the lane's catalogue does not change during a run. |
+| An administrator user with a saved allowlist, two tools or an empty list, is still unrestricted. | principal: admin user key. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "admin-one-tool", "admin-empty", "is listed every toolset" | Redis: as above. |
+| An integration not flagged admin is held to its role: allowlisted tools only, and `missing_privilege` on `product`. | principal: integration, not flagged admin. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "integration-acl-one-tool", "on product with missing_privilege" | Redis: as above. |
 
-The OAuth principals join this table with
-https://github.com/shopware/shopware-mcp-evals/pull/103.
+## Who calls: OAuth
+
+`functional/oauth.py` walks the flow with no browser and posts the consent
+decision itself. It runs once per job, at 2025-11-25, so `revisions` records a
+skip for it.
+
+| test case | axes | how | why not |
+|---|---|---|---|
+| A 401 names the protected resource metadata, both metadata documents are served, and PKCE S256 is advertised without dynamic client registration. | principal: OAuth admin token. store: both. format: both. | auto: `static`, `session-store`, `next-major`. "challenge names resource_metadata and no error code", "authorization server metadata at the RFC 8414 URL", "S256 PKCE advertised", "no registration_endpoint" | Older revisions: discovery is HTTP and does not depend on the revision a session negotiates. |
+| The authorization code grant with PKCE yields a token bound to the MCP endpoint, which opens a session, lists and calls tools, and refreshes. | principal: OAuth admin token. store: both. format: both. | auto: `static`, `session-store`, `next-major`. "code, PKCE and resource exchanged for a token", "token audience is the client and the MCP endpoint", "bearer token opens an MCP session", "refreshed token still bound to the MCP endpoint" | Older revisions: as above. |
+| An MCP-bound token is refused on the rest of the Admin API, the system health check and the full Administration snippets. | principal: OAuth admin token. | auto: `static`, `session-store`, `next-major`. "MCP-bound token refused on ", "MCP-bound token gets only the anonymous admin snippets" | |
+| A foreign resource, a wrong verifier, a consent without the resource and a denied consent are refused for the reason under test. | principal: OAuth admin token. | auto: `static`, `session-store`, `next-major`. "foreign resource answered with invalid_target", "wrong PKCE verifier refused", "consent without the resource", "denied consent redirects with access_denied and iss" | |
+| `?toolsets=` survives discovery: the challenge and the metadata keep the query, and a grant for the pinned URL yields a token for the bare endpoint that opens a session on both. | principal: OAuth admin token. | auto: `static`, `session-store`, `next-major`. "the challenge's resource metadata URL keeps the query", "the metadata resource keeps the query", "a grant for the pinned URL yields a token for the bare endpoint", "that token opens a session on the " | |
+| An https and a `cursor://` redirect URI go through consent and get a code. | client: any https client, Cursor. | auto: `static`, `session-store`, `next-major`. "redirect URI goes through consent and gets a code" | |
+| A plain-http redirect URI outside loopback is accepted under `APP_ENV=dev`. | client: a misconfigured one. | auto: `static`, `session-store`, `next-major`. "is accepted under APP_ENV=dev" | |
+| A plain-http redirect URI outside loopback is refused with `FRAMEWORK__OAUTH_INSECURE_REDIRECT_URI` under any other environment. | client: a misconfigured one. | manual: run the functional suite against a lane with `APP_ENV=prod` and `MCP_EVALS_APP_ENV=prod`, as the trunk lane does. | Every CI lane runs `APP_ENV=dev`. The check exists, and it passed on the trunk lane on 2026-10-23. |
+| Users signing in with a password get their own MCP-bound token, and each token goes through the whole allowlist matrix: no allowlist, two tools, "All capabilities", and an administrator with two tools. | principal: OAuth user token. | auto: `static`, `next-major`. "signs in to the Administration", "consents and gets an MCP-bound token", "oauth-user-unset", "oauth-user-one-tool", "oauth-user-all", "oauth-admin-one-tool" | Redis: `session-store` does not provision principals. An OAuth integration does not exist: integrations use `client_credentials`, which is the access-key row above. |
 
 ## Across revisions
 
@@ -135,8 +150,6 @@ the job. The Store suite is advisory in every job.
 | claude.ai connects through the real consent page, with `?toolsets=` on the URL. | client: claude.ai. principal: OAuth user. | manual: add the lane as a custom connector, approve on the consent page, and list the tools. | A browser and a claude.ai account; no CI runner has either. |
 | Claude Code connects through the real consent page. | client: Claude Code. principal: OAuth user. | manual: add the lane on `localhost:8100` with `claude mcp add`, approve, and list the tools. | A browser. The flow itself is automated with a probe client in https://github.com/shopware/shopware-mcp-evals/pull/103. |
 | The Administration's "All capabilities" switch saves a snapshot, so a tool added later is not granted and the switch reads as off. | principal: integration. | manual: save "All", add a tool, and reopen the dialog. | The switch is Administration UI. The suite builds the same snapshot through `/api/_action/mcp/capabilities`. |
-| `?toolsets=` survives into the OAuth resource metadata, and the token works on both URLs. | principal: OAuth user. | manual: round 3 in the plan. | Becomes a check in the OAuth module once https://github.com/shopware/shopware-mcp-evals/pull/103 merges. |
-| A plain-http redirect URI outside loopback is refused, and https and `cursor://` go through. | client: Cursor, any https client. | manual: round 3 in the plan. | Becomes a check once setup-lane registers a third client with those redirect URIs. |
 | Which protocol revision each real client negotiates, and what it passes to the model. | client: Claude Code, MCP Inspector, claude.ai, Cursor. revision, era. | manual: put a logging proxy in front of the lane and read each client's first requests. Claude Code and MCP Inspector were measured on 2026-10-22, and the results are in the plan. | claude.ai and Cursor are still open. They need a person, and the answer decides which client combinations need automation. |
 | A ChatGPT connector. | client: ChatGPT. | none | Nobody has connected one yet. |
 | Only MCP-bound tokens are accepted on subrequests the MCP endpoint marks. | principal: OAuth user. | none | It matters for app script tools only, and the lane has none. |
