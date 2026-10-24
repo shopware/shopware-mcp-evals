@@ -1365,11 +1365,6 @@ jobs:
           # --advisory: this step is continue-on-error, so its row must not be
           # read as a gating verdict. Without the suite label it rendered as a
           # third, unexplained openai/gpt-4o result.
-          # Triage matters more here than on admin: every UCP tool is unsafe to
-          # execute (no dryRun, no committed Store snapshot), so this suite is
-          # graded on selection alone and its failures cluster — order-get and
-          # checkout-get trade prompts. The arms are what say whether that is a
-          # description collision or the discovery layer.
           if [ "${TRIAGE}" = "true" ]; then args+=(--triage); fi
 
           # --output is fixed rather than left to the default timestamped name

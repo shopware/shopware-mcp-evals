@@ -27,7 +27,6 @@ real failure; the second is the data's, and failing it would turn this into a
 test of the seed.
 """
 
-import re
 from typing import Literal, cast
 
 from eval.result_schema import ExpectSpec, JsonObject, as_object
@@ -67,30 +66,13 @@ NOT_FOUND_MARKERS = (
     "none of these rows exist",
 )
 
-# UCP's error CODE, which prefixes every UCP error as `code: message`. The prose
-# markers above matched every UCP not-found except one: get_order answers a
-# guest with a deliberately non-leaking refusal — `not_found: Order "…" is not
-# available to this request. A guest order can only be read back by the
-# checkout session that placed it…` — whose prose names no absence at all. The
-# code is the contract; the message is not. Missing it graded three correct
-# get_order picks per nightly as tool_error, a third of every Store failure, on
-# a refusal the UCP spec requires of a guest.
-#
-# Anchored to the start, not matched as a substring. `check()` tests not-found
-# BEFORE validation — deliberately, see there — so an unanchored `not_found`
-# would let `validation: status must not be not_found` pass a malformed call at
-# the accepted tier. Only the code in the code position means the code.
-UCP_NOT_FOUND = re.compile(r"^\s*not_found\s*:")
-
 TIERS = ("data", "accepted", "none")
 
-# The codes that decide a verdict on their own, and what each one means. Core's
-# three (shopware/shopware#20948), UCP's name for a schema violation, and the
-# JSON-RPC invalid-params refusal the SDK sends when the arguments do not match
-# the input schema at all. Not `tool_error`: it is the server's default for an
-# error that names no code, and under the 6.8 format it is what every plugin
-# error that predates the codes arrives as, so trusting it would turn UCP's
-# `not_found:` into a tool failure.
+# The codes that decide a verdict on their own: core's three
+# (shopware/shopware#20948), UCP's name for a schema violation, and the JSON-RPC
+# invalid-params refusal the SDK sends when the arguments do not match the input
+# schema at all. `tool_error` is left out on purpose: the server sends it for an
+# error that names no code, so such an error is graded on its prose.
 CODE_KINDS: dict[str, "ErrorKind"] = {
     "not_found": "not_found",
     "invalid_arguments": "invalid_arguments",
@@ -139,7 +121,7 @@ def is_not_found(error: str | None) -> bool:
     if not error:
         return False
     lowered = str(error).lower()
-    return bool(UCP_NOT_FOUND.match(lowered)) or any(marker in lowered for marker in NOT_FOUND_MARKERS)
+    return any(marker in lowered for marker in NOT_FOUND_MARKERS)
 
 
 def _resolve(payload: object, path: str) -> tuple[bool, object]:
@@ -174,11 +156,6 @@ def check(expect: str | ExpectSpec | None, outcome: ToolOutcome) -> tuple[bool, 
     # an in-band `{"success": false}` with HTTP 200 and no flag at all — how the
     # UCP and merchant tools answer. Checked after `none` so a tool that cannot
     # be executed is still exempt.
-    #
-    # The message is the one mcp_result DESCRIBED, never the raw body. With
-    # `isError: true` the raw body is JSON starting with `{`, so the anchored
-    # `not_found:` never matched it, and every correct get_order pick graded as
-    # tool_error.
     if outcome.error is not None:
         # Not-found is checked FIRST, before the validation markers, and that
         # ordering is deliberate.
