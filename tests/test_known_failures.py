@@ -53,7 +53,9 @@ def test_every_entry_names_a_check_the_suite_still_has() -> None:
 def test_every_entry_says_what_it_waits_for() -> None:
     for entry in KNOWN_FAILURES:
         assert entry.error and entry.waiting_for and entry.why
-        assert entry.url.startswith("https://github.com/") and entry.issue in entry.url.replace("/issues/", "#")
+        # An issue or the pull request that fixes it.
+        assert entry.url.startswith("https://github.com/")
+        assert entry.issue in entry.url.replace("/issues/", "#").replace("/pull/", "#")
 
 
 def test_match_needs_both_the_label_and_the_error() -> None:
@@ -110,6 +112,15 @@ def test_the_printed_line_marks_the_failure_as_expected(capsys: pytest.CaptureFi
     out = capsys.readouterr().out
     assert "FAIL (expected, org/repo#1) a check: the known cause" in out
     assert "1 failed (1 expected)" in out
+
+
+def test_a_local_run_says_a_known_failure_passed(capsys: pytest.CaptureFixture[str]) -> None:
+    """The warning annotation only reaches GitHub, so the summary says it too."""
+    rep = reporter()
+    rep.check_pass("a check")
+    rep.summary()
+
+    assert "Known failure passed: a check. Was waiting on org/repo#1" in capsys.readouterr().out
 
 
 def test_the_report_counts_expected_failures(tmp_path: Path) -> None:

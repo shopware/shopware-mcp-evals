@@ -238,6 +238,8 @@ python -m functional.runner --skip-dev-tools
 python -m functional.runner --endpoint store
 ```
 
+The admin suite also walks the MCP OAuth flow (see [OAuth](#oauth)).
+
 Pass / fail / skip per check is printed to stdout. A JSON report is saved to
 `results/functional-<timestamp>.json`, and a per-tool verdict to
 `results/tool-health-<endpoint>.json` — that file is what gates Layer 2.
@@ -1021,6 +1023,59 @@ keys via `sw-access-key` / `sw-secret-access-key` headers, **not** OAuth. The
 integration key establishes a server-to-server session; every run starts with a
 JSON-RPC `initialize` call before any tool invocation. The `Mcp-Session-Id`
 response header identifies the session and scopes toolset enablement.
+
+### OAuth
+
+Since shopware/shopware#21862 (https://github.com/shopware/shopware/pull/21862)
+the endpoint also takes an OAuth access token: a 401 names the protected
+resource metadata, the client signs in with the authorization code grant and
+PKCE, and the token is bound to `/api/_mcp` by its audience. The suite keeps
+using access keys; `functional/oauth.py` walks the OAuth flow on its own, as
+part of the admin suite at the default revision. A shop without discovery is
+one skip naming the PR. With `--provision-principals` it also signs in as two
+throwaway non-admin users, one allowlisted three tools and one without an
+allowlist, and checks that `tools/list` with `?toolsets=all` shows exactly the
+allowlist plus the meta-tools and that a tool outside it is refused.
+
+It needs a public OAuth client. setup-lane registers one; on a local lane put
+the same in a gitignored `config/packages/zzz-mcp-evals-oauth.yaml` and clear
+the cache:
+
+```yaml
+shopware:
+    api:
+        oauth_clients:
+            mcp-evals-probe:
+                name: 'mcp-evals probe'
+                redirect_uris:
+                    - 'http://127.0.0.1/callback'
+            claude-code:
+                name: 'Claude Code'
+                redirect_uris:
+                    - 'http://localhost:53682/callback'
+```
+
+`http://127.0.0.1/callback` matches any port, because a loopback IP literal
+does (RFC 8252), so the script picks one and nothing listens there: it reads
+the code off the consent decision, which it posts with the suite's admin token.
+`localhost` is matched exactly, so Claude Code needs its fixed callback port.
+It also refuses to send a token request over plain http to any host but
+`localhost`, `127.0.0.1` and `::1`, so point it at the lane's own port rather
+than a `*.localhost` name behind a proxy. The shop builds every discovery URL
+from the host it was asked on, so either name is self-consistent:
+
+```bash
+claude mcp add --transport http --client-id claude-code --callback-port 53682 \
+  shopware-lane http://localhost:8100/api/_mcp
+claude mcp login shopware-lane   # opens the consent page; --no-browser prints the URL
+```
+
+The consent page is built Administration JavaScript. A lane serving a bundle
+from before resource support drops `resource` from the decision, and the token
+request is then refused with "The authorization was granted without a
+resource": rebuild the Administration (`composer build:js:admin`).
+
+`MCP_EVALS_OAUTH_CLIENT` names another client for the script.
 
 ## Output format
 
