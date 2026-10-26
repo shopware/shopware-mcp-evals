@@ -6,19 +6,20 @@ the server's feature flags and the revision the client negotiated, not on the
 tool:
 
   legacy   one text block holding `{"success": …, "data": …, "_meta": …}`. What
-           every revision gets until 6.8. Since shopware/shopware#20948 a failure
-           also carries a stable `code` next to `error`.
-  spec     the `v6.8.0.0` format: the first text block is the plain data as JSON
-           (or the error message), followed by the summary, `{"details": …}` and
-           `{"_meta": …}` as blocks of their own; the metadata also arrives in the
-           result `_meta` under a `shopware/` prefix.
+           a client before 2025-06-18 gets. Since shopware/shopware#20948 a
+           failure also carries a stable `code` next to `error`.
+  spec     the MCP format, which shopware/shopware#21844 sends from 2025-06-18
+           on, chosen by the revision alone: the first text block is the plain
+           data as JSON (or the error message), followed by the summary,
+           `{"details": …}` and `{"_meta": …}` as blocks of their own; the
+           metadata also arrives in the result `_meta` under a `shopware/` prefix.
+           Before #21844 the `v6.8.0.0` flag sent it to every revision.
   plain    a string that is no envelope at all, which the server passes through
            untouched (a tool returning its own `CallToolResult`).
 
-On top of any of them, a client on 2025-06-18 or later receives
-`structuredContent` and, for an offloaded result, a `resource_link` block
-(`McpToolResultRenderer`). Older revisions get the pointer as `_meta.resourceUri`
-inside the legacy text.
+A client on 2025-06-18 or later also receives `structuredContent` and, for an
+offloaded result, a `resource_link` block instead of a pointer in the text.
+Older revisions get the pointer as `_meta.resourceUri` inside the legacy text.
 
 Every reader in this repo used to `json.loads` the first text block and ask it
 for `success`, `data` and `_meta` — exactly the keys 6.8 removes. `read_result()` is the
@@ -225,13 +226,44 @@ def _structural(text: str, key: str) -> JsonObject | None:
     return as_object(decoded.get(key)) if len(decoded) == 1 and key in decoded else None
 
 
+def _without_data_text(first: str, structured: object) -> bool:
+    """Whether a success's texts start after its data, because there is none.
+
+    A result without data but with metadata sends `{"result": null, "_meta": …}`
+    and no data block (shopware/shopware@7f64703f325), so its first text is the
+    summary or the metadata block. Data that is itself `{"result": null}` is
+    sent as JSON, which neither of those is.
+    """
+    wrapper = as_object(structured)
+    if set(wrapper) != {"result", "_meta"} or wrapper["result"] is not None:
+        return False
+    if _structural(first, "_meta") is not None:
+        return True
+    try:
+        _ = cast(object, json.loads(first))
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
 def _spec(
     texts: tuple[str, ...], structured: object, result_meta: JsonObject, is_error: bool
 ) -> tuple[object, ToolError | None, JsonObject, str | None]:
-    """Reads `McpToolResultRenderer::specTexts()` back."""
+    """Reads `McpToolResultRenderer::specTexts()` back.
+
+    The data is read from the text, never from `structuredContent`, whose copy
+    carries the reserved `_meta` key for the model (shopware/shopware#21844) and
+    would fold the metadata into the data.
+    """
     meta: JsonObject = {}
     details: JsonObject = {}
     rest: list[str] = []
+    # A success with `structuredContent` has its data as the first block, unless
+    # it has no data. Taken before the structural blocks are sorted out: data
+    # whose only key is `_meta` encodes exactly like the metadata block.
+    data_text: str | None = None
+    if not is_error and structured is not None and texts and not _without_data_text(texts[0], structured):
+        data_text, texts = texts[0], texts[1:]
     for text in texts:
         if (block := _structural(text, "_meta")) is not None:
             meta = block
@@ -252,6 +284,8 @@ def _spec(
     # The data comes first, as JSON. A result stored behind a link may have none,
     # and then the first block is already the summary — prose, not JSON.
     data: object = None
+    if data_text is not None:
+        rest.insert(0, data_text)
     if rest:
         try:
             data = cast(object, json.loads(rest[0]))

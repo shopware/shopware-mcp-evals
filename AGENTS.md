@@ -203,10 +203,13 @@ sequenceDiagram
   `failure`, or it is blind to the entire Store failure mode — which is exactly
   what happened to 27 admin checks for months.
 - **Never parse the first text block yourself.** A result arrives in one of three
-  shapes: the legacy `{"success", "data", "_meta"}` text, the `v6.8.0.0` format
+  shapes: the legacy `{"success", "data", "_meta"}` text, the MCP format
   (plain data first, metadata in blocks of its own), or plain text — plus
   `structuredContent` and `resource_link` blocks from protocol 2025-06-18 on
-  (shopware/shopware#20948, #20951). `read_result` knows all of them, and
+  (shopware/shopware#20948, #20951). Since shopware/shopware#21844 the revision
+  alone picks the format: legacy below 2025-06-18, MCP from it on, with the
+  model metadata copied into `structuredContent` under `_meta`. Read the data
+  from the text, never from that copy. `read_result` knows all of them, and
   `ToolOutcome.envelope` is the legacy-shaped view the fixtures' `data.…` paths
   are written against.
 - **The protocol revision is an endpoint property.** Sessions ask for
@@ -573,8 +576,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
-| `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
-| `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. A server older than the renderer is one skip naming the PR |
+| `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision: the pointer in the legacy text below 2025-06-18, only in the `resource_link` block from it on (shopware/shopware#21844). Readable, in the stored form of its revision, by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
+| `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, the legacy envelope below 2025-06-18 and the MCP format from it on, and that `structuredContent` is what shopware/shopware#21844 builds from the text: the data, plus the text's `_meta` block and summary under `_meta`, except for a tool whose `outputSchema` (read from the session's own `tools/list`) fixes the shape. A result without data still carries that `_meta`, as `{"result": null, "_meta": …}`, and an offloaded one has no `structuredContent` (shopware/shopware@7f64703f325). A server older than the renderer is one skip naming the PR |
 | `functional/stateless.py` | The stateless 2026-07-28 revision: `server/discover` with no session. Today a skip naming `withoutModernEra()` and shopware/shopware#19969, accepted only when the refusal names that revision. An answer fails until the scenarios in the plan exist |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |

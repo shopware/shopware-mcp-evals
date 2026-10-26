@@ -301,6 +301,9 @@ class ToolDef(TypedDict, total=False):
     name: Required[str]
     description: str
     inputSchema: JsonObject  # noqa: N815 — the wire name, not ours to rename
+    # Present when the tool declares the shape of its result; its
+    # `structuredContent` is then exactly the data (shopware/shopware#21844).
+    outputSchema: JsonObject  # noqa: N815 — the wire name
 
 
 class Toolset(TypedDict, total=False):
