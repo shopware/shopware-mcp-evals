@@ -16,7 +16,7 @@ from eval.result_schema import JsonObject, McpResponse, ToolDef, as_object
 from functional import result_format as R
 from functional.reporting import Reporter
 from mcp_client import Endpoint, admin_endpoint
-from mcp_result import ToolOutcome, read_result
+from mcp_result import TOOL_RESULT_URI_PREFIX, ToolOutcome, read_result
 
 ADMIN: Endpoint = admin_endpoint()
 STAMP: JsonObject = {"shopware/generatedAt": "2026-10-20T10:00:00+00:00"}
@@ -54,10 +54,12 @@ def spec(
     *,
     meta: JsonObject | None = None,
     summary: str | None = None,
+    links: tuple[str, ...] = (),
 ) -> ToolOutcome:
     """A success in the MCP format (`specTexts`): the data, the summary, the
     metadata block, and the metadata again under the prefix in the result `_meta`.
-    `structured` defaults to the data as it is."""
+    `links` follow as `resource_link` blocks. `structured` defaults to the data
+    as it is."""
     texts: list[str] = []
     if data is not None:
         texts.append(json.dumps(data))
@@ -65,8 +67,10 @@ def spec(
         texts.append(summary)
     if meta:
         texts.append(json.dumps({"_meta": meta}))
+    content: list[object] = [{"type": "text", "text": t} for t in texts or ["null"]]
+    content.extend({"type": "resource_link", "uri": uri, "name": "tool-result"} for uri in links)
     result: JsonObject = {
-        "content": [{"type": "text", "text": t} for t in texts or ["null"]],
+        "content": content,
         "isError": False,
         "_meta": {**{f"shopware/{k}": v for k, v in (meta or {}).items()}, **STAMP},
     }
@@ -183,8 +187,44 @@ def test_a_tool_with_an_output_schema_gets_no_model_meta(data: object, want: obj
     assert R.expected_structured(outcome, "2025-11-25", has_output_schema=True) == want
 
 
-def test_a_result_without_data_has_no_structured_content() -> None:
-    assert R.expected_structured(spec(None, summary="Stored behind a link.", meta={"total": 1}), "2025-06-18") is None
+POINTER = TOOL_RESULT_URI_PREFIX + "0123456789abcdef0123456789abcdef.1760000000.c2lnbmF0dXJl"
+
+
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_a_result_without_data_keeps_its_model_meta(revision: str) -> None:
+    """A dry run with nothing to show (shopware/shopware@7f64703f325)."""
+    outcome = spec(None, meta={"dryRun": True, "responseSize": 9}, summary="Nothing written.")
+
+    assert R.expected_structured(outcome, revision) == {
+        "result": None,
+        "_meta": {"dryRun": True, "summary": "Nothing written."},
+    }
+
+
+def test_a_result_without_data_or_meta_has_no_structured_content() -> None:
+    assert R.expected_structured(spec(None), "2025-06-18") is None
+
+
+def test_a_result_without_data_and_only_bookkeeping_meta_has_no_structured_content() -> None:
+    assert R.expected_structured(spec(None, meta={"responseSize": 9}), "2025-06-18") is None
+
+
+def test_a_result_without_data_from_a_tool_with_an_output_schema_has_no_structured_content() -> None:
+    outcome = spec(None, meta={"dryRun": True}, summary="s")
+
+    assert R.expected_structured(outcome, "2025-11-25", has_output_schema=True) is None
+
+
+def test_an_offloaded_result_has_no_structured_content() -> None:
+    outcome = spec(None, meta={"query": {"tool": "t"}}, summary="Stored behind a link.", links=(POINTER,))
+
+    assert R.expected_structured(outcome, "2025-06-18") is None
+
+
+def test_a_link_of_the_tools_own_does_not_make_a_result_offloaded() -> None:
+    outcome = spec(None, meta={"dryRun": True}, links=("https://shop.example/media/1.png",))
+
+    assert R.expected_structured(outcome, "2025-06-18") == {"result": None, "_meta": {"dryRun": True}}
 
 
 # --- expected_structured: failures ---------------------------------------------------
@@ -244,8 +284,23 @@ def test_a_tool_with_an_output_schema_is_clean_without_model_meta() -> None:
     assert R.format_problems(outcome, OK, "2025-11-25", has_output_schema=True) == []
 
 
-def test_a_result_without_data_is_clean_without_structured_content() -> None:
-    assert R.format_problems(spec(None, summary="Nothing.", meta={"total": 0}), OK, "2025-06-18") == []
+def test_a_result_without_data_or_meta_is_clean_without_structured_content() -> None:
+    assert R.format_problems(spec(None), OK, "2025-06-18") == []
+
+
+def test_a_result_without_data_is_clean_with_its_model_meta() -> None:
+    outcome = spec(
+        None, {"result": None, "_meta": {"total": 0, "summary": "Nothing."}}, summary="Nothing.", meta={"total": 0}
+    )
+
+    assert R.format_problems(outcome, OK, "2025-06-18") == []
+
+
+def test_a_result_without_data_that_drops_its_model_meta_is_a_problem() -> None:
+    """What the renderer sent before shopware/shopware@7f64703f325."""
+    outcome = spec(None, summary="Nothing.", meta={"total": 0})
+
+    assert R.format_problems(outcome, OK, "2025-06-18") == ["no structuredContent on 2025-06-18"]
 
 
 def test_a_coded_failure_is_clean_on_every_revision() -> None:
@@ -303,10 +358,24 @@ def test_missing_structured_content_from_the_boundary_is_a_problem() -> None:
     assert R.format_problems(spec({}, None), OK, "2025-06-18") == ["no structuredContent on 2025-06-18"]
 
 
-def test_structured_content_for_a_result_without_data_is_a_problem() -> None:
-    outcome = spec(None, {"result": None}, summary="Nothing.")
+def test_structured_content_for_a_result_without_data_or_meta_is_a_problem() -> None:
+    outcome = spec(None, {"result": None})
 
-    assert R.format_problems(outcome, OK, "2025-06-18") == ["structuredContent sent for a result without data"]
+    assert R.format_problems(outcome, OK, "2025-06-18") == [
+        "structuredContent sent for a result without data or metadata"
+    ]
+
+
+def test_structured_content_for_an_offloaded_result_is_a_problem() -> None:
+    outcome = spec(
+        None,
+        {"result": None, "_meta": {"total": 1, "summary": "Stored."}},
+        meta={"total": 1},
+        summary="Stored.",
+        links=(POINTER,),
+    )
+
+    assert R.format_problems(outcome, OK, "2025-06-18") == ["structuredContent sent for an offloaded result"]
 
 
 def test_structured_content_that_disagrees_with_the_text_is_a_problem() -> None:

@@ -306,6 +306,45 @@ def test_data_whose_only_key_is_meta_is_data_not_the_metadata_block(
     assert outcome.meta == want_meta
 
 
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        pytest.param([text("Nothing written."), text({"_meta": {"dryRun": True}})], id="with-summary"),
+        pytest.param([text({"_meta": {"dryRun": True}})], id="metadata-only"),
+    ],
+)
+def test_a_result_without_data_keeps_its_metadata_next_to_structured_content(blocks: list[JsonObject]) -> None:
+    """shopware/shopware@7f64703f325: no data block, and `structuredContent`
+    wraps null with the model metadata, so the first block is not data."""
+    summary = "Nothing written." if len(blocks) == 2 else None
+    model_meta: JsonObject = {"dryRun": True, **({"summary": summary} if summary else {})}
+    outcome = read_result(
+        result(
+            *blocks,
+            structured={"result": None, "_meta": model_meta},
+            meta={**GENERATED, "shopware/dryRun": True},
+        )
+    )
+
+    assert (outcome.data, outcome.meta, outcome.summary) == (None, {"dryRun": True}, summary)
+    assert outcome.envelope == {"success": True, "data": None, "_meta": {"dryRun": True}}
+
+
+def test_data_that_is_a_null_result_is_still_the_first_block() -> None:
+    """`{"result": null}` as data gains the model metadata the same way, but is
+    sent as JSON, which no summary or metadata block is."""
+    outcome = read_result(
+        result(
+            text({"result": None}),
+            text({"_meta": {"total": 1}}),
+            structured={"result": None, "_meta": {"total": 1}},
+            meta={**GENERATED, "shopware/total": 1},
+        )
+    )
+
+    assert (outcome.data, outcome.meta) == ({"result": None}, {"total": 1})
+
+
 def test_a_spec_result_without_data_starts_with_its_summary() -> None:
     outcome = read_result(result(text("Stored behind a link."), meta=GENERATED))
 

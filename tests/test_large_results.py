@@ -167,6 +167,17 @@ def test_from_the_boundary_the_prefixed_expiry_is_required(revision: str) -> Non
     ]
 
 
+@pytest.mark.parametrize("revision", ["2025-06-18", "2025-11-25"])
+def test_from_the_boundary_structured_content_next_to_the_pointer_is_a_problem(revision: str) -> None:
+    """The data is the stored resource, so the renderer sends none."""
+    raw = as_object(offloaded(revision).get("result"))
+    raw["structuredContent"] = {"result": None, "_meta": {"query": {"tool": L.OFFLOAD_TOOL}}}
+
+    assert L.offload_problems(read_result(response(raw)), revision) == [
+        f"structuredContent sent with the pointer on {revision}"
+    ]
+
+
 def test_below_the_boundary_the_text_expiry_is_required() -> None:
     assert L.offload_problems(outcome("2024-11-05", expiry=False), "2024-11-05") == [
         "no expiresAt next to the pointer in the text"

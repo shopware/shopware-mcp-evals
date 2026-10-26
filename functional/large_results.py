@@ -100,6 +100,9 @@ def offload_problems(outcome: ToolOutcome, revision: str) -> list[str]:
             problems.append(f"resourceUri in the text on {revision}, where the resource_link block is the pointer")
         if META_PREFIX + "expiresAt" not in outcome.result_meta:
             problems.append(f"no shopware/expiresAt in the result _meta on {revision}")
+        if outcome.has_structured:
+            # The data is the stored resource, so there is nothing to structure.
+            problems.append(f"structuredContent sent with the pointer on {revision}")
     else:
         if text_uri is None:
             problems.append("no resourceUri next to the pointer in the text")

@@ -226,6 +226,26 @@ def _structural(text: str, key: str) -> JsonObject | None:
     return as_object(decoded.get(key)) if len(decoded) == 1 and key in decoded else None
 
 
+def _without_data_text(first: str, structured: object) -> bool:
+    """Whether a success's texts start after its data, because there is none.
+
+    A result without data but with metadata sends `{"result": null, "_meta": …}`
+    and no data block (shopware/shopware@7f64703f325), so its first text is the
+    summary or the metadata block. Data that is itself `{"result": null}` is
+    sent as JSON, which neither of those is.
+    """
+    wrapper = as_object(structured)
+    if set(wrapper) != {"result", "_meta"} or wrapper["result"] is not None:
+        return False
+    if _structural(first, "_meta") is not None:
+        return True
+    try:
+        _ = cast(object, json.loads(first))
+    except json.JSONDecodeError:
+        return True
+    return False
+
+
 def _spec(
     texts: tuple[str, ...], structured: object, result_meta: JsonObject, is_error: bool
 ) -> tuple[object, ToolError | None, JsonObject, str | None]:
@@ -238,11 +258,11 @@ def _spec(
     meta: JsonObject = {}
     details: JsonObject = {}
     rest: list[str] = []
-    # A success with `structuredContent` has data, and its data is the first
-    # block. Taken before the structural blocks are sorted out: data whose only
-    # key is `_meta` encodes exactly like the metadata block.
+    # A success with `structuredContent` has its data as the first block, unless
+    # it has no data. Taken before the structural blocks are sorted out: data
+    # whose only key is `_meta` encodes exactly like the metadata block.
     data_text: str | None = None
-    if not is_error and structured is not None and texts:
+    if not is_error and structured is not None and texts and not _without_data_text(texts[0], structured):
         data_text, texts = texts[0], texts[1:]
     for text in texts:
         if (block := _structural(text, "_meta")) is not None:

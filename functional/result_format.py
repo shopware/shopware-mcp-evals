@@ -31,7 +31,7 @@ from typing import cast
 from eval.result_schema import JsonObject, as_object
 from functional.reporting import Reporter
 from mcp_client import Endpoint, mcp_call, mcp_init, mcp_tools_list_all
-from mcp_result import ToolOutcome, read_result
+from mcp_result import TOOL_RESULT_URI_PREFIX, ToolOutcome, read_result
 
 # Oldest, boundary, newest. The renderer changes behaviour at one revision only,
 # so the ones in between add calls without adding information.
@@ -89,6 +89,13 @@ def _object(value: object) -> JsonObject | None:
     return cast(JsonObject, value) if isinstance(value, dict) else None
 
 
+def offloaded(outcome: ToolOutcome) -> bool:
+    """Whether the result is stored behind a pointer. A link of the tool's own
+    is not one: `McpToolResultRenderer::isLinkedResult()` asks for the stored
+    result's link only."""
+    return any(link.uri.startswith(TOOL_RESULT_URI_PREFIX) for link in outcome.links)
+
+
 def model_meta(outcome: ToolOutcome) -> JsonObject:
     """`McpToolResultRenderer::modelMeta()`, from what the text carries: the
     `{"_meta": …}` block without the client's bookkeeping, and the summary
@@ -116,7 +123,8 @@ def expected_structured(
     for a result that has none.
 
     Mirrors `McpToolResultRenderer::structuredContent()`. A failure becomes the
-    error object. A success without data has none. Otherwise the data carries
+    error object. An offloaded success has none, and neither has one without
+    data or model metadata. Otherwise the data, null included, carries
     the model metadata under `_meta` when `adds_model_meta` says so, an object
     next to its own keys and anything else as `{"result": …, "_meta": …}`.
     Without it, an object is sent as is, and anything else is wrapped as
@@ -131,7 +139,10 @@ def expected_structured(
             error["details"] = outcome.error.details
         return {"error": error}
     data = outcome.data
-    if data is None:
+    # An offloaded result's data is the stored resource, so nothing is left to
+    # structure. Any other result without data keeps its model metadata, as
+    # `{"result": null, "_meta": …}` (shopware/shopware@7f64703f325).
+    if data is None and (offloaded(outcome) or not adds_model_meta(outcome, has_output_schema)):
         return None
     obj = _object(data)
     if adds_model_meta(outcome, has_output_schema):
@@ -156,7 +167,10 @@ def structured_problems(outcome: ToolOutcome, revision: str, has_output_schema: 
     """
     want = expected_structured(outcome, revision, has_output_schema)
     if want is None:
-        return ["structuredContent sent for a result without data"] if outcome.has_structured else []
+        if not outcome.has_structured:
+            return []
+        reason = "an offloaded result" if offloaded(outcome) else "a result without data or metadata"
+        return [f"structuredContent sent for {reason}"]
     if not outcome.has_structured:
         return [f"no structuredContent on {revision}"]
     got = _object(outcome.structured)
