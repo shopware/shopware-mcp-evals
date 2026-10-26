@@ -356,6 +356,9 @@ python -m functional.runner --provision-principals  # CREATES integrations, user
                                                           # the `preloaded_arm` dispatch
                                                           # input or the `run-preloaded`
                                                           # PR label. Advisory, opt-in.
+.venv/bin/python3 -m eval.runner --auth oauth             # sign in over OAuth (#21862) instead of
+                                                          # sending the key; see Auth. In CI:
+                                                          # nightly, `oauth_arm` or `run-oauth`.
 .venv/bin/python3 -m eval.runner --triage                 # re-run ONLY the failures under
                                                           # the isolated + full arms.
                                                           # In CI: nightly, the `run-triage`
@@ -545,9 +548,20 @@ likely still has `NULL` stored, and the admin JS rendering it is a build from
 before #20600.
 
 Since shopware/shopware#21862 `/api/_mcp` also takes an OAuth access token bound
-to it by audience. The suite still authenticates with access keys;
+to it by audience. The suite authenticates with access keys by default;
 `functional/oauth.py` walks the OAuth flow on its own, with the public client
 setup-lane writes to `config/packages/zzz-mcp-evals-oauth.yaml`.
+
+`eval.runner --auth oauth` (or `EVAL_AUTH=oauth`) runs a whole admin fixture set
+on an OAuth token instead (`eval/oauth_login.py`). Every URL is discovered: the
+401 challenge, the protected resource metadata, the authorization server
+metadata. The key is still read once, to post the consent decision as its own
+principal, so both arms run as the same user. The token is refreshed shortly
+before it expires, by one worker under a lock, because Shopware revokes a used
+refresh token. Exit codes: 4 when the shop cannot do it at all (no discovery, no
+client), with a warning and a `SKIP` summary row; 3 when it advertises OAuth and
+the sign-in still breaks. In CI this is the `admin · OAuth` arm of `admin-eval`:
+nightly, the `oauth_arm` dispatch input or the `run-oauth` label, advisory.
 
 The session must be initialized with `method: initialize` before any other call;
 the `Mcp-Session-Id` response header scopes toolset enablement.
@@ -584,6 +598,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision: since shopware/shopware#21844 a `resource_link` and no `resourceUri` from 2025-06-18, the legacy text before, and `resources/read` answering in the format of the call that stored it. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
+| `eval/oauth_login.py` | Signs a whole eval run in over OAuth (`--auth oauth`): discovery from the 401 challenge, authorization code with PKCE and `resource`, consent posted with the key's principal, a token that refreshes itself under a lock. A shop without discovery or client is `OAuthUnavailable` (a skip), anything else `OAuthSignInFailed` |
 | `functional/oauth.py` | The MCP OAuth flow (shopware/shopware#21862) with no browser: the 401 challenge, both metadata documents, authorization code with PKCE for the public client setup-lane registers (`mcp-evals-probe`), the consent decision posted with the suite's admin token, an audience-bound token that works on `/api/_mcp` and is refused on the rest of the Admin API, refresh, and the refusals. With `--provision-principals` also two non-admin users signing in with a password: one allowlisted three tools sees exactly them plus the meta-tools and is refused another, one without an allowlist sees the meta-tools only. It also asks the system health check and the Administration snippets, which check a token themselves, to refuse an MCP-bound one, and that a consent which dropped the resource is refused with a hint naming the consent page. A shop without discovery is one skip naming the PR |
 | `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. Since shopware/shopware#21844: the text format follows the revision, and the model's metadata (`dryRun` of a dry-run upsert, `total`) is in the text's `_meta` on every revision and in `structuredContent._meta` from 2025-06-18. A server older than the renderer is one skip naming the PR, one older than #21844 one more |
 | `functional/stateless.py` | The stateless 2026-07-28 revision: `server/discover` with no session. Today a skip naming `withoutModernEra()` and shopware/shopware#19969, accepted only when the refusal names that revision. An answer fails until the scenarios in the plan exist |
