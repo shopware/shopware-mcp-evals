@@ -48,6 +48,7 @@ import yaml
 
 import lane
 import ucp
+from eval import oauth_login
 from eval.assertions import args_mismatch, check, classify_error
 from eval.cost import add_tokens, load_pricing, run_cost
 from eval.report import (
@@ -118,6 +119,8 @@ from toolclass import classify, is_executable, prepare_call
 # are production configurations graded the same way — the triage arms below are
 # the diagnostic ones.
 PASS_ARMS = ("discovery", "preloaded")
+# How the run authenticates on the MCP endpoint; see --auth.
+AUTH_MODES = ("keys", "oauth")
 
 # Arms that withhold the meta-tools so a meta-call cannot be misgraded as a wrong
 # answer (the bug that killed the old `baseline` mode). Only used by --triage.
@@ -1202,6 +1205,34 @@ def write_summary_row(
     return row
 
 
+def write_skip_row(provider: str, model: str, reason: str, args: argparse.Namespace) -> SummaryRow:
+    """The row of a run that graded nothing because the lane could not do what was asked.
+
+    Written rather than left out, because an absent row reads as a run that did
+    not happen, and a gate of SKIP with its reason says why it did not.
+    """
+    row: SummaryRow = {
+        "suite": cast(str, args.suite_label) or cast(str, args.endpoint),
+        "provider": provider,
+        "model": model,
+        "rate": 0.0,
+        "graded": 0,
+        "errored": 0,
+        "throttled": 0,
+        "gate": "SKIP",
+        "advisory": bool(cast(bool, args.advisory)),
+        "by_tier": {},
+        "cost": run_cost([], model, load_pricing(), provider),
+        "skip_reason": reason,
+    }
+    print(f"\nSummary row: {row['suite']} | {provider} {model} | SKIP | {reason}")
+    if summary_row := cast(str | None, args.summary_row):
+        path = Path(summary_row)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(row, indent=2))
+    return row
+
+
 def skipped_result(
     fixture: Fixture, mode: str, reason: str = "expected tool not registered on this instance"
 ) -> FixtureResult:
@@ -1591,6 +1622,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["admin", "store"],
         default="admin",
         help="Which MCP endpoint to test (default admin). 'store' uses the Store API + UCP tools.",
+    )
+    parser.add_argument(
+        "--auth",
+        choices=AUTH_MODES,
+        default=os.environ.get("EVAL_AUTH", "keys"),
+        help=(
+            "How the run authenticates on the MCP endpoint. `keys`: SW_ACCESS_KEY/SW_SECRET_ACCESS_KEY on every "
+            "request. `oauth`: sign in the way an MCP client does (shopware/shopware#21862), discovered from "
+            "the 401 challenge, authorization code with PKCE and the resource parameter, then the bearer token "
+            "on every request; the key only posts the consent. Admin endpoint only. A shop without OAuth "
+            f"discovery or without the client records a skip and exits {OAUTH_SKIP_EXIT}."
+        ),
     )
     parser.add_argument(
         "--protocol-version",
@@ -2012,6 +2055,7 @@ def build_report(
     arm_results: dict[str, list[FixtureResult]] | None = None,
     prompt_inventory: PromptInventory | None = None,
     protocol_version: str = DEFAULT_PROTOCOL_VERSION,
+    auth: str = "keys",
 ) -> Report:
     """The JSON report. Pure: no writing, so its shape can be asserted directly."""
     report: Report = {
@@ -2028,6 +2072,7 @@ def build_report(
         "context_prompt": cast(JsonObject, cast(object, prompt_inventory or {})),
         "max_steps": max_steps,
         "protocol_version": protocol_version,
+        "auth": auth,
     }
     if discovery is not None:
         report["modes"]["discovery"] = ModeBlock(
@@ -2122,6 +2167,18 @@ def run_suite(args: argparse.Namespace) -> int:
     # with_protocol keeps the Store endpoint's context token: same cart, other revision.
     endpoint = endpoint_by_name(endpoint_name).with_protocol(cast(str, args.protocol_version))
     credential = require_credentials(provider, endpoint_name)
+    auth = cast(str, args.auth)
+    bearer: oauth_login.BearerToken | None = None
+    if auth == "oauth":
+        if endpoint_name != "admin":
+            raise ConfigError("--auth oauth applies to the admin endpoint only; the Store API has no OAuth sign-in.")
+        try:
+            endpoint, bearer = oauth_login.sign_in(endpoint)
+        except oauth_login.OAuthUnavailable as exc:
+            print(f"::warning::{cast(str, args.suite_label) or endpoint_name} skipped, OAuth is unavailable: {exc}")
+            write_skip_row(provider, model, str(exc), args)
+            return OAUTH_SKIP_EXIT
+        print(f"Auth:     OAuth, client {bearer.client!r}, token bound to {bearer.discovery.resource}")
     client = build_client(provider, credential)
     fixtures = load_fixtures(
         fixtures_path_for(endpoint_name, cast(str | None, args.fixtures)),
@@ -2217,11 +2274,15 @@ def run_suite(args: argparse.Namespace) -> int:
                 arm_results,
                 prompt_inventory,
                 endpoint.protocol_version,
+                auth,
             ),
             indent=2,
         )
     )
     print(f"Report saved: {output_path}")
+    if bearer is not None:
+        # Evidence that a run longer than one token lifetime kept its sign-in.
+        print(f"Auth:     OAuth token refreshed {bearer.refreshes} time(s) during the run")
 
     # Gate: skipped fixtures (tool absent on this instance) do not gate.
     #
@@ -2242,13 +2303,17 @@ def run_suite(args: argparse.Namespace) -> int:
     return 0 if verdict["ok"] else 1
 
 
-# Exit codes, because the workflow treats them differently. 1 means the run
+# Exit codes, because the workflow treats them differently.
+# OAUTH_SKIP_EXIT: `--auth oauth` on a shop that cannot do it (no discovery, no
+# client). No fixture ran, and the summary row says so; the workflow turns it
+# into a warning naming the cause, never into a pass. 1 means the run
 # happened and the gate said no, which an advisory window is allowed to downgrade
 # to a warning — catalogue drift is the one that remains, since a verdict about
 # descriptions that are not the ones the baseline recorded is not attributable.
 # CRASH_EXIT means the run produced no verdict at all, and no window may swallow
 # that: a green job that actually crashed is worse than a red one.
 CRASH_EXIT = 3
+OAUTH_SKIP_EXIT = 4
 
 
 def main() -> int:
@@ -2257,6 +2322,11 @@ def main() -> int:
     except ConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    except oauth_login.OAuthSignInFailed as exc:
+        # The shop advertises OAuth and signing in still broke: no verdict, and
+        # not something an advisory window may swallow.
+        print(f"ERROR: the OAuth sign-in failed: {exc}", file=sys.stderr)
+        return CRASH_EXIT
     except Exception:  # noqa: BLE001 — re-raised as a distinct exit code, traceback intact
         traceback.print_exc()
         print(

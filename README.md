@@ -1037,6 +1037,15 @@ throwaway non-admin users, one allowlisted three tools and one without an
 allowlist, and checks that `tools/list` with `?toolsets=all` shows exactly the
 allowlist plus the meta-tools and that a tool outside it is refused.
 
+To run a fixture set on an OAuth token instead of the key, pass `--auth oauth`
+to `eval.runner` (admin endpoint only). It discovers the authorization server
+from the 401 challenge, signs in with the authorization code grant, PKCE and the
+`resource` parameter, posts the consent with the key's own principal, and
+refreshes the token as it expires. The nightly runs the admin fixtures this way
+as the advisory `admin · OAuth` arm; dispatch input `oauth_arm`, PR label
+`run-oauth`. A shop without discovery or without the client records a `SKIP`
+row with the reason.
+
 It needs a public OAuth client. setup-lane registers one; on a local lane put
 the same in a gitignored `config/packages/zzz-mcp-evals-oauth.yaml` and clear
 the cache:

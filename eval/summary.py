@@ -131,6 +131,9 @@ def render_runs(rows: list[SummaryRow]) -> str:
         # mistaken for the gating verdict.
         if r.get("advisory"):
             gate = f"{gate} (advisory)"
+        # A run that graded nothing says why, or its 0% reads as a collapse.
+        if reason := r.get("skip_reason"):
+            gate = f"{gate}: {reason}"
         lines.append(
             f"| {r.get('suite', '?')} | `{r.get('provider', '?')}` | `{r.get('model', '?')}` | "
             f"{round(100 * r.get('rate', 0))}% | {r.get('graded', 0)} | {r.get('errored', 0)} | "

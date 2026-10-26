@@ -86,6 +86,10 @@ on:
         description: 'Also run the admin fixtures with the whole catalogue pinned at connect time (?toolsets=all, shopware/shopware#20509) instead of discovered. Advisory. Compares accuracy and cost of a preloaded connector against discovery. Adds one primary-model pass.'
         required: false
         default: 'false'
+      oauth_arm:
+        description: 'Also run the admin fixtures signed in over OAuth (authorization code with PKCE, discovered from the 401 challenge, shopware/shopware#21862) instead of with the access key. Advisory. Nightly does this anyway. A Shopware without OAuth discovery records a skip with its reason.'
+        required: false
+        default: 'false'
       next_major:
         description: 'Also build a lane with the V6_8_0_0 feature flag and run the functional suite on it at the newest protocol revision. Advisory. Plugins that do not boot under the flag are deactivated and named. Nightly does this anyway.'
         required: false
@@ -186,6 +190,13 @@ env:
   PRELOADED: >-
     ${{ github.event.inputs.preloaded_arm == 'true'
         || contains(github.event.pull_request.labels.*.name, 'run-preloaded') }}
+  # Nightly, unlike PRELOADED: it is the only run that signs in the way an MCP
+  # client does, so a regression in the OAuth path has to show up the next
+  # morning. Otherwise the dispatch input or the `run-oauth` label.
+  OAUTH: >-
+    ${{ github.event_name == 'schedule'
+        || github.event.inputs.oauth_arm == 'true'
+        || contains(github.event.pull_request.labels.*.name, 'run-oauth') }}
 
 
 # ubuntu-24.04, not ubuntu-latest, in every job. GitHub moves ubuntu-latest to
@@ -1165,6 +1176,25 @@ jobs:
             pid_preloaded=$!
           fi
 
+          # Sixth arm, nightly: the same primary model on the same fixtures,
+          # signed in over OAuth instead of with the access key. The runner
+          # discovers the authorization server from the 401 challenge, posts
+          # the consent with the key's own principal (setup-lane registers the
+          # public client mcp-evals-probe), and sends the bearer token on every
+          # request, refreshing it as it expires. Same user as the key arm, so
+          # a difference between the two is the auth path, not the model.
+          # Exit 4: the lane has no OAuth discovery or no client, nothing ran;
+          # the runner says why in a warning and a SKIP row.
+          pid_oauth=""
+          if [ "${OAUTH}" = "true" ]; then
+            python -m eval.runner --auth oauth "${args[@]}" \
+              --output "results/eval-oauth.json" \
+              --summary-row "results/rows/7-admin-oauth.json" \
+              --suite-label "admin · OAuth" \
+              --advisory > oauth.log 2>&1 &
+            pid_oauth=$!
+          fi
+
           # `|| rc=$?`, not `wait; rc=$?`. GitHub runs this with `bash -e`, which
           # the script's own `set -uo pipefail` does not undo, and a failing
           # `wait` is a simple command — so the shell exited *at the wait* the
@@ -1181,6 +1211,8 @@ jobs:
           rc_coreprompt=0; wait "${pid_coreprompt}" || rc_coreprompt=$?
           rc_preloaded=0
           if [ -n "${pid_preloaded}" ]; then wait "${pid_preloaded}" || rc_preloaded=$?; fi
+          rc_oauth=0
+          if [ -n "${pid_oauth}" ]; then wait "${pid_oauth}" || rc_oauth=$?; fi
 
           echo "::group::admin · primary (exit ${rc_primary})"
           cat primary.log
@@ -1197,6 +1229,11 @@ jobs:
           if [ -n "${pid_preloaded}" ]; then
             echo "::group::admin · preloaded ?toolsets=all (advisory, exit ${rc_preloaded})"
             cat preloaded.log
+            echo "::endgroup::"
+          fi
+          if [ -n "${pid_oauth}" ]; then
+            echo "::group::admin · OAuth (advisory, exit ${rc_oauth})"
+            cat oauth.log
             echo "::endgroup::"
           fi
 
@@ -1222,6 +1259,14 @@ jobs:
           if [ "${rc_noprompt}" -eq 3 ]; then crashed+=("admin · no context prompt"); fi
           if [ "${rc_coreprompt}" -eq 3 ]; then crashed+=("admin · core prompt only"); fi
           if [ "${rc_preloaded}" -eq 3 ]; then crashed+=("admin · preloaded"); fi
+          # A failed OAuth sign-in on a lane that advertises OAuth is exit 3 too.
+          if [ "${rc_oauth}" -eq 3 ]; then crashed+=("admin · OAuth"); fi
+          # Exit 4 is a skip, and it must be visible: the runner's warning naming
+          # the cause plus a SKIP row, never an arm that silently graded nothing.
+          # A skip that left no row is treated as the crash it is.
+          if [ "${rc_oauth}" -eq 4 ] && [ ! -s results/rows/7-admin-oauth.json ]; then
+            crashed+=("admin · OAuth (skipped without a summary row)")
+          fi
           if [ "${#crashed[@]}" -gt 0 ]; then
             listed=$(printf '%s; ' "${crashed[@]}")
             echo "::error::eval run(s) crashed before producing a verdict: ${listed%; } (see the logs above)."
