@@ -71,6 +71,8 @@ class Principal:
     expect: Expect
     # A user is held to its ACL role; an integration here is flagged `admin`.
     user: bool = False
+    # The Admin API action that saves this principal's MCP allowlist.
+    allowlist_path: str = ""
 
 
 class AdminApi:
@@ -174,7 +176,9 @@ def _integration(
     created.add(f"/api/integration/{integration_id}")
     if allowlist is not None:
         api.call("POST", f"/api/_action/integration/{integration_id}/mcp-allowlist", {"allowlist": allowlist})
-    return Principal(label, access_key, secret_key, expect)
+    return Principal(
+        label, access_key, secret_key, expect, allowlist_path=f"/api/_action/integration/{integration_id}/mcp-allowlist"
+    )
 
 
 def _locale_id(api: AdminApi) -> str:
@@ -219,7 +223,9 @@ def _user(
     )
     if allowlist is not None:
         api.call("POST", f"/api/_action/user/{user_id}/mcp-allowlist", {"allowlist": allowlist})
-    return Principal(label, access_key, secret_key, expect, user=True)
+    return Principal(
+        label, access_key, secret_key, expect, user=True, allowlist_path=f"/api/_action/user/{user_id}/mcp-allowlist"
+    )
 
 
 @contextmanager
