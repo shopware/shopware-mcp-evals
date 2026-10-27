@@ -588,10 +588,16 @@ runs:
         # this core knows the key: Symfony rejects an unknown one, and a lane
         # pinned before shopware/shopware#19969 would fail to boot. Handshake
         # clients see no difference, which is what `auto` promises.
+        #
+        # Not env-scoped: setup-shopware exports APP_ENV=dev into every later
+        # step, and a real variable beats .env.local, so the server does not
+        # necessarily run the env the test/ directory is for. A copy under
+        # config/packages/test was ignored on the first CI run.
         if grep -qs "'protocol_era'" \
           src/Core/Framework/DependencyInjection/Configuration.php \
           vendor/shopware/core/Framework/DependencyInjection/Configuration.php; then
-          cat > config/packages/test/z-eval-mcp-protocol-era-auto.yaml <<'YAML'
+          echo "::notice::This core has shopware.mcp.protocol_era; serving both eras on admin and store_api."
+          cat > config/packages/z-eval-mcp-protocol-era-auto.yaml <<'YAML'
         shopware:
             mcp:
                 protocol_era:
