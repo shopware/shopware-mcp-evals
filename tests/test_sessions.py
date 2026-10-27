@@ -22,6 +22,9 @@ from mcp_client import Endpoint
 from tests.stubs import const, raiser
 
 NS = "ns1"
+# Below POOL_LIFETIME, or a key that got the pool's lifetime would pass the TTL check.
+SESSION_TTL = 1800
+POOL_LIFETIME = 3600
 
 
 class FakeRedis:
@@ -66,7 +69,7 @@ class FakeLane:
         store: FakeRedis,
         *,
         redis: bool = True,
-        ttl: int = 3600,
+        ttl: int = SESSION_TTL,
         one_namespace: bool = False,
         local_copy: bool = False,
     ) -> None:
@@ -121,7 +124,7 @@ def run(monkeypatch: pytest.MonkeyPatch, **config: bool | int) -> tuple[Reporter
     store = FakeRedis()
     install(monkeypatch, FakeLane(store, **config))  # pyright: ignore[reportArgumentType]
     rep = Reporter("http://lane", color=False)
-    S.run(rep, store, ttl=3600)
+    S.run(rep, store, ttl=SESSION_TTL)
     return rep, store
 
 
@@ -150,6 +153,12 @@ def test_the_file_store_fails_the_first_check_and_names_the_cause(monkeypatch: p
 
 def test_a_session_without_its_ttl_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     rep, _ = run(monkeypatch, ttl=-1)
+
+    assert failed(rep) == ["admin: session key TTL", "store_api: session key TTL"]
+
+
+def test_a_session_with_the_pools_lifetime_instead_of_its_ttl_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep, _ = run(monkeypatch, ttl=POOL_LIFETIME)
 
     assert failed(rep) == ["admin: session key TTL", "store_api: session key TTL"]
 

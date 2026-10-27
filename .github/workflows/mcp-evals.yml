@@ -699,10 +699,6 @@ jobs:
   # when the container compiles. No model, no credit, so it gates — including
   # the nightly auto-merge: eval/reconcile.py requires it, so a trunk commit
   # that breaks Redis-backed sessions is not pinned unseen.
-  #
-  # Behind `static`, on the commit static resolved, for the same reason as the
-  # eval jobs: a verdict that decides whether commit A is pinned has to be
-  # measured on A. It runs alongside them, so the wait costs no wall clock.
   # ---------------------------------------------------------------------------
   session-store:
     name: Redis session store
@@ -710,6 +706,8 @@ jobs:
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      MCP_EVALS_REDIS_URL: redis://localhost:6379/5
     services:
       redis:
         image: redis:alpine
@@ -740,7 +738,7 @@ jobs:
           plugins_pat: ${{ secrets.PLUGINS_PAT }}
           github_token: ${{ github.token }}
           session_store: redis
-          redis_url: redis://localhost:6379/5
+          redis_url: ${{ env.MCP_EVALS_REDIS_URL }}
 
       - name: Where the sessions live
         env:
@@ -749,7 +747,8 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
         run: |
-          python -m functional.sessions --redis-url redis://localhost:6379/5 \
+          # Must match the ttl in setup-lane's Redis recipe.
+          python -m functional.sessions --session-ttl 1800 \
             || { echo "::error::MCP sessions are not (only) in Redis — see the step log for which check failed"; exit 1; }
 
       # Everything else still has to hold on the other store: toolset
