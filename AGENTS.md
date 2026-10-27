@@ -605,8 +605,10 @@ only, the UCP tools are deferred behind the `ucp` toolset and
 default surface by claiming core's reserved `discovery` group;
 `functional/runner.py` still accepts that layout by reading which UCP tools sit
 in no toolset, and shopware/shopware#20725 (open) is the core guard against it.
-The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
-provisioned state; tool *selection* for those is covered by the LLM eval.
+After the discovery mechanics, the functional suite runs the UCP buyer journey
+as a guest and as a customer, against the state it provisions (`run_store()` in
+`functional/runner.py`). Tool *selection* for those tools is covered by the
+LLM eval.
 
 Where the tools come from:
 
