@@ -995,13 +995,8 @@ def test_a_failed_call_keeps_its_reason_when_the_model_then_gives_up(monkeypatch
 def test_an_in_band_failure_records_what_the_server_said(
     stub_exec: ExecStub,
 ) -> None:
-    """The admin merchant/entity tools answer a rejected call with `isError:
-    false` and `{"success": false, ...}` in the body, so `mcp_call_error` is
-    empty and only the in-band message exists. Recording just the transport
-    error is why every failed attempt in the last CI run read `tool_error` with
-    an empty `error` — the five gating failures had to be diagnosed from the
-    fixture text rather than from what the server actually replied.
-    """
+    """A rejected call without `isError` and with `{"success": false, ...}` in
+    the body records the in-band message as the attempt's error."""
     replies, _ = stub_exec
     replies[TOOL] = '{"success": false, "error": {"type": "internal", "message": "Cart is empty."}}'
 
