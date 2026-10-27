@@ -18,13 +18,14 @@ MCP Server v2 notes:
   - Deferred tools stay callable directly; the allowlist is the call boundary.
 """
 
+import base64
 import hashlib
 import json
 import os
 import re
 import secrets
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import quote
@@ -54,8 +55,8 @@ ALL_TOOLSETS = "all"
 # The handshake-era protocol revisions mcp/sdk 0.8 serves
 # (`Mcp\Schema\Enum\ProtocolVersion`), oldest first. They are ISO dates, so
 # string comparison orders them. The stateless 2026-07-28 revision is not here on
-# purpose: it has no initialize and no session, and this client speaks neither
-# (see `mcp_init`).
+# purpose: it has no initialize and no session, so an `Endpoint` cannot open a
+# session on it. Its requests go through `mcp_stateless` instead.
 PROTOCOL_REVISIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 
 # What every session asks for unless told otherwise: the newest handshake
@@ -437,10 +438,10 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
             # A handshake-era revision on purpose (PROTOCOL_REVISIONS). Everything
             # here is scoped by Mcp-Session-Id — toolset enablement persists per
             # session, and discovery-mode eval opens a fresh one per fixture.
-            # mcp/sdk 0.8 serves the stateless 2026-07-28 revision, which mints no
-            # session id; Shopware keeps both endpoints on the handshake era with
-            # Builder::withoutModernEra(). If that ever goes, this is where it
-            # shows up first, as the error below.
+            # A server serving the stateless 2026-07-28 revision as well
+            # (`shopware.mcp.protocol_era: auto`) still answers a handshake
+            # revision with a session. One that served only the stateless
+            # revision would show up here first, as the error below.
             "protocolVersion": endpoint.protocol_version,
             "capabilities": {},
             "clientInfo": {"name": "mcp-eval", "version": "2.0"},
@@ -451,8 +452,8 @@ def mcp_init(endpoint: Endpoint = ADMIN) -> tuple[str, str]:
     if not session_id:
         raise RuntimeError(
             "No Mcp-Session-Id in response headers. The server answered initialize without a session; "
-            "if it now serves the stateless 2026-07-28 revision (no Builder::withoutModernEra()), "
-            "per-session toolset enablement no longer works and this suite has to change with it."
+            "if it now serves only the stateless 2026-07-28 revision, per-session toolset enablement "
+            "no longer works and this suite has to change with it."
         )
     result = _as_object(_response(resp, 1).get("result"))
     # A reply without protocolVersion is refused like a mismatch: the spec
@@ -479,28 +480,181 @@ def mcp_close(session_id: str, endpoint: Endpoint = ADMIN) -> int:
 
 STATELESS_REVISION = "2026-07-28"
 
+# The 2026-07-28 wire format (SEP-2575, SEP-2243), as mcp/sdk 0.9 enforces it:
+# every request carries its revision and the client's capabilities in
+# `params._meta`, and repeats its method, and its subject where it has one, in
+# headers an intermediary can route on without reading the body.
+META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
+META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+METHOD_HEADER = "Mcp-Method"
+NAME_HEADER = "Mcp-Name"
 
-def mcp_discover(endpoint: Endpoint = ADMIN) -> tuple[int, object]:
-    """`server/discover` the stateless way: no `initialize`, no session, the
-    revision in the request's own `_meta` and header. Returns the HTTP status and
-    the decoded body rather than raising, because today's answer is a refusal and
-    the refusal is what the caller reads."""
+# The member of `params` each method names its subject with (`McpHeader::nameFor`).
+_SUBJECT = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+
+
+def header_value(value: str) -> str:
+    """`value` as a header can carry it: unchanged when it is printable ASCII
+    without surrounding whitespace, else wrapped as `=?base64?...?=`."""
+    wrapped = value.startswith("=?base64?") and value.endswith("?=")
+    if value == value.strip() and not wrapped and re.fullmatch(r"[\x20-\x7e]*", value):
+        return value
+    return "=?base64?" + base64.b64encode(value.encode()).decode() + "?="
+
+
+def stateless_request(method: str, params: JsonObject, rpc_id: int = 1) -> tuple[dict[str, str], JsonObject]:
+    """The headers and body of one request on the stateless revision.
+
+    No session header and no `initialize` before it: the request alone says
+    who is asking, in which revision and with which capabilities. An empty
+    capabilities object is a client that declares none, which the spec allows.
+    """
     headers = {
-        **endpoint.auth_headers,
         "Accept": "application/json, text/event-stream",
         PROTOCOL_HEADER: STATELESS_REVISION,
+        METHOD_HEADER: method,
     }
-    body = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "server/discover",
-        "params": {"_meta": {"io.modelcontextprotocol/protocolVersion": STATELESS_REVISION}},
+    subject = params.get(_SUBJECT.get(method, ""))
+    if isinstance(subject, str):
+        headers[NAME_HEADER] = header_value(subject)
+    meta: JsonObject = {
+        META_PROTOCOL_VERSION: STATELESS_REVISION,
+        META_CLIENT_CAPABILITIES: {},
+        META_CLIENT_INFO: {"name": "mcp-eval", "version": "2.0"},
     }
-    resp = requests.post(endpoint.url, headers=headers, json=body, timeout=30)
+    body: JsonObject = {"jsonrpc": "2.0", "id": rpc_id, "method": method, "params": {**params, "_meta": meta}}
+    return headers, body
+
+
+class StatelessReply:
+    """What one stateless request got back: the status, the JSON-RPC message
+    and the session id, if the server minted one it should not have."""
+
+    def __init__(self, status: int, message: McpResponse, session_id: str | None) -> None:
+        self.status: int = status
+        self.message: McpResponse = message
+        self.session_id: str | None = session_id
+
+    @property
+    def result(self) -> JsonObject:
+        return _as_object(self.message.get("result"))
+
+    @property
+    def error(self) -> JsonObject:
+        return _as_object(self.message.get("error"))
+
+
+def mcp_stateless(method: str, params: JsonObject | None = None, endpoint: Endpoint = ADMIN) -> StatelessReply:
+    """One request on the stateless revision. Never raises on an HTTP error:
+    refusals are what several checks read, so the status is part of the reply."""
+    headers, body = stateless_request(method, params or {})
+    headers = {**endpoint.auth_headers, **ucp.call_headers(str((params or {}).get("name", ""))), **headers}
+    resp: requests.Response | None = None
+    for attempt in range(THROTTLE_MAX_RETRIES + 1):
+        resp = requests.post(endpoint.url, headers=headers, json=body, timeout=60)  # pyright: ignore[reportArgumentType]
+        if resp.status_code == 429 and attempt < THROTTLE_MAX_RETRIES:
+            time.sleep(_throttle_wait(resp))
+            continue
+        break
+    assert resp is not None
     try:
-        return resp.status_code, _response(resp, 1)
+        message = _response(resp, 1)
     except ValueError:
-        return resp.status_code, resp.text
+        message = cast(McpResponse, cast(object, {"error": {"message": " ".join(resp.text.split())[:200]}}))
+    return StatelessReply(resp.status_code, message, resp.headers.get("Mcp-Session-Id"))
+
+
+def mcp_discover(endpoint: Endpoint = ADMIN) -> tuple[int, object]:
+    """`server/discover` the stateless way. Returns the HTTP status and the
+    decoded body rather than raising, because a server that does not serve the
+    revision refuses it, and the refusal is what the caller reads."""
+    reply = mcp_stateless("server/discover", {}, endpoint)
+    return reply.status, reply.message
+
+
+def mcp_stateless_tools(endpoint: Endpoint = ADMIN) -> list[str]:
+    """Every tool name a stateless `tools/list` advertises, following nextCursor."""
+    names: list[str] = []
+    cursor: object = None
+    for _ in range(50):  # runaway guard
+        reply = mcp_stateless("tools/list", {} if cursor is None else {"cursor": cursor}, endpoint)
+        if reply.error:
+            raise RuntimeError(f"stateless tools/list failed (HTTP {reply.status}): {reply.error.get('message')}")
+        for tool in cast(list[object], reply.result.get("tools") or []):
+            names.append(str(_as_object(tool).get("name", "")))
+        cursor = reply.result.get("nextCursor")
+        if not cursor:
+            return names
+    raise RuntimeError("stateless tools/list pagination did not terminate within 50 pages")
+
+
+class ListenFrame:
+    """One message of a `subscriptions/listen` stream and when it arrived,
+    in seconds after the request was sent."""
+
+    def __init__(self, at: float, message: JsonObject) -> None:
+        self.at: float = at
+        self.message: JsonObject = message
+
+    @property
+    def method(self) -> str:
+        return str(self.message.get("method", ""))
+
+
+ACKNOWLEDGED = "notifications/subscriptions/acknowledged"
+
+
+def mcp_listen(
+    endpoint: Endpoint,
+    notifications: JsonObject,
+    *,
+    on_ack: Callable[[], None] | None = None,
+    until: Callable[[ListenFrame], bool] | None = None,
+    timeout_s: float = 40.0,
+) -> list[ListenFrame]:
+    """Open a `subscriptions/listen` stream and collect what it carries.
+
+    `on_ack` runs once the acknowledgement has arrived, which is the moment a
+    change can first be observed: the stream's cursor starts there. Reading
+    stops when `until` accepts a frame, when the server closes the stream, or
+    after `timeout_s`.
+    """
+    headers, body = stateless_request("subscriptions/listen", {"notifications": notifications}, rpc_id=1)
+    headers = {**endpoint.auth_headers, **headers}
+    frames: list[ListenFrame] = []
+    started = time.monotonic()
+    with requests.post(
+        endpoint.url,
+        headers=headers,
+        json=body,  # pyright: ignore[reportArgumentType]
+        stream=True,
+        timeout=timeout_s,
+    ) as resp:
+        if "text/event-stream" not in resp.headers.get("Content-Type", ""):
+            message = _as_object(_json_body(resp)) if resp.text else {}
+            return [ListenFrame(time.monotonic() - started, {"status": resp.status_code, **message})]
+        acked = False
+        for line in resp.iter_lines(decode_unicode=True):
+            if time.monotonic() - started > timeout_s:
+                break
+            if not isinstance(line, str) or not line.startswith("data:"):
+                continue
+            try:
+                message = _as_object(cast(object, json.loads(line[5:])))
+            except ValueError:
+                continue
+            if not message:  # a keep-alive tick, which the server writes to notice a dropped peer
+                continue
+            frame = ListenFrame(time.monotonic() - started, message)
+            frames.append(frame)
+            if frame.method == ACKNOWLEDGED and not acked:
+                acked = True
+                if on_ack is not None:
+                    on_ack()
+            if until is not None and until(frame):
+                break
+    return frames
 
 
 def mcp_call(session_id: str, tool: str, arguments: JsonObject, endpoint: Endpoint = ADMIN) -> McpResponse:

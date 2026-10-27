@@ -2,8 +2,9 @@
 
 Status: in progress since 2026-10-20. Phases 0 to 3 are built and pass on the
 local trunk lane at shopware 7a96f6086ec (2026-10-20). Phase 4 is built and has
-not run in CI yet. Phase 5's probe is built; its scenarios wait on
-shopware/shopware#19969. Phase 6 items 2 and 3 are done; item 1 is open.
+not run in CI yet. Phase 5 items 1 to 3 are built and run against a lane with
+`shopware.mcp.protocol_era: auto` (2026-10-27); item 4 is open. Phase 6 items 2
+and 3 are done; item 1 is open.
 
 ## Why
 
@@ -20,8 +21,8 @@ most of what core shipped in October:
 - Under the `v6.8.0.0` feature flag the first text block loses the
   `{"success", "data", "_meta"}` envelope. About twenty parse sites in this repo
   read exactly those keys, so the suite goes blind the day 6.8 flips.
-- The stateless 2026-07-28 era is switched off in core
-  (`McpServerBuilderCompilerPass::pinHandshakeEra()`), but the ADR
+- The stateless 2026-07-28 era is off in core by default
+  (`shopware.mcp.protocol_era: legacy`), and the ADR
   `adr/2026-09-24-mcp-stateless-era-degradation-policy.md` says it is switched on
   only "once … covered by tests that run the same scenarios against both eras".
   This repo is the natural place for those scenarios.
@@ -31,7 +32,7 @@ most of what core shipped in October:
 | Axis | Values | What changes | How to select it |
 |---|---|---|---|
 | **Protocol revision** (handshake era) | 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25 | Below 2025-06-18: text only, pointer as `_meta.resourceUri` in the text. From 2025-06-18: `structuredContent` (wrapped as `{"result": …}` when not an object), `resource_link` block | `protocolVersion` in `initialize` |
-| **Era** | handshake, stateless (2026-07-28) | No `initialize`, no `Mcp-Session-Id`, `server/discover`, per-request `_meta`, `DELETE` → 405, `toolset-enable` errors and points to `?toolsets=`, notifications via `subscriptions/listen` | Client transport; server must stop calling `withoutModernEra()` (shopware/shopware#19969) |
+| **Era** | handshake, stateless (2026-07-28) | No `initialize`, no `Mcp-Session-Id`, `server/discover`, per-request `_meta` and `Mcp-Method` / `Mcp-Name` headers, `DELETE` → 400, session tools hidden or answering `isError` with a pointer to `?toolsets=`, notifications via `subscriptions/listen` | Client transport (`mcp_stateless`); the lane serves it next to the handshake era with `shopware.mcp.protocol_era: auto` (shopware/shopware#19969) |
 | **Result format** | legacy envelope (6.7), spec-only (`v6.8.0.0`) | First text block holds plain data or the error message; summary, details and `_meta` become separate blocks and move into result `_meta` with a `shopware/` prefix | Feature flag on the lane (`V6_8_0_0=1`) |
 
 The revisions only differ at one boundary today (2025-06-18). Testing every
@@ -215,17 +216,18 @@ revisions. And the deactivated SwagMcpMerchantTools left its checks failing
 with "Tool not found"; `--deactivated-plugins` now records them as skips naming
 the deactivation.
 
-## Phase 5: stateless era (2026-07-28) (probe built)
+## Phase 5: stateless era (2026-07-28) (items 1 to 3 built)
 
-Core does not serve it yet, so this starts as a probe and grows into the ADR's
-scenario list once shopware/shopware#19969 lands.
+Core serves it next to the handshake era when `shopware.mcp.protocol_era` is
+`auto` for an endpoint (shopware/shopware#19969). The default is `legacy`, so a
+lane without that config still gets the probe skip.
 
 1. **Client transport.** A stateless request path in `mcp_client.py`: no
    `initialize`, no session header, protocol version and client capabilities in
    each request's `_meta`, `server/discover` for capabilities. Build it against
    the 2026-07-28 spec text and the SDK's own client, not from the ADR summary.
 2. **Probe.** On every run, try `server/discover`. While core still pins the
-   handshake era, record a skip naming `withoutModernEra()` and #19969, the same
+   handshake era, record a skip naming `shopware.mcp.protocol_era` and #19969, the same
    pattern as `PINNED_REPORTED_DISABLED`. When the probe starts answering, the
    skip turns into failures until the scenarios below exist, so nobody forgets.
 3. **Scenarios from the ADR, both eras:**
@@ -235,7 +237,8 @@ scenario list once shopware/shopware#19969 lands.
      is not offered at all.
    - A large result is offloaded with a signed pointer, readable by the next
      request from the same principal.
-   - `DELETE` answers 405.
+   - `DELETE` without a session answers 400 on a server that serves both eras
+     (the amended ADR; 405 would also refuse the handshake era's DELETE).
    - `tools/list_changed` arrives through `subscriptions/listen` after an app
      change. Last, because it needs a stream and holds a worker.
 4. **Eval arm `--era stateless`.** Advisory and opt-in. The model connects with
@@ -243,13 +246,41 @@ scenario list once shopware/shopware#19969 lands.
    clients get. Compare it with the `preloaded` arm, which is the closest
    handshake equivalent.
 
-Items 1 and 2 are built as `mcp_discover` and `functional/stateless.py`, on both
-endpoints in every functional run. Trunk answers HTTP 400 with JSON-RPC -32022
-`Unsupported protocol version`, `requested: 2026-07-28` and the four handshake
-revisions as `supported`. The skip requires `requested` to be the stateless
-revision, so a refusal for any other reason fails instead. A second check fails
-when `supported` stops listing a revision this suite tests. Items 3 and 4 wait
-on #19969.
+Items 1 to 3 are built. `mcp_stateless` sends each request with the protocol
+version and an empty client capabilities object in `_meta`, plus `Mcp-Method`
+and, for `tools/call`, `prompts/get` and `resources/read`, `Mcp-Name` (base64
+wrapped when it is not plain ASCII). mcp/sdk 0.9 refuses a request without
+either: -32602 for the missing capabilities, -32020 for the missing header.
+`mcp_listen` reads the `subscriptions/listen` stream frame by frame.
+
+`functional/stateless.py` still classifies `server/discover` first. A -32022
+refusal that names the stateless revision is the skip above; an answer runs the
+scenarios on that endpoint:
+
+- No call mints an `Mcp-Session-Id`.
+- `shopware-toolset-enable` and `shopware-toolsets-list` are either not listed
+  or answer `isError` naming `?toolsets=`.
+- `?toolsets=` gives the same tool list on both eras, minus the session tools,
+  and the same list again on a second request.
+- `DELETE` answers 400.
+- Admin only: a large result is offloaded with a signed pointer that the next
+  stateless request and a handshake session of the same principal can read.
+  The Store endpoint has no tool that large, so it records a skip.
+- `subscriptions/listen` acknowledges within 5 s and closes before 30 s, PHP's
+  default `max_execution_time`. On Admin, with `--provision-principals`, a
+  second principal's allowlist edit after the acknowledgement has to arrive as
+  `notifications/tools/list_changed` within 5 s. Without provisioning, or on
+  the Store endpoint, which publishes no list changes, that check is a skip.
+
+Measured on the local trunk lane with the MCP Iteration 4 integration branch
+(shopware 65b9907d050, 2026-10-27): Admin passes every scenario, the list
+change arrives about 0.5 s after the edit and the stream closes at 25 s. The
+Store endpoint fails two checks: its listen stream is buffered, so the
+acknowledgement only arrives when it closes, and it closes at 30.1 s, because
+the Store endpoint keeps the SDK's 30 s subscription lifetime. Both are core
+findings, not suite problems.
+
+Item 4 is open.
 
 ## Phase 6: move the eval to the revision real clients use (default moved)
 
@@ -294,12 +325,12 @@ the eval should hand the model `structuredContent` rather than the text.
 | 2 large results | 0, 1 | small | gating |
 | 3 error codes | 0 | none | changes grading; verify on one run first |
 | 4 next-major lane | 0 | one extra lane, nightly | advisory |
-| 5 stateless era | 0, core #19969 | small until scenarios exist | probe skip, then gating |
+| 5 stateless era | 0, core #19969 | one 30 s listen stream per endpoint | probe skip on `legacy`, gating on `auto` |
 | 6 eval default | 0, 1, open question answered | one paired eval run | unchanged gates |
 
 Phases 0 to 3 can ship in two or three PRs within the current workflow. Phase 4
-adds a job. Phase 5 waits on core and should be built together with whoever
-lands #19969, because its scenarios are that PR's acceptance test.
+adds a job. Phase 5's scenarios are the acceptance test of #19969 and its
+follow-ups, so they gate once the lane runs with `protocol_era: auto`.
 
 ## Open questions
 
