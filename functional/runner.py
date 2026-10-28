@@ -35,7 +35,7 @@ import requests
 
 import lane
 import ucp
-from eval.assertions import is_not_found
+from eval.assertions import classify_error
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
 from functional.checks import (
     CORE_CHECKS,
@@ -164,7 +164,7 @@ def assert_tool(
     text = outcome.text
     # A JSON-RPC error, `isError`, and an in-band `{"success": false}` alike.
     failure = outcome.failure
-    if failure and not_found_passes and is_not_found(failure):
+    if failure and not_found_passes and classify_error(outcome)[0] == "not_found":
         rep.tool_pass(tool, label, f"not found, as expected for a phantom id: {failure[:80]}")
     elif failure and harness_error and (why := harness_error(failure)):
         rep.check_fail(label, f"{why}: {failure}")

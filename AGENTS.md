@@ -432,7 +432,7 @@ python -m functional.runner --endpoint store --allow-mutations
 >   one reads the checkout and stops, most likely because it offers no
 >   "express" option to pick (unverified; see its `notes`).
 >
-> `first_try_rate` 53% against a 82% pass rate is the ritual's footprint:
+> `first_try_rate` 53% against an 82% pass rate is the ritual's footprint:
 > recovery is doing the work the first call should.
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
