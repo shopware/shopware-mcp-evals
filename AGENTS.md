@@ -210,7 +210,12 @@ sequenceDiagram
   `structuredContent` and `resource_link` blocks from protocol 2025-06-18 on
   (shopware/shopware#20948, #20951). `read_result` knows all of them, and
   `ToolOutcome.envelope` is the legacy-shaped view the fixtures' `data.…` paths
-  are written against.
+  are written against. Since shopware/shopware#21844 the revision picks the
+  format: legacy before 2025-06-18, spec from it on, with the model's metadata
+  in `structuredContent._meta`. `format_for` and `format_verdict` in
+  `mcp_result` are the era helpers; the verdict tells a server since the PR
+  from an older one that sends one format on every revision, which keeps its
+  older rules (the pinned `shopware.sha` is one).
 - **The protocol revision is an endpoint property.** Sessions ask for
   `DEFAULT_PROTOCOL_VERSION` (2025-11-25 since a paired run read 99% on both it
   and 2024-11-05, where the gates were first measured);
@@ -541,6 +546,11 @@ write. An integration that shows "All" while toolsets-list answers `[]` most
 likely still has `NULL` stored, and the admin JS rendering it is a build from
 before #20600.
 
+Since shopware/shopware#21862 `/api/_mcp` also takes an OAuth access token bound
+to it by audience. The suite still authenticates with access keys;
+`functional/oauth.py` walks the OAuth flow on its own, with the public client
+setup-lane writes to `config/packages/zzz-mcp-evals-oauth.yaml`.
+
 The session must be initialized with `method: initialize` before any other call;
 the `Mcp-Session-Id` response header scopes toolset enablement.
 
@@ -556,7 +566,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/journeys.py` | The UCP buyer journey, run twice: as a guest (whose order read must be **refused** — the spec requires authentication, and the sales-channel key is shared) and as a logged-in customer (whose order read must succeed). Commits, behind `--allow-mutations` |
 | `functional/sessions.py` | Where the sessions live: Redis keys, TTL, endpoint separation, `DELETE`, and refusal once the key is gone. Needs `--redis-url` / `MCP_EVALS_REDIS_URL`, skips without. See [Session store](#session-store) |
 | `functional/resp.py` | The four Redis commands `sessions.py` needs, over a socket, so the check needs no Redis client library |
-| `functional/principals.py` | The allowlist matrix's throwaway integrations, users and ACL role, created through the Admin API with the suite's own key (`client_credentials` accepts `SWUA…`) and deleted in a `finally`. Behind `--provision-principals` |
+| `functional/principals.py` | The allowlist matrix's throwaway integrations, users and ACL role, created through the Admin API with the suite's own key (`client_credentials` accepts `SWUA…`) and deleted in a `finally`. Also the two password users `functional/oauth.py` signs in as (`sign_in_users`). Behind `--provision-principals` |
 | `functional/customer.py` | Logs the customer half in, registering the account through the Store API on first use. The context token is only in the `sw-context-token` header, and `storefrontUrl` has to come from the sales channel — both cost a debugging round to find |
 | `eval/preflight.py` | One read-only call, no model, ~1s. Fails with a named cause and, on the Store endpoint, probes the UCP profile URI — the one cause the error text can never name |
 | `eval/registry_check.py` | The server's declared ACL privileges against `toolclass`. Two independent sources disagreeing is what catches a tool wrongly filed as READ_ONLY, which would then be executed for real |
@@ -575,8 +585,9 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
-| `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
-| `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. A server older than the renderer is one skip naming the PR |
+| `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision: since shopware/shopware#21844 a `resource_link` and no `resourceUri` from 2025-06-18, the legacy text before, and `resources/read` answering in the format of the call that stored it. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
+| `functional/oauth.py` | The MCP OAuth flow (shopware/shopware#21862) with no browser: the 401 challenge, both metadata documents, authorization code with PKCE for the public client setup-lane registers (`mcp-evals-probe`), the consent decision posted with the suite's admin token, an audience-bound token that works on `/api/_mcp` and is refused on the rest of the Admin API, refresh, and the refusals. With `--provision-principals` also two non-admin users signing in with a password: one allowlisted three tools sees exactly them plus the meta-tools and is refused another, one without an allowlist sees the meta-tools only. It also asks the system health check and the Administration snippets, which check a token themselves, to refuse an MCP-bound one, and that a consent which dropped the resource is refused with a hint naming the consent page. A shop without discovery is one skip naming the PR |
+| `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. Since shopware/shopware#21844: the text format follows the revision, and the model's metadata (`dryRun` of a dry-run upsert, `total`) is in the text's `_meta` on every revision and in `structuredContent._meta` from 2025-06-18. A server older than the renderer is one skip naming the PR, one older than #21844 one more |
 | `functional/stateless.py` | The stateless 2026-07-28 revision: `server/discover` with no session. Today a skip naming `withoutModernEra()` and shopware/shopware#19969, accepted only when the refusal names that revision. An answer fails until the scenarios in the plan exist |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
 | `eval/drift.py` | Names what moved between two snapshots; drives the drift summary and the nightly reconciliation PR |
