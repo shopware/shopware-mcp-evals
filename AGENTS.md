@@ -198,7 +198,9 @@ sequenceDiagram
   naming the PR (`PINNED_REPORTED_DISABLED`) until `shopware.sha` carries the
   fix, then the tolerance goes.
 - **A tool can fail while the transport succeeds.** UCP reports every failure as
-  HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
+  HTTP 200 without a JSON-RPC error. The result carries `{"success": false}` in
+  its text, or `isError: true` with plain text from shopware/shopware#20948 on.
+  Anything
   asserting on a tool call must read it through `mcp_result.read_result` and its
   `failure`, or it is blind to the entire Store failure mode — which is exactly
   what happened to 27 admin checks for months.
