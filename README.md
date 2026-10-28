@@ -554,6 +554,12 @@ credit while most changes here are already covered by `lint.yml`. Adding the lab
 starts a run, and it re-runs on each subsequent push for as long as the label
 stays. An unlabelled PR shows the job as skipped.
 
+The **`run-functional`** label, or the `functional_only` dispatch input, runs the
+same lanes and functional suites but skips the Admin and Store evals, so no LLM
+credit is spent. It fits changes that cannot move tool selection, for example a
+protocol fix in core dispatched with `shopware_ref`. With both labels on a PR,
+`run-evals` wins.
+
 `eval_provider` is a dropdown with one option, `openai`, because that is the only
 provider with a key in this repo. The runner supports `--provider anthropic` and
 the workflow already passes `ANTHROPIC_API_KEY` through, so enabling it is adding

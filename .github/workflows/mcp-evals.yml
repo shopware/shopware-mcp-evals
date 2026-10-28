@@ -9,6 +9,11 @@ on:
   # `labeled` starts a run the moment the label goes on; `synchronize` re-runs it
   # on later pushes for as long as the label stays. Remove the label to stop.
   #
+  # `run-functional` is the same without the LLM: the lanes and the functional
+  # suites run, the Admin and Store evals are skipped. For changes that cannot
+  # move tool selection, such as a protocol fix in core or a functional check
+  # here. `run-evals` wins when both are set.
+  #
   # WHO CAN SPEND MONEY HERE — the label IS the access control, and it is GitHub's,
   # not ours:
   #
@@ -88,6 +93,10 @@ on:
         default: 'false'
       next_major:
         description: 'Also build a lane with the V6_8_0_0 feature flag and run the functional suite on it at the newest protocol revision. Advisory. Plugins that do not boot under the flag are deactivated and named. Nightly does this anyway.'
+        required: false
+        default: 'false'
+      functional_only:
+        description: 'Skip the Admin and Store evals: build the lanes and run only the functional suites, with no LLM credit spent. For changes that cannot move tool selection.'
         required: false
         default: 'false'
 
@@ -206,18 +215,18 @@ jobs:
   # runner second and no secrets.
   fork-notice:
     name: Why this PR cannot run the evals
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && contains(github.event.pull_request.labels.*.name, 'run-evals') }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && (contains(github.event.pull_request.labels.*.name, 'run-evals') || contains(github.event.pull_request.labels.*.name, 'run-functional')) }}
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "::warning::The \`run-evals\` label is set, but this PR comes from a fork and the evals cannot run for it. GitHub does not pass repository secrets to a \`pull_request\` run from a fork, so OPENAI_API_KEY would be empty and the suite would fail after installing Shopware — minutes spent for no measurement.%0ATo evaluate these changes, push the branch to this repository and label that PR, or run the workflow manually from the Actions tab against a branch here."
+          echo "::warning::The \`run-evals\` or \`run-functional\` label is set, but this PR comes from a fork and the evals cannot run for it. GitHub does not pass repository secrets to a \`pull_request\` run from a fork, so OPENAI_API_KEY would be empty and the suite would fail after installing Shopware — minutes spent for no measurement.%0ATo evaluate these changes, push the branch to this repository and label that PR, or run the workflow manually from the Actions tab against a branch here."
 
   static:
     name: Static checks
     # Three conditions, and the fork one is not paranoia: a labelled fork PR gets
     # no secrets, so it can only burn a full Shopware install and then fail on an
     # empty API key. `fork-notice` above explains that in the run itself.
-    if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'run-evals') && !github.event.pull_request.head.repo.fork) }}
+    if: ${{ github.event_name != 'pull_request' || ((contains(github.event.pull_request.labels.*.name, 'run-evals') || contains(github.event.pull_request.labels.*.name, 'run-functional')) && !github.event.pull_request.head.repo.fork) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -988,7 +997,11 @@ jobs:
     # `!= 'skipped'` rather than `== 'success'`: static failing on an admin check
     # is still worth the eval's diagnosis, and the store steps inside it can no
     # longer fail the job at all.
-    if: ${{ !cancelled() && needs.static.result != 'skipped' }}
+    #
+    # Skipped for a functional-only run: the `functional_only` input, or a PR
+    # that static let in through `run-functional` alone. The report already
+    # treats a skipped admin eval as "no eval ran".
+    if: ${{ !cancelled() && needs.static.result != 'skipped' && github.event.inputs.functional_only != 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1309,7 +1322,8 @@ jobs:
     needs: static
     # store_ready is the preflight's verdict: if one UCP tool cannot run, none of
     # the 45 fixtures measure anything, and the run is pure spend.
-    if: ${{ !cancelled() && needs.static.result != 'skipped' && needs.static.outputs.store_plugin_ok == 'true' && needs.static.outputs.store_ready == 'true' }}
+    # Skipped for a functional-only run, like admin-eval.
+    if: ${{ !cancelled() && needs.static.result != 'skipped' && needs.static.outputs.store_plugin_ok == 'true' && needs.static.outputs.store_ready == 'true' && github.event.inputs.functional_only != 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:

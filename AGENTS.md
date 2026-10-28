@@ -146,6 +146,11 @@ sequenceDiagram
   credit, and most changes here are covered by `lint.yml`. Add the label to start
   a run; it then re-runs on each push while the label stays. Unlabelled PRs show
   the job as skipped rather than not appearing at all.
+- **Functional only, without the LLM.** The **`run-functional`** label on a PR, or
+  the `functional_only` dispatch input, builds the lanes and runs the functional
+  suites but skips the Admin and Store evals. Use it for changes that cannot move
+  tool selection, such as a protocol fix in core tested via `shopware_ref`.
+  `run-evals` wins when a PR carries both labels.
 - **`openai` is the only working provider.** The repo has `OPENAI_API_KEY` and
   `PLUGINS_PAT`, no `ANTHROPIC_API_KEY`, so `eval_provider` is a one-option
   dropdown. The runner itself supports `--provider anthropic` and the workflow
