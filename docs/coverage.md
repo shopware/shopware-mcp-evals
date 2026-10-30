@@ -20,8 +20,11 @@ The **how** column starts with one of three words.
   take.
 
 `tests/test_coverage_doc.py` fails when an `auto` row names a job the workflow
-does not have, or a label fragment that no longer appears in `functional/`.
-Rename a check and this page has to follow.
+does not have, or a label fragment that no longer appears in `functional/`. It
+also fails when a named job does not run the module that holds the label, on an
+endpoint the row lists, with `--provision-principals` when the row's principal
+is one the suite creates. Rename a check, or drop it from a job, and this page
+has to follow.
 
 ## The axes
 
@@ -51,10 +54,11 @@ Unless a row says otherwise, the principal is the administrator user key.
 | A fresh session advertises the meta-tools and no deferred tool. | endpoint: admin, Store. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "no deferred tools leak into the default surface", "advertised by default" | Store on Redis: `session-store` runs the admin suite only. |
 | `?toolsets=` pins one toolset, several, or all before the first `tools/list`, ignores an unknown name, and leaves a plain connect alone. | endpoint: admin, Store. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "advertises exactly that toolset", "advertises the union", "ignores the unknown name", "a plain connect is unaffected by the feature" | Store on Redis: as above. |
 | toolsets-list reports the pinned toolsets as enabled. | endpoint: admin, Store. revision: all three. | auto: `static`, `revisions`, `next-major`, `session-store`. "toolsets-list reports pinned toolsets as enabled" | Recorded as a skip naming https://github.com/shopware/shopware/pull/21772 while `shopware.sha` predates it. |
-| toolsets-list returns well-formed toolsets that cover the deferred tools. | endpoint: admin, Store. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "every toolset has name/title/description/tools and enabled=false", "toolsets cover", "toolsets defer" | |
-| toolset-enable grows `tools/list` and answers `listChanged`. | endpoint: admin, Store. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "succeeds with _meta.listChanged=true", "advertised after enabling" | |
+| toolsets-list returns well-formed toolsets that cover the deferred tools. | endpoint: admin. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "every toolset has name/title/description/tools and enabled=false", "toolsets cover" | Store: only checks that toolsets-list returns a toolset and that one defers a tool. Title, description, the `tools` shape and `enabled=false` are not validated there, so this is a gap. |
+| toolsets-list on Store returns a toolset that defers a tool. | endpoint: Store. revision: all three. format: both. | auto: `static`, `revisions`, `next-major`. "toolsets defer" | Redis: `session-store` runs the admin suite only. |
+| toolset-enable grows `tools/list` and answers `listChanged`. | endpoint: admin, Store. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "succeeds with _meta.listChanged=true", "advertised after enabling" | Store on Redis: `session-store` runs the admin suite only. |
 | The default tools stay advertised after an enable. | endpoint: admin. revision: all three. | auto: `static`, `revisions`, `next-major`, `session-store`. "default tools still advertised after enable" | Store: not checked. The Store run turns the check off and no reason is recorded, so this is a gap. |
-| Enablement does not leak into another session. | endpoint: admin, Store. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "toolset enablement does not leak across sessions" | |
+| Enablement does not leak into another session. | endpoint: admin, Store. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "toolset enablement does not leak across sessions" | Store on Redis: `session-store` runs the admin suite only. |
 | tool-search finds a deferred tool and caps its results at 20. | endpoint: admin. revision: all three. | auto: `static`, `revisions`, `next-major`, `session-store`. "tool-search finds deferred shopware-media-upload", "tool-search caps maxResults at 20" | Store: its tools are few, so it checks ranking instead, in the next row. |
 | tool-search ranks a UCP cart tool in its first five results for a cart query. | endpoint: Store. revision: all three. | auto: `static`, `revisions`, `next-major`. "ranks a UCP cart tool for a cart query" | |
 | Enabling every toolset in one session reaches the whole catalogue. | endpoint: admin. revision: all three. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "activated all", "all tools reachable" | Store: the journey enables every toolset and then calls the tools, which proves more. |
