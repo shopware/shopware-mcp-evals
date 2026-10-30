@@ -26,9 +26,11 @@ runs:
         # The entries the UCP tools log on failure, in the job log as well, so
         # the cause can be read without downloading anything.
         # UcpMcpToolContext::failure() logs 'UCP MCP tool call failed.' with the
-        # exception in its context before answering `internal`.
-        if grep -rh "UCP MCP tool call failed" "${dest}/shopware" > "${dest}/ucp-tool-failures.log" 2>/dev/null; then
-          echo "=== UCP tool failures (from the application log) ==="
+        # exception in its context before answering `internal`. Under
+        # `symfony server:start` the entry can land in the Symfony CLI's log
+        # rather than var/log, so both copied trees are searched.
+        if grep -rh "UCP MCP tool call failed" "${dest}/shopware" "${dest}/symfony-cli" > "${dest}/ucp-tool-failures.log" 2>/dev/null; then
+          echo "=== UCP tool failures (from the application and Symfony CLI logs) ==="
           cut -c1-4000 "${dest}/ucp-tool-failures.log"
         else
           rm -f "${dest}/ucp-tool-failures.log"
