@@ -692,6 +692,12 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-static
+
       - name: Dump symfony server logs on failure
         if: failure()
         uses: ./.github/actions/dump-logs
@@ -785,6 +791,12 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-session-store
+
       - name: Dump symfony server logs on failure
         if: failure()
         uses: ./.github/actions/dump-logs
@@ -875,6 +887,12 @@ jobs:
           path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-revisions-${{ matrix.revision }}
 
       - name: Dump symfony server logs on failure
         if: failure()
@@ -978,6 +996,12 @@ jobs:
           path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-next-major
 
       - name: Dump symfony server logs on failure
         if: failure()
@@ -1301,6 +1325,12 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-admin-eval
+
       - name: Dump symfony server logs on failure
         if: failure()
         uses: ./.github/actions/dump-logs
@@ -1403,6 +1433,12 @@ jobs:
           path: results/
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-store-eval
 
       - name: Dump symfony server logs on failure
         if: failure()

@@ -1,0 +1,46 @@
+name: Keep the lane's logs
+description: >
+  Upload the lane's application and server logs as an artifact, on every run.
+  dump-logs only runs when the job fails, and an advisory suite keeps its job
+  green, so a failure there left nothing to read. The Store suite's `internal:
+  The tool call failed unexpectedly.` is a flattened error: the plugin logs the
+  exception before flattening it, so this log is where its class, message and
+  file are.
+
+inputs:
+  name:
+    description: Artifact name. Unique per job, e.g. `logs-next-major`.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Collect logs
+      shell: bash
+      run: |
+        dest="${RUNNER_TEMP}/lane-logs"
+        mkdir -p "${dest}/shopware" "${dest}/symfony-cli"
+        cp "${GITHUB_WORKSPACE}"/shopware/var/log/*.log "${dest}/shopware/" 2>/dev/null || true
+        cp -r "${HOME}/.config/symfony-cli/log/." "${dest}/symfony-cli/" 2>/dev/null || true
+
+        # The entries the UCP tools log on failure, in the job log as well, so
+        # the cause can be read without downloading anything.
+        # UcpMcpToolContext::failure() logs 'UCP MCP tool call failed.' with the
+        # exception in its context before answering `internal`. Under
+        # `symfony server:start` the entry can land in the Symfony CLI's log
+        # rather than var/log, so both copied trees are searched.
+        if grep -rh "UCP MCP tool call failed" "${dest}/shopware" "${dest}/symfony-cli" > "${dest}/ucp-tool-failures.log" 2>/dev/null; then
+          echo "=== UCP tool failures (from the application and Symfony CLI logs) ==="
+          cut -c1-4000 "${dest}/ucp-tool-failures.log"
+        else
+          rm -f "${dest}/ucp-tool-failures.log"
+        fi
+        du -sh "${dest}" || true
+
+    - name: Upload logs
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ runner.temp }}/lane-logs
+        retention-days: 7
+        if-no-files-found: ignore
