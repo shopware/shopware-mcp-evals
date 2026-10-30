@@ -200,8 +200,11 @@ Manual rows to start with:
 ## Part 2: the summary
 
 1. **A functional table**, one row per lane (default, 2024-11-05, 2025-06-18,
-   6.8, Redis), split by who calls (admin key suite, allowlist principals,
-   OAuth): passed, new failures, expected failures (with the issue), skipped.
+   6.8, Redis), split by endpoint (admin, Store) and by who calls (admin key
+   suite, allowlist principals, OAuth): passed, new failures, expected failures
+   (with the issue), skipped. The admin and Store reports are separate check
+   sets, so they never share a row. On Store the suite's caller is the
+   sales-channel key, the only principal that endpoint has.
 2. **Differs by lane**: checks whose result changes between lanes. One line
    when every lane agrees.
 3. **`lane` and `principal` on each functional record and report**, added
