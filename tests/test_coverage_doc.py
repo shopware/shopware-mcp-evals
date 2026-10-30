@@ -61,13 +61,13 @@ def parse_rows(text: str) -> list[Row]:
     return rows
 
 
-def label_literals(directory: Path) -> set[str]:
-    """Every string constant in the modules, docstrings left out.
+def literals_by_module(directory: Path) -> dict[str, set[str]]:
+    """Every string constant in each module, docstrings left out, by module name.
 
     f-strings count by their literal parts, which is all a runtime-built label
     has in the source. A docstring is prose about a check, not a check.
     """
-    found: set[str] = set()
+    found: dict[str, set[str]] = {}
     for path in directory.glob("*.py"):
         tree = ast.parse(path.read_text())
         docstrings = {
@@ -77,17 +77,101 @@ def label_literals(directory: Path) -> set[str]:
             and node.body
             and isinstance(node.body[0], ast.Expr)
         }
-        found.update(
+        found[path.stem] = {
             node.value
             for node in ast.walk(tree)
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
-        )
+        }
+    return found
+
+
+def label_literals(directory: Path) -> set[str]:
+    found: set[str] = set()
+    for literals in literals_by_module(directory).values():
+        found |= literals
     return found
 
 
 def workflow_jobs(text: str) -> set[str]:
+    return set(_job_blocks(text))
+
+
+def _job_blocks(text: str) -> dict[str, str]:
     body = text.split("\njobs:\n", 1)[1]
-    return set(re.findall(r"^  ([a-z][a-z0-9-]*):$", body, re.MULTILINE))
+    parts = re.split(r"^  ([a-z][a-z0-9-]*):$", body, flags=re.MULTILINE)
+    return dict(zip(parts[1::2], parts[2::2], strict=True))
+
+
+@dataclass(frozen=True)
+class Invocation:
+    """One `python -m functional.<module>` a job runs."""
+
+    module: str
+    endpoint: str | None
+    provisions: bool
+
+
+def job_invocations(text: str) -> dict[str, list[Invocation]]:
+    """What each workflow job runs of the functional suite.
+
+    A continued shell line is joined first, so a flag on the next line still
+    belongs to its command. The runner's endpoint defaults to admin, as its
+    `--endpoint` does.
+    """
+    out: dict[str, list[Invocation]] = {}
+    for job, block in _job_blocks(text).items():
+        joined = re.sub(r"\\\n\s*", " ", block)
+        calls: list[Invocation] = []
+        for command in re.finditer(r"python -m functional\.(\w+)([^\n]*)", joined):
+            module, rest = command.group(1), command.group(2)
+            match = re.search(r"--endpoint (\w+)", rest)
+            endpoint = match.group(1) if match else ("admin" if module == "runner" else None)
+            calls.append(Invocation(module, endpoint, "--provision-principals" in rest))
+        out[job] = calls
+    return out
+
+
+# A module run on its own entry point rather than through the runner.
+STANDALONE = {"sessions", "resp"}
+# A principal the suite has to create: only --provision-principals does.
+PROVISIONED = ("integration", "non-admin", "OAuth user")
+
+
+def _axis(axes: str, name: str) -> str:
+    match = re.search(rf"{name}: ([^.]*)\.", axes)
+    return match.group(1) if match else ""
+
+
+def unmet(row: Row, invocations: dict[str, list[Invocation]], modules: dict[str, set[str]]) -> list[str]:
+    """Why a job the row names would not run the checks the row names.
+
+    A label is attributed to the modules whose literals contain it. A label from
+    a standalone module needs that module run; any other needs the runner, on an
+    endpoint the row lists (admin when it lists none), and with principals
+    provisioned when the row's principal is one the suite has to create.
+    """
+    endpoints = {e.strip().lower() for e in _axis(row.axes, "endpoint").split(",") if e.strip()} or {"admin"}
+    provision = any(word in _axis(row.axes, "principal") for word in PROVISIONED)
+    problems: list[str] = []
+    for job in row.jobs:
+        calls = invocations.get(job, [])
+        for label in row.labels:
+            owners = {name for name, literals in modules.items() if any(label in literal for literal in literals)}
+
+            def runs(owner: str, calls: list[Invocation] = calls) -> bool:
+                if owner in STANDALONE:
+                    return any(call.module == owner for call in calls)
+                return any(
+                    call.module == "runner" and call.endpoint in endpoints and (call.provisions or not provision)
+                    for call in calls
+                )
+
+            if not any(runs(owner) for owner in owners):
+                need = f"functional.runner on {'/'.join(sorted(endpoints))}"
+                if provision:
+                    need += " with --provision-principals"
+                problems.append(f"`{job}` does not run {label!r} (needs {need}, or the module holding it)")
+    return problems
 
 
 ROWS = parse_rows(DOC.read_text())
@@ -133,6 +217,59 @@ def test_literals_skip_docstrings_and_keep_fstring_parts(tmp_path: Path) -> None
     assert not {"a docstring label", "another docstring label"} & literals
 
 
+SAMPLE_WORKFLOW = """name: x
+jobs:
+  full:
+    steps:
+      - run: python -m functional.runner --endpoint admin \\
+          --protocol-version 2025-11-25 --provision-principals
+      - run: python -m functional.runner --endpoint store --advisory
+  bare:
+    steps:
+      - run: python -m functional.runner
+      - run: python -m functional.sessions --redis-url redis://x
+"""
+SAMPLE_MODULES = {"runner": {"a runner label"}, "principals": {"an integration label"}, "sessions": {"a redis label"}}
+
+
+def test_job_invocations_join_continued_lines_and_default_the_endpoint() -> None:
+    calls = job_invocations(SAMPLE_WORKFLOW)
+    assert calls["full"] == [Invocation("runner", "admin", True), Invocation("runner", "store", False)]
+    assert calls["bare"] == [Invocation("runner", "admin", False), Invocation("sessions", None, False)]
+
+
+def _row(axes: str, how: str) -> Row:
+    return Row("a case", axes, how, "")
+
+
+def test_a_job_has_to_run_the_endpoint_the_row_names() -> None:
+    calls = job_invocations(SAMPLE_WORKFLOW)
+    row = _row("endpoint: Store.", 'auto: `full`, `bare`. "a runner label"')
+    assert unmet(row, calls, SAMPLE_MODULES) == [
+        "`bare` does not run 'a runner label' (needs functional.runner on store, or the module holding it)"
+    ]
+
+
+def test_a_created_principal_needs_the_job_to_provision_it() -> None:
+    calls = job_invocations(SAMPLE_WORKFLOW)
+    row = _row("principal: integration, flagged admin.", 'auto: `full`, `bare`. "an integration label"')
+    assert unmet(row, calls, SAMPLE_MODULES) == [
+        "`bare` does not run 'an integration label' "
+        "(needs functional.runner on admin with --provision-principals, or the module holding it)"
+    ]
+
+
+def test_a_standalone_module_needs_its_own_command() -> None:
+    calls = job_invocations(SAMPLE_WORKFLOW)
+    row = _row("endpoint: admin, Store. store: Redis.", 'auto: `full`, `bare`. "a redis label"')
+    assert [problem.split(" does")[0] for problem in unmet(row, calls, SAMPLE_MODULES)] == ["`full`"]
+
+
+def test_a_label_no_module_holds_runs_nowhere() -> None:
+    row = _row("endpoint: admin.", 'auto: `full`. "gone"')
+    assert unmet(row, job_invocations(SAMPLE_WORKFLOW), SAMPLE_MODULES)
+
+
 def test_the_document_has_rows_of_every_kind() -> None:
     assert len(AUTO) >= 20
     assert {row.kind for row in ROWS} == set(HOW)
@@ -159,6 +296,17 @@ def test_every_auto_row_names_a_label_the_suite_still_has() -> None:
         assert row.labels, f"{row.case}: an auto row names at least one check label"
         for label in row.labels:
             assert any(label in literal for literal in literals), f"{row.case}: no check label contains {label!r}"
+
+
+def test_every_job_a_row_names_runs_its_checks() -> None:
+    """A job existing and a label existing are two facts. This ties them: the
+    job runs the module the label is in, on the endpoint and with the principals
+    the row claims, so a job that drops the runner or --provision-principals
+    takes its rows with it."""
+    calls = job_invocations(WORKFLOW.read_text())
+    modules = literals_by_module(ROOT / "functional")
+    problems = [f"{row.case}: {problem}" for row in AUTO for problem in unmet(row, calls, modules)]
+    assert not problems, "\n".join(problems)
 
 
 def test_every_gap_says_why() -> None:
