@@ -1,8 +1,13 @@
 # Plan: one coverage matrix, and a summary that renders it
 
-Status: planned 2026-10-22, nothing built. Waits for
-https://github.com/shopware/shopware-mcp-evals/pull/103 (OAuth), which changes
-the reporter and the principals code both parts read.
+Status: planned 2026-10-22. Every part has a PR open, none merged:
+
+- Part 1, `docs/coverage.md` and its drift test: https://github.com/shopware/shopware-mcp-evals/pull/106. Waits for this plan.
+- The principal gaps and the two OAuth probes as checks: https://github.com/shopware/shopware-mcp-evals/pull/108. Stacked on
+  the OAuth flow, https://github.com/shopware/shopware-mcp-evals/pull/103, and waits for it.
+- Part 2, the summary by lane and caller: https://github.com/shopware/shopware-mcp-evals/pull/110. Stacked on https://github.com/shopware/shopware-mcp-evals/pull/108.
+- The OAuth and principal rows in `docs/coverage.md`: https://github.com/shopware/shopware-mcp-evals/pull/109. Waits for
+  https://github.com/shopware/shopware-mcp-evals/pull/106 and https://github.com/shopware/shopware-mcp-evals/pull/108.
 
 ## Why
 
@@ -28,7 +33,7 @@ ever checked by hand.
 | **Principal** | admin user key (`SWUA…`), integration (`SWIA…`), non-admin user key, OAuth user token | The whole suite runs as the admin user key. Integrations and non-admin users run the allowlist surfaces (`--provision-principals`). OAuth runs its flow plus initialize, `tools/list` and `tools/call` (https://github.com/shopware/shopware-mcp-evals/pull/103) |
 | **Protocol revision** (client side) | 2024-11-05, 2025-06-18, 2025-11-25 | Functional suite on each; LLM eval on 2025-11-25 |
 | **Era** (client side) | handshake, stateless 2026-07-28 | Stateless is one skip until https://github.com/shopware/shopware/issues/19969 |
-| **Result format** | 6.7 envelope, 6.8 spec format | 6.8 on next-major only |
+| **Result format** | legacy envelope, MCP format | Picked by protocol revision since https://github.com/shopware/shopware/pull/21844: the envelope below 2025-06-18, the MCP format from it on. The `V6_8_0_0` flag does not decide it |
 | **Endpoint, session store** | admin or store; file or Redis | Both endpoints; Redis on `session-store` |
 
 Most axes are independent, so the matrix is not a cross-product. Each test case
@@ -61,7 +66,8 @@ tool-search, `resources/list`, `prompts/list` and a direct call. The OAuth
 users differ only in how their credential is made. They sign in with a
 password, consent, and hand the MCP-bound token to the same checks.
 
-The five gaps this section used to list are closed by #108:
+Five gaps are left in this table until https://github.com/shopware/shopware-mcp-evals/pull/108 merges, and that PR closes
+them:
 
 1. A non-admin user with "All capabilities", on a key and on a token. The
    snapshot rule, that a tool added after the save is not granted, is stated in
@@ -100,23 +106,29 @@ The client axes:
 | credential flow | access key; OAuth with a loopback redirect, an https redirect, or a private-use scheme (`cursor://`) |
 | revision and era | handshake at 2024-11-05, 2025-06-18 or 2025-11-25; stateless 2026-07-28 |
 | tool loading | reads `tools/list` once and needs `?toolsets=` (claude.ai); or enables toolsets during the session |
-| what it hands the model | the text block, `structuredContent`, or both (protocol-eras Phase 6 item 1, open) |
+| what it hands the model | the text block, `structuredContent`, or both (protocol-eras Phase 6 item 1, half answered) |
 
 Real clients as rows, so a gap reads as "Cursor is not tested" rather than as a
 missing axis value:
 
-| client | credential | redirect | revision | tool loading | how tested |
-|---|---|---|---|---|---|
-| a script with access keys (this suite) | key | none | all three handshake revisions | enables toolsets | auto: every functional job |
-| Claude Code | OAuth, or headers | loopback, any port on `127.0.0.1` | tries stateless 2026-07-28 first, falls back to 2025-11-25 | enables toolsets; follows `list_changed` | auto: the flow with the probe client; manual: the real client against `localhost:8100` |
-| claude.ai | OAuth | https | unknown | reads once, needs `?toolsets=` | auto: `?toolsets=` through discovery and an https redirect, with a probe client; manual: the real client |
-| Cursor | OAuth | `cursor://` | unknown | unknown | auto: a `cursor://` redirect, with a probe client; manual: the real client |
-| ChatGPT connector | OAuth | https | unknown | unknown | none |
-| MCP Inspector | either | loopback | 2025-11-25 | enables toolsets | none |
+| client | credential | redirect | revision | tool loading | hands the model | how tested |
+|---|---|---|---|---|---|---|
+| a script with access keys (this suite) | key | none | all three handshake revisions | enables toolsets | the text blocks | auto: every functional job |
+| Claude Code | OAuth, or headers | loopback, any port on `127.0.0.1` | tries stateless 2026-07-28 first, falls back to 2025-11-25 | enables toolsets; follows `list_changed` | `structuredContent`, text dropped | auto: the flow with the probe client; manual: the real client against `localhost:8100` |
+| claude.ai | OAuth | https | unknown | reads once, needs `?toolsets=` | unknown | auto: `?toolsets=` through discovery and an https redirect, with a probe client; manual: the real client |
+| Cursor | OAuth | `cursor://` | unknown | unknown | the text blocks only | auto: a `cursor://` redirect, with a probe client; manual: the real client |
+| ChatGPT connector | OAuth | https | unknown | unknown | both | none |
+| MCP Inspector | either | loopback | 2025-11-25 | enables toolsets | no model | none |
 
-Every "unknown" is the same open question as protocol-eras Phase 6 item 1:
-which revision each client negotiates and what it passes to the model. Finding
-out fills the column and decides which combinations need automation.
+The "hands the model" column for Claude Code and the Inspector is measured
+below. For Cursor and ChatGPT it is taken from the client table in
+https://github.com/shopware/shopware/pull/21844, which names its sources and
+also covers VS Code Copilot and Codex CLI (`structuredContent`) and Gemini CLI
+(the text blocks).
+
+The remaining "unknown" cells are what is left of protocol-eras Phase 6 item 1:
+which revision each client negotiates, and what claude.ai passes to the model.
+Finding out fills the columns and decides which combinations need automation.
 
 ### Measured: Claude Code and MCP Inspector
 
@@ -153,11 +165,18 @@ What follows from it:
   meets the server's tools through two layers of discovery.
 
 Not yet measured: claude.ai and Cursor, which need a person, and the ChatGPT
-connector. The `{"success", "data", "_meta"}` envelope was not seen either: at
-this commit, with `V6_8_0_0` off, the lane already sent the text as plain data
-followed by a `_meta` block. Why it does is not yet understood, and it decides
-whether the eval's text and Claude Code's `structuredContent` differ by more than
-where `_meta` sits.
+connector. The `{"success", "data", "_meta"}` envelope was not seen either, and
+the measured commit explains why.
+[`a6a7d5c6d4d`](https://github.com/shopware/shopware/commit/a6a7d5c6d4ddc8127f461088ec4d1a1a0d7501e8)
+picks the result format by protocol revision, and
+[`McpToolResultCapabilities::forRevision()`](https://github.com/shopware/shopware/blob/71b350a48e668783df24b3fd35e6f5490f98f1c4/src/Core/Framework/Mcp/Result/McpToolResultCapabilities.php#L35-L47)
+gives the MCP format to every revision from 2025-06-18 on. The `V6_8_0_0` flag
+does not decide it at `71b350a48e6`. A session at 2025-11-25 therefore gets the
+plain data and a `_meta` block, and the envelope only reaches revisions before
+2025-06-18. Since https://github.com/shopware/shopware/pull/21844 the
+`structuredContent` is the same data with that `_meta` block under a `_meta`
+key, so the eval's text and Claude Code's copy differ only in where `_meta`
+sits.
 
 The era column is mostly empty for now. Every client above uses the handshake
 era, and stateless is switched off in core until
@@ -210,9 +229,9 @@ Manual rows to start with:
 3. **`lane` and `principal` on each functional record and report**, added
    fields under the report-schema rule in AGENTS.md, so the summary does not
    guess from labels.
-4. **`report` needs the protocol jobs.** They are required checks anyway.
-   next-major stays out of `needs`, as AGENTS.md asks, and its row reads "not
-   finished" instead of disappearing.
+4. **`report` needs the protocol jobs**, so a red revision job fails `report`
+   and its report is always collected. next-major stays out of `needs`, as
+   AGENTS.md asks, and its row reads "not finished" instead of disappearing.
 5. **One line naming the LLM eval's revision.**
 
 ## OAuth: round 3 and what it left open
@@ -234,7 +253,7 @@ runs. No test users, roles or integrations were left on the lane. The new
 commits needed no rebuild: the only Administration change was two consent-page
 snippets, with no composer or migration changes.
 
-Probed by hand, and checks since https://github.com/shopware/shopware-mcp-evals/pull/108:
+Probed by hand. https://github.com/shopware/shopware-mcp-evals/pull/108 turns both into checks:
 
 - **The `?toolsets=` query is kept in the resource metadata.** For
   `/api/_mcp?toolsets=all` and `?toolsets=order,media`, the challenge's
@@ -256,19 +275,20 @@ Not tested at all:
   It matters for app script tools only, and the lane has none. Needs an app
   with a script tool on the lane, or stays a `none` row with that reason.
 
-The "How to check" section of https://github.com/shopware/shopware-mcp-evals/pull/103 still names `c39f200ba50`; the numbers
-are the same at `71b350a48e6`.
-
 ## Order
 
-1. https://github.com/shopware/shopware-mcp-evals/pull/103 merges.
-2. `docs/coverage.md` with its drift test:
-   https://github.com/shopware/shopware-mcp-evals/pull/106.
-3. The principal gaps and the two OAuth probes as checks, with the redirect
-   client in setup-lane: https://github.com/shopware/shopware-mcp-evals/pull/108,
-   stacked on #103 and run against `integration/mcp-iteration-4`.
-4. The OAuth and principal rows in `docs/coverage.md`:
-   https://github.com/shopware/shopware-mcp-evals/pull/109, which needs both
-   #106 and #108.
-5. The summary rework, one PR. Its "who calls" split follows the principal
-   table above.
+1. This plan: https://github.com/shopware/shopware-mcp-evals/pull/104. Targets `main`. It says which parts are built only
+   through the PRs above, so it can merge first.
+2. The OAuth flow: https://github.com/shopware/shopware-mcp-evals/pull/103. Targets `main`.
+3. `docs/coverage.md` with its drift test: https://github.com/shopware/shopware-mcp-evals/pull/106. Targets `main`, cites
+   this plan, and does not depend on the OAuth flow.
+4. The principal gaps and the two OAuth probes as checks, with the redirect
+   client in setup-lane: https://github.com/shopware/shopware-mcp-evals/pull/108. Stacked on https://github.com/shopware/shopware-mcp-evals/pull/103 and run against
+   `integration/mcp-iteration-4`.
+5. The summary rework: https://github.com/shopware/shopware-mcp-evals/pull/110. Stacked on https://github.com/shopware/shopware-mcp-evals/pull/108. Its "who calls" split
+   follows the principal table above.
+6. The OAuth and principal rows in `docs/coverage.md`: https://github.com/shopware/shopware-mcp-evals/pull/109. Needs both
+   https://github.com/shopware/shopware-mcp-evals/pull/106 and https://github.com/shopware/shopware-mcp-evals/pull/108.
+
+When https://github.com/shopware/shopware-mcp-evals/pull/108 merges, the five gaps above read as closed, and the status at the
+top loses each PR as it lands.
