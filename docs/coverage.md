@@ -38,12 +38,16 @@ has to follow.
 
 The jobs that run the functional suite, and where they sit on those axes:
 
-| job | revision | result format | session store | principals | Store suite |
-|---|---|---|---|---|---|
-| `static` | 2025-11-25 | 6.7 | file | admin key, plus the allowlist matrix | yes, advisory |
-| `revisions` | 2024-11-05 and 2025-06-18, one job each | 6.7 | file | admin key, plus the allowlist matrix | yes, advisory |
-| `next-major` | 2025-11-25 | 6.8 (`V6_8_0_0`) | file | admin key, plus the allowlist matrix | yes, advisory |
-| `session-store` | 2025-11-25 | 6.7 | Redis | admin key only | no |
+| job | runs | can fail the run | revision | result format | session store | principals | Store suite |
+|---|---|---|---|---|---|---|---|
+| `static` | every eval run: nightly, `workflow_dispatch`, a PR with `run-evals` | yes, through the admin suite | 2025-11-25 | 6.7 | file | admin key, plus the allowlist matrix | yes, advisory |
+| `revisions` | every eval run, after `static` | yes, through the admin suite | 2024-11-05 and 2025-06-18, one job each | 6.7 | file | admin key, plus the allowlist matrix | yes, advisory |
+| `next-major` | nightly, the `next_major` input, or a PR with `run-next-major` | no: the job is `continue-on-error`, and both suites run with `--advisory` | 2025-11-25 | 6.8 (`V6_8_0_0`) | file | admin key, plus the allowlist matrix | yes, advisory |
+| `session-store` | every eval run, after `static` | yes, through both of its steps | 2025-11-25 | 6.7 | Redis | admin key only | no |
+
+Every "format: both" below rests on `next-major` for its 6.8 half. So a 6.8
+regression fails no run: it shows up as a warning on the nightly, or on a PR
+that asks for the job.
 
 Unless a row says otherwise, the principal is the administrator user key.
 
@@ -69,7 +73,7 @@ Unless a row says otherwise, the principal is the administrator user key.
 
 | test case | axes | how | why not |
 |---|---|---|---|
-| Every admin tool in the check table answers a minimal call, dry-run where it mutates, and the result is asserted. | endpoint: admin. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "shopware-entity-search", "shopware-media-upload" | Other principals: the allowlist matrix calls one probe tool per principal, not the table. |
+| Every admin tool in the check table answers a minimal call, dry-run where it mutates, and the result is asserted. | endpoint: admin. revision: all three. format: both. store: both. | auto: `static`, `revisions`, `next-major`, `session-store`. "(product, limit 1)", "(product by ID)" | Other principals: the allowlist matrix calls one probe tool per principal, not the table. |
 
 ## Who calls: the allowlist matrix
 
