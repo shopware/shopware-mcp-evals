@@ -49,6 +49,7 @@ from functional.checks import (
 from functional.customer import CustomerUnavailable, provision
 from functional.journeys import ORDER_GET, Persona, run_second_order, run_ucp_journey
 from functional.large_results import NO_STORE_OFFLOAD, verify_large_results
+from functional.oauth import verify_oauth_flow
 from functional.principals import (
     PROBE_ARGS,
     PROBE_TOOL,
@@ -1266,7 +1267,8 @@ COMPARED_ONCE = (
 
 def compares_revisions(rep: Reporter, endpoint: Endpoint) -> bool:
     """Whether this run owns the checks that span revisions: the result format
-    on each, large results on each, and the stateless probe.
+    on each, large results on each, and the stateless probe. The OAuth flow
+    rides along: it negotiates its own revision, so another run would repeat it.
 
     They open their own sessions on every revision whatever this run negotiated,
     so the CI matrix running the suite once per revision would repeat them in
@@ -1275,7 +1277,7 @@ def compares_revisions(rep: Reporter, endpoint: Endpoint) -> bool:
         return True
     rep.section("Across protocol revisions")
     rep.check_skip(
-        "result format, large results, stateless era",
+        "result format, large results, stateless era, OAuth flow",
         COMPARED_ONCE.format(default=DEFAULT_PROTOCOL_VERSION, revision=endpoint.protocol_version),
     )
     return False
@@ -1293,6 +1295,7 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
         verify_result_format(rep, endpoint, ADMIN_PROBES)
         verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
         verify_stateless_era(rep, endpoint)
+        verify_oauth_flow(rep, endpoint, provision=cast(bool, args.provision_principals))
     run_admin_tools(rep, session, endpoint, args)
 
 
