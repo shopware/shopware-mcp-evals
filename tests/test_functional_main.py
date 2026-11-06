@@ -150,6 +150,40 @@ def test_the_skip_flags_default_to_off(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen["deactivated_plugins"] == []
 
 
+def test_the_app_fixture_is_off_by_default_and_on_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: JsonObject = {}
+
+    def capture(_rep: object, _ep: object, args: argparse.Namespace, _session: str) -> None:
+        seen.update(vars(args))
+
+    monkeypatch.setattr(R, "run_admin", capture)
+
+    run(monkeypatch)
+
+    assert (seen["app_fixture"], seen["app_fixture_host"], seen["app_fixture_bind"]) == (
+        False,
+        "127.0.0.1",
+        "127.0.0.1",
+    )
+
+
+def test_the_app_fixture_flags_reach_the_admin_suite(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: JsonObject = {}
+
+    def capture(_rep: object, _ep: object, args: argparse.Namespace, _session: str) -> None:
+        seen.update(vars(args))
+
+    monkeypatch.setattr(R, "run_admin", capture)
+
+    run(monkeypatch, "--app-fixture", "--app-fixture-host", "192.168.127.254", "--app-fixture-bind", "0.0.0.0")
+
+    assert (seen["app_fixture"], seen["app_fixture_host"], seen["app_fixture_bind"]) == (
+        True,
+        "192.168.127.254",
+        "0.0.0.0",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Aborting cleanly
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ import lane
 import ucp
 from eval.assertions import classify_error
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
+from functional.app_capabilities import verify_app_capabilities
 from functional.checks import (
     CORE_CHECKS,
     DEV_CHECKS,
@@ -1294,6 +1295,13 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
         verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
         verify_stateless_era(rep, endpoint)
     run_admin_tools(rep, session, endpoint, args)
+    verify_app_capabilities(
+        rep,
+        endpoint,
+        enabled=cast(bool, args.app_fixture),
+        public_host=cast(str, args.app_fixture_host),
+        bind=cast(str, args.app_fixture_bind),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1495,6 +1503,25 @@ def main() -> int:
             "Create throwaway integrations, non-admin users and an ACL role to check what each "
             "allowlist state reaches; they are deleted afterwards. Admin endpoint only."
         ),
+    )
+    parser.add_argument(
+        "--app-fixture",
+        action="store_true",
+        help=(
+            "Install a throwaway app with an MCP tool, prompt and resource, served from this process, "
+            "check all three, and remove it again. The shop must be allowed to call the app server over "
+            "plain HTTP (see README). Admin endpoint only."
+        ),
+    )
+    parser.add_argument(
+        "--app-fixture-host",
+        default="127.0.0.1",
+        help="Host the shop reaches this process by, for the fixture app's URLs (default 127.0.0.1).",
+    )
+    parser.add_argument(
+        "--app-fixture-bind",
+        default="127.0.0.1",
+        help="Address the fixture app server listens on (default 127.0.0.1).",
     )
     parser.add_argument(
         "--annotate",

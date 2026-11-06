@@ -107,6 +107,59 @@ def test_an_error_names_the_admin_apis_detail(admin: FakeAdmin) -> None:
         _ = api.call("POST", "/api/user", {})
 
 
+class Upload:
+    """What `requests.post` was handed, answering with `status`."""
+
+    def __init__(self, status: int = 204, text: str = "") -> None:
+        self.status: int = status
+        self.text: str = text
+        self.sent: list[tuple[str, dict[str, object]]] = []
+
+    def post(self, url: str, **kwargs: object) -> object:
+        self.sent.append((url, kwargs))
+        return type("R", (), {"status_code": self.status, "text": self.text})()
+
+
+def test_an_upload_sends_the_file_as_multipart_with_the_token(
+    admin: FakeAdmin, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = P.AdminApi(BASE, "k", "s")
+    upload = Upload()
+    monkeypatch.setattr(P.requests, "post", upload.post)
+
+    api.upload("/api/_action/extension/upload", "App.zip", b"zip")
+
+    [(url, kwargs)] = upload.sent
+    assert url == f"{BASE}/api/_action/extension/upload"
+    assert kwargs["files"] == {"file": ("App.zip", b"zip", "application/zip")}
+    assert cast(dict[str, str], kwargs["headers"])["Authorization"] == "Bearer token"
+    assert admin.calls[-1][1] == "/api/oauth/token"  # nothing else went through `request`
+
+
+def test_a_refused_upload_names_the_status_and_body(admin: FakeAdmin, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = P.AdminApi(BASE, "k", "s")
+    monkeypatch.setattr(P.requests, "post", Upload(400, "x" * 500).post)
+
+    with pytest.raises(P.ProvisioningFailed) as raised:
+        api.upload("/api/_action/extension/upload", "App.zip", b"zip")
+
+    assert str(raised.value) == "POST /api/_action/extension/upload answered HTTP 400: " + "x" * 300
+    assert admin.calls
+
+
+def test_an_unreachable_upload_raises(admin: FakeAdmin, monkeypatch: pytest.MonkeyPatch) -> None:
+    api = P.AdminApi(BASE, "k", "s")
+
+    def post(*_args: object, **_kwargs: object) -> object:
+        raise requests.ConnectionError("refused")
+
+    monkeypatch.setattr(P.requests, "post", post)
+
+    with pytest.raises(P.ProvisioningFailed, match="could not be reached: refused"):
+        api.upload("/api/_action/extension/upload", "App.zip", b"zip")
+    assert admin.calls
+
+
 def test_full_selection_is_what_the_all_switch_saves(admin: FakeAdmin) -> None:
     """`fullSelection()`: tool and prompt names, resource URIs."""
     selection = P.full_selection(P.AdminApi(BASE, "k", "s"))

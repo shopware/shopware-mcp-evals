@@ -427,7 +427,11 @@ jobs:
         # as an administrator user, which the allowlist does not apply to, so
         # this is the only coverage the allowlist has. Safe here: the lane dies
         # with the job, and the principals are deleted afterwards anyway.
-        run: python -m functional.runner --endpoint admin --provision-principals
+        # --app-fixture installs a throwaway app with an MCP tool, prompt and
+        # resource, served from the runner process on 127.0.0.1 (setup-lane
+        # allows the shop to call it), and removes it again before the step
+        # ends, so the LLM eval never sees its prompt.
+        run: python -m functional.runner --endpoint admin --provision-principals --app-fixture
 
       # The Store catalogue has never been snapshotted, so everything that
       # derives from one had to be guessed for it: toolclass could not read
