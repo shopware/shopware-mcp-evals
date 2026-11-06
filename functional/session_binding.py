@@ -85,7 +85,8 @@ def check_binding(rep: Reporter, endpoint: Endpoint, other: Principal) -> None:
     )
     status, body = probe(owner_session, intruder)
     if status == 200:
-        rep.check_skip(FOREIGN_CALL, PREDATES_BINDING)
+        for label in LABELS:
+            rep.check_skip(label, PREDATES_BINDING)
         return
     problem = refusal_problem(status, body)
     if problem:

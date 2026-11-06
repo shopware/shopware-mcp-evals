@@ -79,7 +79,7 @@ def test_a_bound_server_passes_every_check(monkeypatch: pytest.MonkeyPatch) -> N
 def test_a_server_without_the_binding_is_the_skip_naming_the_pr(monkeypatch: pytest.MonkeyPatch) -> None:
     rep = run(Lane(bound=False), monkeypatch)
 
-    assert statuses(rep) == {B.FOREIGN_CALL: "skipped"}
+    assert statuses(rep) == dict.fromkeys(B.LABELS, "skipped")
     assert "#21860" in rep.records[0].get("reason", "")
 
 
