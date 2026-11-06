@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The fixture app functional/app_capabilities.py installs for one run and removes again.
+    {{BASE_URL}} and {{SECRET}} are filled in by functional/app_fixture.py:render_app(),
+    because the server it registers with listens on a port picked at run time and the
+    registration secret is minted per run.
+-->
+<manifest xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/shopware/shopware/trunk/src/Core/Framework/App/Manifest/Schema/manifest-3.0.xsd">
+    <meta>
+        <name>McpEvalsFixture</name>
+        <label>MCP evals fixture</label>
+        <description>Installed and removed by the MCP functional suite to check app MCP tools, prompts and resources.</description>
+        <author>shopware AG</author>
+        <copyright>(c) by shopware AG</copyright>
+        <version>1.0.0</version>
+        <license>MIT</license>
+    </meta>
+    <setup>
+        <registrationUrl>{{BASE_URL}}/register</registrationUrl>
+        <secret>{{SECRET}}</secret>
+    </setup>
+</manifest>

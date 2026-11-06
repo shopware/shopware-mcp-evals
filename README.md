@@ -234,6 +234,10 @@ python -m functional.runner --skip-media-upload
 # skip the SwagMcpDevTools assertions (instance without the dev-tools bundle)
 python -m functional.runner --skip-dev-tools
 
+# install a throwaway app and check its MCP tool, prompt and resource
+# (the shop must allow it to be called: see functional/assets/README.md)
+python -m functional.runner --app-fixture
+
 # Store API / UCP endpoint (needs SW_SC_ACCESS_KEY = a sales-channel access key)
 python -m functional.runner --endpoint store
 ```

@@ -33,6 +33,9 @@ def flags(*, skip_media_upload: bool, skip_dev_tools: bool, deactivated: list[st
         skip_dev_tools=skip_dev_tools,
         provision_principals=False,
         deactivated_plugins=deactivated or [],
+        app_fixture=False,
+        app_fixture_host="127.0.0.1",
+        app_fixture_bind="127.0.0.1",
     )
 
 

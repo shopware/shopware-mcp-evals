@@ -335,6 +335,7 @@ python -m functional.runner
 python -m functional.runner --skip-media-upload
 python -m functional.runner --skip-dev-tools
 python -m functional.runner --provision-principals  # CREATES integrations, users, a role (deleted after)
+python -m functional.runner --app-fixture  # INSTALLS a throwaway app (removed after); see functional/assets/README.md
 
 # Layer 2 — LLM eval. Discovery mode only: default surface + agentic meta-tool
 # loop. There was a `baseline` mode (full catalogue, single shot); it was removed
@@ -580,6 +581,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
+| `functional/app_capabilities.py` | An app's MCP tool, prompt and resource end to end: installs `functional/assets/McpEvalsFixture`, checks that `tools/call`, `prompts/get` and `resources/read` return the app's own content, and removes the app in a `finally`. Behind `--app-fixture`. The prompt and resource checks are known failures until the pinned Shopware carries https://github.com/shopware/shopware/pull/22623 |
+| `functional/app_fixture.py` | The fixture app's zip and its server, run in-process on a free port: verifies Shopware's signatures, answers the registration proof, and serves the three capabilities |
 | `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
 | `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. A server older than the renderer is one skip naming the PR |
 | `functional/stateless.py` | The stateless 2026-07-28 revision: `server/discover` with no session. Today a skip naming `withoutModernEra()` and shopware/shopware#19969, accepted only when the refusal names that revision. An answer fails until the scenarios in the plan exist |

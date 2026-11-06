@@ -101,6 +101,20 @@ class AdminApi:
             raise ProvisioningFailed(f"{method} {path} answered HTTP {status}: {'; '.join(errors) or parsed}")
         return parsed
 
+    def upload(self, path: str, filename: str, content: bytes) -> None:
+        """POST one file as multipart field `file`, the way the extension upload takes a zip."""
+        try:
+            response = requests.post(
+                f"{self.base}{path}",
+                headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json"},
+                files={"file": (filename, content, "application/zip")},
+                timeout=TIMEOUT_S,
+            )
+        except requests.RequestException as exc:
+            raise ProvisioningFailed(f"POST {path} could not be reached: {exc}") from exc
+        if response.status_code >= 300:
+            raise ProvisioningFailed(f"POST {path} answered HTTP {response.status_code}: {response.text[:300]}")
+
     def _send(self, method: str, path: str, body: JsonObject | None, token: str) -> tuple[int, JsonObject]:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if token:

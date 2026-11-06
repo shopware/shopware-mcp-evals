@@ -522,6 +522,12 @@ def mcp_read_resource(session_id: str, uri: str, endpoint: Endpoint = ADMIN) -> 
     return _rpc_json("resources/read", {"uri": uri}, session_id, rpc_id=5, endpoint=endpoint)
 
 
+def mcp_get_prompt(session_id: str, name: str, endpoint: Endpoint = ADMIN) -> McpResponse:
+    """prompts/get for one prompt. Returns the full JSON-RPC response dict, error
+    replies included, so a caller can tell a refusal from an empty prompt."""
+    return _rpc_json("prompts/get", {"name": name}, session_id, rpc_id=6, endpoint=endpoint)
+
+
 def mcp_tools_list_all(session_id: str, endpoint: Endpoint = ADMIN) -> list[ToolDef]:
     """Fetch the full advertised tools/list for this session, following
     nextCursor pagination. Raises on duplicate tool names across pages

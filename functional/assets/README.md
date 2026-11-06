@@ -70,3 +70,55 @@ URL and not calling the tool: the image is committed, so an unreachable one is
 this suite's problem, never a finding about `shopware-media-upload`, and a skip
 is exactly how the trunk lane went without this check unnoticed. Opt out
 explicitly with `--skip-media-upload`.
+
+## McpEvalsFixture
+
+A throwaway app for `functional/app_capabilities.py`, behind `--app-fixture`.
+Its `Resources/mcp.xml` declares one capability of each kind:
+
+- the tool `echo`, which returns the `text` it was called with
+- the prompt `briefing`, one user message
+- the resource `mcp-evals-fixture://status`, an `application/json` text
+
+The files are templates.
+`functional/app_fixture.py` fills in `{{BASE_URL}}` and `{{SECRET}}`, zips them, and serves the app from the runner process on a free port.
+Both secrets are minted per run, and the server answers only requests whose signature verifies.
+
+The check installs the app through the Admin API, runs the checks, and uninstalls and removes it in a `finally`.
+It must not stay installed: the LLM eval fetches every prompt the server lists.
+If the cleanup check fails, remove the app by hand before running the LLM eval.
+
+### What the shop has to allow
+
+The app server speaks plain HTTP on a private address, which the app system refuses by default.
+Lift exactly those two guards for exactly the address the shop reaches the runner by, and nothing else:
+
+```yaml
+shopware:
+    app_system:
+        allow_unencrypted_traffic: true
+        allowed_private_ip_addresses: ['127.0.0.1']
+```
+
+In CI, `.github/actions/setup-lane` writes this as `config/packages/zzz-mcp-evals-app-system.yaml` before the cache is cleared.
+The runner and the shop share the machine there, so the defaults of `--app-fixture-host` and `--app-fixture-bind` (`127.0.0.1`) are right.
+
+### Running it against a containerised lane
+
+The shop in a container reaches the host by another address, for example `192.168.127.254` on Podman on macOS.
+Put that address into `allowed_private_ip_addresses`, clear the cache, and tell the runner to advertise it:
+
+```bash
+python -m functional.runner --endpoint admin --app-fixture --app-fixture-host 192.168.127.254 --app-fixture-bind 0.0.0.0
+```
+
+`--app-fixture-bind 0.0.0.0` is only needed when the container cannot reach the host's loopback.
+Shopware also refuses to install an app while its `APP_URL` cannot be reached from inside the container (HTTP 503 "APP_URL ... could not be reached").
+A lane whose `APP_URL` names a port only the host serves needs a forwarder for the duration of the run.
+Remove the config file and clear the cache again afterwards.
+
+### Before the fix lands
+
+On a shop without https://github.com/shopware/shopware/pull/22623, `prompts/get` answers `-32603 Error while handling prompt`, and `resources/read` returns the app's whole JSON answer as the resource text.
+Both are entries in `functional/known_failures.py`: they run, are reported as expected, and do not fail the run.
+Once the pinned Shopware carries the fix, the reporter warns that the entries passed and should be deleted.
