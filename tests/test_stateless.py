@@ -30,6 +30,9 @@ HINT = (
 )
 
 
+LIST_HINT: JsonObject = {"ttlMs": 60_000, "cacheScope": "private"}
+
+
 def refusal(requested: str = "2026-07-28", supported: list[str] = SUPPORTED, code: int = -32022) -> object:
     return {
         "jsonrpc": "2.0",
@@ -41,13 +44,12 @@ def refusal(requested: str = "2026-07-28", supported: list[str] = SUPPORTED, cod
     }
 
 
-def answer(listchanged: bool = True) -> object:
+def answer(listchanged: bool = True, hints: bool = True) -> object:
     tools: JsonObject = {"listChanged": True} if listchanged else {}
-    return {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": tools, "resources": {}}},
-    }
+    result: JsonObject = {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": tools, "resources": {}}}
+    if hints:
+        result.update(LIST_HINT)
+    return {"jsonrpc": "2.0", "id": 1, "result": result}
 
 
 def message(body: JsonObject) -> McpResponse:
@@ -456,10 +458,17 @@ ROWS = '[{"id": 1}]'
 class Lane:
     """What the lane answered, keyed by method and tool, as the scenarios see it."""
 
-    def __init__(self, session_id: str | None = None, inline: bool = False) -> None:
+    def __init__(self, session_id: str | None = None, inline: bool = False, hints: JsonObject | None = None) -> None:
         self.session_id: str | None = session_id
         self.inline: bool = inline
         self.listened: list[JsonObject] = []
+        # What a lane carrying shopware/shopware#22033 hints, per method or resource URI.
+        self.hints: dict[str, JsonObject] = {
+            "tools/list": LIST_HINT,
+            **{uri: {"ttlMs": ttl, "cacheScope": "private"} for uri, ttl in S.REFERENCE_TTL_MS.items()},
+        }
+        if hints is not None:
+            self.hints.update(dict.fromkeys(self.hints, hints))
 
     def stateless(
         self, method: str, params: JsonObject | None = None, _endpoint: Endpoint | None = None
@@ -471,7 +480,10 @@ class Lane:
             return tool_reply(text(ROWS), session_id=self.session_id)
         if method == "tools/call":
             return tool_reply(*OFFLOADED, link(), session_id=self.session_id)
-        rows = message({"result": {"contents": [{"uri": SIGNED, "text": ROWS}]}})
+        if method == "tools/list":
+            return StatelessReply(200, message({"result": {"tools": [], **self.hints[method]}}), self.session_id)
+        uri = str((params or {}).get("uri", SIGNED))
+        rows = message({"result": {"contents": [{"uri": uri, "text": ROWS}], **self.hints.get(uri, {})}})
         return StatelessReply(200, rows, self.session_id)
 
     def listen(
@@ -609,3 +621,86 @@ def test_an_inline_large_result_stops_before_reading_it_back(monkeypatch: pytest
     labels = [label for label, _ in records(rep)]
     assert ("stateless: a large result is a signed resource_link (admin)", "fail") in records(rep)
     assert "stateless: the next stateless request of the principal reads it" not in labels
+
+
+# --- cache hints (shopware/shopware#22033) ---
+
+
+def test_a_lane_with_cache_hints_passes_each_hint_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = stub_lane(monkeypatch, Lane(), answer())
+    rep = reporter()
+
+    S.verify_stateless_era(rep, ADMIN)
+
+    passed = {label for label, status in records(rep) if status == "pass"}
+    assert {
+        "stateless: server/discover may be cached for 60 s, privately (admin)",
+        "stateless: tools/list may be cached for 60 s, privately (admin)",
+        "stateless: a tool result is not cached (admin)",
+        "stateless: shopware://entities may be cached for 60 min, privately (admin)",
+        "stateless: shopware://currencies may be cached for 5 min, privately (admin)",
+        "handshake: resources/read carries no cache hint (admin)",
+    } <= passed
+
+
+def test_a_lane_without_cache_hints_records_the_skip_naming_the_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = stub_lane(monkeypatch, Lane(hints={}), answer(hints=False))
+    rep = reporter()
+
+    S.verify_stateless_era(rep, ADMIN)
+
+    skip = next(r for r in rep.records if r["label"] == "stateless: cache hints (admin)")
+    assert skip["status"] == "skipped"
+    assert "#22033" in skip.get("reason", "")
+    assert not [label for label, _ in records(rep) if "may be cached" in label]
+
+
+def test_a_wrong_ttl_and_a_hinted_handshake_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = stub_lane(monkeypatch, Lane(hints={"ttlMs": 1, "cacheScope": "public"}), answer())
+    hinted = message({"result": {"contents": [{"text": ROWS}], **LIST_HINT}})
+    monkeypatch.setattr(S, "mcp_read_resource", const(hinted))
+    rep = reporter()
+
+    S.verify_stateless_era(rep, ADMIN)
+
+    failed = {label for label, status in records(rep) if status == "fail"}
+    assert failed == {
+        "stateless: tools/list may be cached for 60 s, privately (admin)",
+        "stateless: shopware://entities may be cached for 60 min, privately (admin)",
+        "stateless: shopware://currencies may be cached for 5 min, privately (admin)",
+        "handshake: resources/read carries no cache hint (admin)",
+    }
+
+
+@pytest.mark.parametrize(
+    ("result", "ttl_ms", "problem"),
+    [
+        pytest.param({"ttlMs": 60_000, "cacheScope": "private"}, 60_000, None, id="expected"),
+        pytest.param({}, None, None, id="uncached-without-hint"),
+        pytest.param({"ttlMs": 0, "cacheScope": "private"}, None, None, id="uncached-zero"),
+        pytest.param({"ttlMs": 5000}, None, "may be cached", id="cached-tool-result"),
+        pytest.param({"ttlMs": 0, "cacheScope": "public"}, None, "may be cached", id="public-scope"),
+        pytest.param({"ttlMs": 60_000, "cacheScope": "public"}, 60_000, "expected ttlMs=60000", id="public"),
+    ],
+)
+def test_hint_problem_reads_the_result(result: JsonObject, ttl_ms: int | None, problem: str | None) -> None:
+    found = S.hint_problem(result, ttl_ms)
+
+    assert (found is None) if problem is None else (problem in (found or ""))
+
+
+def test_a_failed_request_is_no_hint_at_all() -> None:
+    failed = StatelessReply(500, message({"error": {"message": "boom"}}), None)
+
+    assert "HTTP 500" in (S.hint_problem(failed, None) or "")
+
+
+def test_a_store_announcing_list_changes_is_the_skip_naming_the_pr(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = stub_lane(monkeypatch, Lane(), answer(listchanged=True))
+    rep = reporter()
+
+    S.verify_stateless_era(rep, STORE)
+
+    skip = next(r for r in rep.records if r["label"] == S.STORE_LIST_CHANGED_LABEL)
+    assert skip["status"] == "skipped"
+    assert "#22032" in skip.get("reason", "")

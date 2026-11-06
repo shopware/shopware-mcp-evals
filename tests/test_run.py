@@ -411,6 +411,8 @@ def _wire(monkeypatch: pytest.MonkeyPatch, fake: FakeServer) -> None:
     monkeypatch.setattr(R, "verify_result_format", const(None))
     monkeypatch.setattr(R, "verify_large_results", const(None))
     monkeypatch.setattr(R, "verify_stateless_era", const(None))
+    monkeypatch.setattr(R, "verify_tool_annotations", const(None))
+    monkeypatch.setattr(R, "verify_session_binding", const(None))
 
 
 def test_run_store_flow_all_pass(monkeypatch: pytest.MonkeyPatch) -> None:
