@@ -22,7 +22,11 @@ decides, not whatever the server happens to do:
 - a `DELETE` without a session is a handshake request and answers 400
 - `subscriptions/listen` acknowledges at once, carries `tools/list_changed`
   after an allowlist edit (Admin), and closes before PHP's default
-  `max_execution_time` of 30 s would kill the worker
+  `max_execution_time` of 30 s would kill the worker; the Store endpoint,
+  which has no list changes to deliver, does not advertise them
+- answers carry private SEP-2549 cache hints: 60 s for discovery and lists,
+  one hour or five minutes for reference resources, none for a tool result,
+  and no hint at all on the handshake revisions
 """
 
 from collections.abc import Callable
@@ -86,6 +90,27 @@ NO_STORE_LIST_CHANGES = (
     "session-local toolset enable"
 )
 NEEDS_PROVISIONING = "needs --provision-principals: it creates an integration whose allowlist it edits"
+STORE_LIST_CHANGED_LABEL = "stateless: server/discover does not advertise tools.listChanged (store)"
+# Before shopware/shopware#22032 the Store server announced list changes it
+# never delivers on this era. Recorded as a skip naming the PR. Delete the
+# tolerance once `shopware.sha` includes it: after that, the symptom is a regression.
+PREDATES_STORE_LIST_CHANGED = (
+    "the Store server/discover advertises tools.listChanged: shopware/shopware#22032 is not on this build"
+)
+
+# SEP-2549 cache hints (shopware/shopware#22033). Every hint is `private`,
+# because the allowlist and `?toolsets=` make answers differ per caller.
+CACHE_SCOPE = "private"
+# Lists and discovery: an allowlist change reaches a client within a minute.
+LIST_TTL_MS = 60_000
+# Reference resources that rarely change, one per TTL core uses.
+REFERENCE_TTL_MS = {"shopware://entities": 3_600_000, "shopware://currencies": 60_000}
+CACHE_HINT_TOOL = "shopware-tool-search"
+CACHE_HINT_ARGS: JsonObject = {"query": "product", "maxResults": 1}
+# A server without the hints sends none on server/discover. Recorded as a skip
+# naming the PR. Delete the tolerance once `shopware.sha` includes
+# shopware/shopware#22033: after that, the same symptom is a regression.
+PREDATES_CACHE_HINTS = "server/discover carries no ttlMs or cacheScope: shopware/shopware#22033 is not on this build"
 
 
 def classify(status: int, body: object) -> tuple[str, str]:
@@ -165,8 +190,9 @@ def verify_stateless_era(rep: Reporter, endpoint: Endpoint, provision: bool = Fa
         verify_large_result(rep, era)
     else:
         rep.check_skip(f"stateless: a large result is a signed resource_link ({endpoint.name})", NO_STORE_OFFLOAD)
-    capabilities = as_object(as_object(as_object(body).get("result")).get("capabilities"))
-    verify_listen(rep, endpoint, capabilities, provision)
+    discovered = as_object(as_object(body).get("result"))
+    verify_cache_hints(rep, era, discovered)
+    verify_listen(rep, endpoint, as_object(discovered.get("capabilities")), provision)
     _report(
         rep,
         f"stateless: no Mcp-Session-Id is minted ({endpoint.name})",
@@ -269,6 +295,66 @@ def verify_large_result(rep: Reporter, era: Era) -> None:
     )
 
 
+def hint_problem(reply: StatelessReply | JsonObject, ttl_ms: int | None) -> str | None:
+    """None when an answer carries the cache hint it should.
+
+    `ttl_ms` None is an answer that must not be cached: no TTL or 0, and a
+    scope, if any, of `private`. A `StatelessReply` that failed is a problem of
+    its own, so a refusal cannot pass as "no hint"."""
+    if isinstance(reply, StatelessReply):
+        if reply.error:
+            return f"the request failed (HTTP {reply.status}): {reply.error.get('message')}"
+        result = reply.result
+    else:
+        result = reply
+    ttl, scope = result.get("ttlMs"), result.get("cacheScope")
+    if ttl_ms is None:
+        if ttl not in (None, 0) or scope not in (None, CACHE_SCOPE):
+            return f"ttlMs={ttl}, cacheScope={scope}: the answer may be cached"
+        return None
+    if ttl != ttl_ms or scope != CACHE_SCOPE:
+        return f"ttlMs={ttl}, cacheScope={scope}, expected ttlMs={ttl_ms}, cacheScope={CACHE_SCOPE}"
+    return None
+
+
+def verify_cache_hints(rep: Reporter, era: Era, discovered: JsonObject) -> None:
+    name = era.endpoint.name
+    if "ttlMs" not in discovered and "cacheScope" not in discovered:
+        rep.check_skip(f"stateless: cache hints ({name})", PREDATES_CACHE_HINTS)
+        return
+    _report(
+        rep,
+        f"stateless: server/discover may be cached for 60 s, privately ({name})",
+        hint_problem(discovered, LIST_TTL_MS),
+    )
+    _report(
+        rep,
+        f"stateless: tools/list may be cached for 60 s, privately ({name})",
+        hint_problem(era.call("tools/list"), LIST_TTL_MS),
+    )
+    _report(
+        rep,
+        f"stateless: a tool result is not cached ({name})",
+        hint_problem(era.call("tools/call", {"name": CACHE_HINT_TOOL, "arguments": CACHE_HINT_ARGS}), None),
+    )
+    if name != "admin":
+        return
+    for uri, ttl_ms in REFERENCE_TTL_MS.items():
+        _report(
+            rep,
+            f"stateless: {uri} may be cached for {ttl_ms // 60_000} min, privately (admin)",
+            hint_problem(era.call("resources/read", {"uri": uri}), ttl_ms),
+        )
+    session, _ = mcp_init(endpoint=era.endpoint)
+    handshake = as_object(mcp_read_resource(session, "shopware://entities", era.endpoint).get("result"))
+    hinted = [key for key in ("ttlMs", "cacheScope") if key in handshake]
+    _report(
+        rep,
+        "handshake: resources/read carries no cache hint (admin)",
+        f"carries {hinted} on {era.endpoint.protocol_version}" if hinted else None,
+    )
+
+
 def listen_problems(frames: list[ListenFrame], expect_change: bool) -> dict[str, str | None]:
     """What is wrong with one listen stream, per check: the acknowledgement,
     the list change after it, and how the stream ended."""
@@ -315,6 +401,10 @@ def verify_listen(rep: Reporter, endpoint: Endpoint, capabilities: JsonObject, p
 
     if name != "admin":
         rep.check_skip(change_label, NO_STORE_LIST_CHANGES)
+        if advertised:
+            rep.check_skip(STORE_LIST_CHANGED_LABEL, PREDATES_STORE_LIST_CHANGED)
+        else:
+            rep.check_pass(STORE_LIST_CHANGED_LABEL)
         frames = stream()
     elif not advertised:
         rep.check_fail(change_label, "server/discover does not advertise tools.listChanged")

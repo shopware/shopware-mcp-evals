@@ -60,7 +60,9 @@ from functional.principals import (
 )
 from functional.reporting import Reporter, workflow_command
 from functional.result_format import ADMIN_PROBES, STORE_PROBES, verify_result_format
+from functional.session_binding import verify_session_binding
 from functional.stateless import verify_stateless_era
+from functional.tool_annotations import verify_tool_annotations
 from mcp_client import (
     ALL_TOOLSETS,
     BASE,
@@ -1293,6 +1295,8 @@ def run_admin(rep: Reporter, endpoint: Endpoint, args: argparse.Namespace, sessi
     verify_admin_discovery(rep, endpoint, entity_toolset, toolsets)
     schema_session, _ = mcp_init(endpoint=endpoint)
     verify_tool_schemas(rep, schema_session, endpoint)
+    verify_tool_annotations(rep, endpoint)
+    verify_session_binding(rep, endpoint, provision=cast(bool, args.provision_principals))
     if compares_revisions(rep, endpoint):
         verify_result_format(rep, endpoint, ADMIN_PROBES)
         verify_large_results(rep, endpoint, provision=cast(bool, args.provision_principals))
@@ -1316,6 +1320,7 @@ def run_store(rep: Reporter, endpoint: Endpoint, session: str, allow_mutations: 
     ucp_default = _ucp_default_published(session, endpoint)
     verify_default_surface(rep, session, endpoint, also_expected=ucp_default)
     verify_connect_time_toolsets(rep, endpoint, also_expected=ucp_default)
+    verify_tool_annotations(rep, endpoint)
     if compares_revisions(rep, endpoint):
         verify_result_format(rep, endpoint, STORE_PROBES)
         rep.check_skip("large results (store)", NO_STORE_OFFLOAD)
