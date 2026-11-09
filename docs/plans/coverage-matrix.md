@@ -33,7 +33,7 @@ ever checked by hand.
 | **Principal** | admin user key (`SWUA…`), integration (`SWIA…`), non-admin user key, OAuth user token | The whole suite runs as the admin user key. Integrations and non-admin users run the allowlist surfaces (`--provision-principals`). OAuth runs its flow plus initialize, `tools/list` and `tools/call` (https://github.com/shopware/shopware-mcp-evals/pull/103) |
 | **Protocol revision** (client side) | 2024-11-05, 2025-06-18, 2025-11-25 | Functional suite on each; LLM eval on 2025-11-25 |
 | **Era** (client side) | handshake, stateless 2026-07-28 | Stateless is one skip until https://github.com/shopware/shopware/issues/19969 |
-| **Result format** | legacy envelope, MCP format | Picked by protocol revision since https://github.com/shopware/shopware/pull/21844: the envelope below 2025-06-18, the MCP format from it on. The `V6_8_0_0` flag does not decide it |
+| **Result format** | legacy envelope, MCP format | MCP format on `next-major` only: at the pin the renderer sends the envelope unless `V6_8_0_0` is active. Once https://github.com/shopware/shopware/pull/21844 merges, the protocol revision decides it: the envelope below 2025-06-18, the MCP format from it on |
 | **Endpoint, session store** | admin or store; file or Redis | Both endpoints; Redis on `session-store` |
 
 Most axes are independent, so the matrix is not a cross-product. Each test case
@@ -168,15 +168,22 @@ Not yet measured: claude.ai and Cursor, which need a person, and the ChatGPT
 connector. The `{"success", "data", "_meta"}` envelope was not seen either, and
 the measured commit explains why.
 [`a6a7d5c6d4d`](https://github.com/shopware/shopware/commit/a6a7d5c6d4ddc8127f461088ec4d1a1a0d7501e8)
-picks the result format by protocol revision, and
+is on the integration branch round 3 was measured on, not in this repo's pin.
+It picks the result format by protocol revision, and
 [`McpToolResultCapabilities::forRevision()`](https://github.com/shopware/shopware/blob/71b350a48e668783df24b3fd35e6f5490f98f1c4/src/Core/Framework/Mcp/Result/McpToolResultCapabilities.php#L35-L47)
 gives the MCP format to every revision from 2025-06-18 on. The `V6_8_0_0` flag
 does not decide it at `71b350a48e6`. A session at 2025-11-25 therefore gets the
 plain data and a `_meta` block, and the envelope only reaches revisions before
-2025-06-18. Since https://github.com/shopware/shopware/pull/21844 the
-`structuredContent` is the same data with that `_meta` block under a `_meta`
-key, so the eval's text and Claude Code's copy differ only in where `_meta`
-sits.
+2025-06-18. At the pin the flag still decides it, so CI sees the MCP format on
+`next-major` only until https://github.com/shopware/shopware/pull/21844 merges.
+
+In https://github.com/shopware/shopware/pull/21844 the `structuredContent` is
+not an exact copy of the text. A list result is
+[wrapped](https://github.com/shopware/shopware/blob/71b350a48e668783df24b3fd35e6f5490f98f1c4/src/Core/Framework/Mcp/Result/McpToolResultRenderer.php#L353-L357)
+as `{"result": …, "_meta": …}`, and its `_meta`
+[leaves out](https://github.com/shopware/shopware/blob/71b350a48e668783df24b3fd35e6f5490f98f1c4/src/Core/Framework/Mcp/Result/McpToolResultRenderer.php#L374-L382)
+`responseSize` and `resourceUri`. So the eval's text and Claude Code's copy
+differ in shape for lists and in those two keys, not only in where `_meta` sits.
 
 The era column is mostly empty for now. Every client above uses the handshake
 era, and stateless is switched off in core until
