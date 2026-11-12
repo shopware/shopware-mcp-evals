@@ -187,17 +187,17 @@ def _locale_id(api: AdminApi) -> str:
     return str(as_object(rows[0]).get("id", ""))
 
 
-def _user(
+def _create_user(
     api: AdminApi,
     created: _Created,
     label: str,
     role_id: str,
     locale_id: str,
+    password: str,
     allowlist: JsonObject | None,
-    expect: Expect,
-) -> Principal:
+) -> str:
+    """A non-admin user holding `role_id`, with `allowlist` saved when given."""
     user_id = secrets.token_hex(16)
-    access_key, secret_key = _keys("SWUA")
     api.call(
         "POST",
         "/api/user",
@@ -207,13 +207,29 @@ def _user(
             "email": f"{label}@example.invalid",
             "firstName": "mcp-evals",
             "lastName": label,
-            "password": secrets.token_hex(16),
+            "password": password,
             "localeId": locale_id,
             "admin": False,
             "aclRoles": [{"id": role_id}],
         },
     )
     created.add(f"/api/user/{user_id}")
+    if allowlist is not None:
+        api.call("POST", f"/api/_action/user/{user_id}/mcp-allowlist", {"allowlist": allowlist})
+    return user_id
+
+
+def _user(
+    api: AdminApi,
+    created: _Created,
+    label: str,
+    role_id: str,
+    locale_id: str,
+    allowlist: JsonObject | None,
+    expect: Expect,
+) -> Principal:
+    user_id = _create_user(api, created, label, role_id, locale_id, secrets.token_hex(16), None)
+    access_key, secret_key = _keys("SWUA")
     api.call(
         "POST", "/api/user-access-key", {"userId": user_id, "accessKey": access_key, "secretAccessKey": secret_key}
     )
@@ -240,6 +256,51 @@ def provisioned(api: AdminApi) -> Generator[list[Principal]]:
             _user(api, created, f"mcp-evals-{run}-user-unset", role_id, locale_id, None, "blocked"),
             _user(api, created, f"mcp-evals-{run}-user-one-tool", role_id, locale_id, PARTIAL, "partial"),
         ]
+    finally:
+        _delete(api, created)
+
+
+# What the OAuth user is granted: a few tools from two toolsets, closed under
+# `#[McpToolDependsOn]` (entity-search needs entity-schema), so the server's
+# auto-expansion adds nothing and the list is exactly what tools/list must show.
+OAUTH_TOOLS: tuple[str, ...] = ("shopware-entity-schema", "shopware-entity-search", "shopware-system-config-read")
+OAUTH_PRIVILEGES = ["currency:read", "system_config:read"]
+
+
+@dataclass(frozen=True)
+class SignInUser:
+    """A non-admin user who signs in with a password, as a person does on the
+    consent page. `tools` is its MCP allowlist; None leaves it unset."""
+
+    label: str
+    username: str
+    password: str
+    tools: tuple[str, ...] | None
+
+
+@contextmanager
+def sign_in_users(api: AdminApi) -> Generator[tuple[SignInUser, SignInUser]]:
+    """Two non-admin users, one allowlisted `OAUTH_TOOLS` and one without an
+    allowlist, sharing a role; deleted again whatever happens."""
+    created = _Created()
+    run = secrets.token_hex(3)
+    try:
+        role_id = secrets.token_hex(16)
+        api.call(
+            "POST", "/api/acl-role", {"id": role_id, "name": f"mcp-evals-{run}-oauth", "privileges": OAUTH_PRIVILEGES}
+        )
+        created.add(f"/api/acl-role/{role_id}")
+        locale_id = _locale_id(api)
+        users: list[SignInUser] = []
+        for kind, tools in (("oauth-allowlisted", OAUTH_TOOLS), ("oauth-unset", None)):
+            label = f"mcp-evals-{run}-{kind}"
+            password = secrets.token_urlsafe(18)
+            allowlist: JsonObject | None = (
+                {"tools": list(tools), "resources": [], "prompts": []} if tools is not None else None
+            )
+            _ = _create_user(api, created, label, role_id, locale_id, password, allowlist)
+            users.append(SignInUser(label, label, password, tools))
+        yield users[0], users[1]
     finally:
         _delete(api, created)
 
