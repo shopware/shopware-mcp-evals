@@ -536,11 +536,19 @@ prompts/list, a direct call), and deletes them again:
 | principal | allowlist | must reach |
 |---|---|---|
 | integration, non-admin user | unset | the meta-tools, nothing else; every call refused |
-| integration | "All capabilities" | exactly what the admin user reaches |
-| integration, non-admin user | one tool | that tool; a tool from another toolset is refused |
+| integration, non-admin user | "All capabilities" | exactly what the admin user reaches |
+| integration, non-admin user, integration with a role | two tools from one toolset | exactly those two, not their toolset siblings; a tool from another toolset is refused |
+| administrator user | two tools, or an empty list | everything: an administrator bypasses whatever was saved |
 
-The one-tool user is also held to its ACL role, which grants `currency:read` only. Calling its
-tool on `product` must fail with the `missing_privilege` code.
+Every principal that is not an administrator user or an integration flagged
+admin is also held to its ACL role, which grants `currency:read` only. Calling
+an allowed tool on `product` must fail with the `missing_privilege` code. The
+integration with a role is the one integration that is not flagged admin, so
+it shows ACL applying to an integration at all.
+
+The same matrix runs on OAuth tokens. `functional/oauth.py` signs in as four
+throwaway users (no allowlist, two tools, "All capabilities", and an
+administrator with two tools) and hands each bearer token to the same checks.
 
 **"All capabilities" on an integration does not save `null`.** Since #20600 the
 Administration writes every name `/api/_action/mcp/capabilities` returned when
@@ -553,8 +561,12 @@ before #20600.
 
 Since shopware/shopware#21862 `/api/_mcp` also takes an OAuth access token bound
 to it by audience. The suite still authenticates with access keys;
-`functional/oauth.py` walks the OAuth flow on its own, with the public client
-setup-lane writes to `config/packages/zzz-mcp-evals-oauth.yaml`.
+`functional/oauth.py` walks the OAuth flow on its own, with the public clients
+setup-lane writes to `config/packages/zzz-mcp-evals-oauth.yaml`: `mcp-evals-probe`
+for the flow, and `mcp-evals-redirects`, which holds one https, one `cursor://`
+and one plain-http redirect URI. Plain http outside loopback is accepted only
+under `APP_ENV=dev`, so setup-lane passes the server's environment as
+`MCP_EVALS_APP_ENV`; without it that one check is a skip.
 
 The session must be initialized with `method: initialize` before any other call;
 the `Mcp-Session-Id` response header scopes toolset enablement.
