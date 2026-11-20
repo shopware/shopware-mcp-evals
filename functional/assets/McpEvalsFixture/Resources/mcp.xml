@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- One capability of each kind, all answered by functional/app_fixture.py. -->
+<mcp>
+    <mcp-tools>
+        <mcp-tool name="echo" url="{{BASE_URL}}/tool">
+            <label>Echo</label>
+            <description>Echoes the text it is given back, so a caller can tell this run's answer from any other.</description>
+            <input-schema>
+                <property name="text" type="string" description="Text to echo back" required="true"/>
+            </input-schema>
+        </mcp-tool>
+    </mcp-tools>
+    <mcp-prompts>
+        <mcp-prompt name="briefing" url="{{BASE_URL}}/prompt">
+            <label>Briefing</label>
+            <description>A fixed one-message prompt.</description>
+        </mcp-prompt>
+    </mcp-prompts>
+    <mcp-resources>
+        <mcp-resource name="status" uri="mcp-evals-fixture://status" url="{{BASE_URL}}/resource" mime-type="application/json">
+            <label>Status</label>
+            <description>A fixed JSON document.</description>
+        </mcp-resource>
+    </mcp-resources>
+</mcp>

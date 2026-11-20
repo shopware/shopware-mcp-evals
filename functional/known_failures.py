@@ -64,6 +64,31 @@ KNOWN_FAILURES: tuple[KnownFailure, ...] = (
             "lane and every protocol revision."
         ),
     ),
+    KnownFailure(
+        # functional/app_capabilities.py PROMPT_CHECK, spelled out for the same
+        # reason as above.
+        label="an app MCP prompt answers with the app's messages",
+        error="Error while handling prompt",
+        issue="shopware/shopware#22623",
+        url="https://github.com/shopware/shopware/pull/22623",
+        waiting_for="the fix to land in the Shopware commit setup-lane pins",
+        why=(
+            "The app prompt handler hands the app's raw JSON string to the MCP SDK, which only "
+            "accepts messages, so every app prompt answers JSON-RPC -32603."
+        ),
+    ),
+    KnownFailure(
+        # functional/app_capabilities.py RESOURCE_CHECK and WHOLE_ENVELOPE.
+        label="an app MCP resource answers with the app's text",
+        error="the resource text is the app's whole response envelope",
+        issue="shopware/shopware#22623",
+        url="https://github.com/shopware/shopware/pull/22623",
+        waiting_for="the fix to land in the Shopware commit setup-lane pins",
+        why=(
+            "The app resource handler returns the app's raw body, so the client gets the whole "
+            '`{"uri", "mimeType", "text"}` answer as the resource text instead of the text inside it.'
+        ),
+    ),
 )
 
 
