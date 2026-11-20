@@ -475,10 +475,12 @@ class Lane:
         return StatelessReply(200, rows, self.session_id)
 
     def listen(
-        self, _endpoint: Endpoint, notifications: JsonObject, *, on_ack: Callable[[], None] | None, timeout_s: float
+        self, endpoint: Endpoint, notifications: JsonObject, *, on_ack: Callable[[], None] | None, timeout_s: float
     ) -> list[ListenFrame]:
         del timeout_s
         self.listened.append(notifications)
+        if endpoint.name != "admin":
+            return [ListenFrame(0, {"status": 404, "error": {"code": -32601, "message": "no notifications"}})]
         if on_ack is not None:
             on_ack()
             return GOOD_STREAM
@@ -547,6 +549,20 @@ def test_the_store_run_skips_what_the_store_cannot_do(monkeypatch: pytest.Monkey
         "stateless: a large result is a signed resource_link (store)",
         "stateless: tools/list_changed arrives through subscriptions/listen (store)",
     }
+    assert (S.STORE_LISTEN_REFUSED_LABEL, "pass") in records(rep)
+
+
+@pytest.mark.parametrize(
+    ("frames", "problem"),
+    [
+        pytest.param([ListenFrame(0, {"status": 404, "error": {"code": -32601}})], None, id="refused"),
+        pytest.param([ListenFrame(0, {"status": 500, "error": {"code": -32603}})], "-32603", id="other-error"),
+        pytest.param([], "no answer", id="nothing"),
+    ],
+)
+def test_the_store_listen_must_be_refused_as_method_not_found(frames: list[ListenFrame], problem: str | None) -> None:
+    found = S.store_listen_problem(frames)
+    assert found is None if problem is None else problem in (found or "")
 
 
 def test_admin_without_provisioning_skips_the_change_and_still_checks_the_stream(

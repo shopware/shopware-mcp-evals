@@ -56,7 +56,7 @@ from mcp_client import (
     mcp_tools_list_all,
     mcp_toolsets_list,
 )
-from mcp_result import read_result
+from mcp_result import format_for, read_result
 
 UNSUPPORTED_VERSION = -32022
 
@@ -85,6 +85,10 @@ NO_STORE_LIST_CHANGES = (
     "the Store endpoint has no installation-wide list changes to publish: its only one was the "
     "session-local toolset enable"
 )
+# With nothing to publish, the Store server refuses subscriptions/listen
+# outright (shopware/shopware#22011) instead of holding a worker for an empty stream.
+METHOD_NOT_FOUND = -32601
+STORE_LISTEN_REFUSED_LABEL = "stateless: subscriptions/listen is refused as method-not-found (store)"
 NEEDS_PROVISIONING = "needs --provision-principals: it creates an integration whose allowlist it edits"
 
 
@@ -259,14 +263,23 @@ def verify_large_result(rep: Reporter, era: Era) -> None:
     _report(
         rep,
         "stateless: the next stateless request of the principal reads it",
-        readable_problem(read.message, STATELESS_REVISION),
+        readable_problem(read.message, format_for(STATELESS_REVISION)),
     )
     session, _ = mcp_init(endpoint=era.endpoint)
     _report(
         rep,
         "stateless: a handshake session of the principal reads it",
-        readable_problem(mcp_read_resource(session, uri, era.endpoint), STATELESS_REVISION),
+        readable_problem(mcp_read_resource(session, uri, era.endpoint), format_for(STATELESS_REVISION)),
     )
+
+
+def store_listen_problem(frames: list[ListenFrame]) -> str | None:
+    """The Store server has no notifications, so listen must fail at once
+    with method-not-found rather than hold a worker on an empty stream."""
+    first = frames[0].message if frames else {}
+    if as_object(first.get("error")).get("code") == METHOD_NOT_FOUND:
+        return None
+    return f"expected a {METHOD_NOT_FOUND} refusal, got {str(first)[:200] if frames else 'no answer'}"
 
 
 def listen_problems(frames: list[ListenFrame], expect_change: bool) -> dict[str, str | None]:
@@ -315,7 +328,8 @@ def verify_listen(rep: Reporter, endpoint: Endpoint, capabilities: JsonObject, p
 
     if name != "admin":
         rep.check_skip(change_label, NO_STORE_LIST_CHANGES)
-        frames = stream()
+        _report(rep, STORE_LISTEN_REFUSED_LABEL, store_listen_problem(stream()))
+        return
     elif not advertised:
         rep.check_fail(change_label, "server/discover does not advertise tools.listChanged")
         frames = stream()
