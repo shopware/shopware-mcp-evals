@@ -89,6 +89,10 @@ NO_STORE_LIST_CHANGES = (
     "the Store endpoint has no installation-wide list changes to publish: its only one was the "
     "session-local toolset enable"
 )
+# With nothing to publish, the Store server refuses subscriptions/listen
+# outright (shopware/shopware#22011) instead of holding a worker for an empty stream.
+METHOD_NOT_FOUND = -32601
+STORE_LISTEN_REFUSED_LABEL = "stateless: subscriptions/listen is refused as method-not-found (store)"
 NEEDS_PROVISIONING = "needs --provision-principals: it creates an integration whose allowlist it edits"
 STORE_LIST_CHANGED_LABEL = "stateless: server/discover does not advertise tools.listChanged (store)"
 # Before shopware/shopware#22032 the Store server announced list changes it
@@ -104,7 +108,8 @@ CACHE_SCOPE = "private"
 # Lists and discovery: an allowlist change reaches a client within a minute.
 LIST_TTL_MS = 60_000
 # Reference resources that rarely change, one per TTL core uses.
-REFERENCE_TTL_MS = {"shopware://entities": 3_600_000, "shopware://currencies": 60_000}
+# Entities count as shop configuration since #22033: an app adds them at runtime.
+REFERENCE_TTL_MS = {"shopware://state-machines": 3_600_000, "shopware://entities": 60_000}
 CACHE_HINT_TOOL = "shopware-tool-search"
 CACHE_HINT_ARGS: JsonObject = {"query": "product", "maxResults": 1}
 # A server without the hints sends none on server/discover. Recorded as a skip
@@ -388,6 +393,15 @@ def listen_problems(frames: list[ListenFrame], expect_change: bool) -> dict[str,
     return problems
 
 
+def store_listen_problem(frames: list[ListenFrame]) -> str | None:
+    """The Store server has no notifications, so listen must fail at once
+    with method-not-found rather than hold a worker on an empty stream."""
+    first = frames[0].message if frames else {}
+    if as_object(first.get("error")).get("code") == METHOD_NOT_FOUND:
+        return None
+    return f"expected a {METHOD_NOT_FOUND} refusal, got {str(first)[:200] if frames else 'no answer'}"
+
+
 def verify_listen(rep: Reporter, endpoint: Endpoint, capabilities: JsonObject, provision: bool) -> None:
     """One stream per endpoint, held until the server closes it. A stream holds
     a PHP worker for its whole lifetime, so the checks share one."""
@@ -405,7 +419,8 @@ def verify_listen(rep: Reporter, endpoint: Endpoint, capabilities: JsonObject, p
             rep.check_skip(STORE_LIST_CHANGED_LABEL, PREDATES_STORE_LIST_CHANGED)
         else:
             rep.check_pass(STORE_LIST_CHANGED_LABEL)
-        frames = stream()
+        _report(rep, STORE_LISTEN_REFUSED_LABEL, store_listen_problem(stream()))
+        return
     elif not advertised:
         rep.check_fail(change_label, "server/discover does not advertise tools.listChanged")
         frames = stream()
