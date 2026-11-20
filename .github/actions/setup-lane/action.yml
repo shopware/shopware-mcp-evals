@@ -103,6 +103,12 @@ outputs:
       what files exist. Passed to the suite as MCP_EVALS_LOG_FILE so it never has
       to recover the name from an error message.
     value: ${{ steps.seed.outputs.log_file }}
+  app_env:
+    description: >
+      The APP_ENV the server runs in, read from .env.local or .env. Passed to the
+      suite as MCP_EVALS_APP_ENV: whether the shop accepts a plain-http OAuth
+      redirect URI outside loopback depends on it (only `dev` does).
+    value: ${{ steps.seed.outputs.app_env }}
   store_plugin_ok:
     description: Whether agentic-commerce installed. Gates every Store step downstream.
     value: ${{ steps.plugins.outputs.store_plugin_ok }}
@@ -595,6 +601,11 @@ runs:
         # `claude mcp add --transport http --client-id <id> --callback-port 53682`
         # (README, "OAuth").
         #
+        # `mcp-evals-redirects` holds one redirect URI of each kind a client
+        # registers: https, a native app's private-use scheme, and plain http
+        # outside loopback, which only APP_ENV=dev accepts (functional/oauth.py).
+        # Nothing listens on any of them: the code is read off the consent decision.
+        #
         # Only where the checkout knows the key: an unknown key under `shopware:`
         # stops the container from compiling, which is every later bin/console.
         if grep -q "arrayNode('oauth_clients')" src/Core/Framework/DependencyInjection/Configuration.php 2>/dev/null; then
@@ -607,8 +618,14 @@ runs:
                         name: 'mcp-evals probe'
                         redirect_uris:
                             - 'http://127.0.0.1/callback'
+                    mcp-evals-redirects:
+                        name: 'mcp-evals redirect URIs'
+                        redirect_uris:
+                            - 'https://mcp-evals.example/callback'
+                            - 'cursor://mcp-evals/callback'
+                            - 'http://mcp-evals.example/callback'
         YAML
-          echo "Wrote config/packages/zzz-mcp-evals-oauth.yaml (public OAuth client mcp-evals-probe)"
+          echo "Wrote config/packages/zzz-mcp-evals-oauth.yaml (public OAuth clients mcp-evals-probe, mcp-evals-redirects)"
         else
           rm -f config/packages/zzz-mcp-evals-oauth.yaml
           echo "Skipped config/packages/zzz-mcp-evals-oauth.yaml: this Shopware has no shopware.api.oauth_clients."
@@ -814,13 +831,21 @@ runs:
         # 2 whatever else it managed to read, so the earlier one-liner could
         # not be written as a fallback chain — it was the failure, not a
         # tolerated one.
-        APP_ENV_NAME=""
+        #
+        # The job environment comes first. setup-shopware writes APP_ENV=dev to
+        # $GITHUB_ENV, not to any .env file, and a real environment variable
+        # overrides the dotenv files in Symfony. Reading the files alone fell
+        # back to `test` on a server running dev, and the OAuth redirect check
+        # then expected a refusal dev never gives.
+        APP_ENV_NAME="${APP_ENV:-}"
         for envfile in .env.local .env; do
+          [ -n "${APP_ENV_NAME}" ] && break
           [ -f "${envfile}" ] || continue
           APP_ENV_NAME=$(sed -n 's/^APP_ENV=//p' "${envfile}" | tr -d '"' | tail -1)
           [ -n "${APP_ENV_NAME}" ] && break
         done
         APP_ENV_NAME=${APP_ENV_NAME:-test}
+        echo "app_env=${APP_ENV_NAME}" >> "$GITHUB_OUTPUT"
         echo "Server runs in APP_ENV=${APP_ENV_NAME}; seeding var/log/${APP_ENV_NAME}-<date>.log"
         mkdir -p var/log
         # The text has to match functional/checks.py:LOG_PROBE_TEXT exactly — the
