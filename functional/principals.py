@@ -233,7 +233,11 @@ def _integration(
     if allowlist is not None:
         api.call("POST", f"/api/_action/integration/{integration_id}/mcp-allowlist", {"allowlist": allowlist})
     return Principal(
-        label, access_key, secret_key, expect, acl=role_id is not None,
+        label,
+        access_key,
+        secret_key,
+        expect,
+        acl=role_id is not None,
         granted=_granted(allowlist, expect),
         allowlist_path=f"/api/_action/integration/{integration_id}/mcp-allowlist",
     )

@@ -60,7 +60,7 @@ from mcp_client import (
     mcp_tools_list_all,
     mcp_toolsets_list,
 )
-from mcp_result import read_result
+from mcp_result import format_for, read_result
 
 UNSUPPORTED_VERSION = -32022
 
@@ -285,13 +285,13 @@ def verify_large_result(rep: Reporter, era: Era) -> None:
     _report(
         rep,
         "stateless: the next stateless request of the principal reads it",
-        readable_problem(read.message, STATELESS_REVISION),
+        readable_problem(read.message, format_for(STATELESS_REVISION)),
     )
     session, _ = mcp_init(endpoint=era.endpoint)
     _report(
         rep,
         "stateless: a handshake session of the principal reads it",
-        readable_problem(mcp_read_resource(session, uri, era.endpoint), STATELESS_REVISION),
+        readable_problem(mcp_read_resource(session, uri, era.endpoint), format_for(STATELESS_REVISION)),
     )
 
 
