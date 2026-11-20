@@ -635,7 +635,10 @@ def mcp_listen(
             message = _as_object(_json_body(resp)) if resp.text else {}
             return [ListenFrame(time.monotonic() - started, {"status": resp.status_code, **message})]
         acked = False
-        for line in resp.iter_lines(decode_unicode=True):
+        # chunk_size=1: the default 512 holds a short frame back until more data
+        # or the close arrives when the stream is not chunked, so the ack would
+        # come after the stream it opens has already ended.
+        for line in resp.iter_lines(chunk_size=1, decode_unicode=True):
             if time.monotonic() - started > timeout_s:
                 break
             if not isinstance(line, str) or not line.startswith("data:"):
