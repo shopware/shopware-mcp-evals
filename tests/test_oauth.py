@@ -58,8 +58,12 @@ def reply(status: int, body: object = None, **headers: str) -> O.Reply:
 class FakeShop:
     """Just enough of Shopware's OAuth and MCP endpoints for the flow."""
 
-    def __init__(self, *, discovery: bool = True, registered: bool = True, gaps: bool = False) -> None:
+    def __init__(
+        self, *, discovery: bool = True, registered: bool = True, gaps: bool = False, in_band_failure: bool = False
+    ) -> None:
         self.discovery: bool = discovery
+        # tools/call answers HTTP 200 with {"success": false} and no isError.
+        self.in_band_failure: bool = in_band_failure
         self.registered: bool = registered
         self.gaps: bool = gaps
         self.codes: dict[str, tuple[str, str, str]] = {}
@@ -154,6 +158,11 @@ class FakeShop:
             if name not in self.allowlist(headers):
                 message = f'Tool "{name}" is not enabled in your MCP allowlist.'
                 return reply(200, {"jsonrpc": "2.0", "id": 3, "error": {"code": -32602, "message": message}})
+            if self.in_band_failure:
+                failed = json.dumps({"success": False, "error": "Toolsets unavailable"})
+                return reply(
+                    200, {"jsonrpc": "2.0", "id": 3, "result": {"content": [{"type": "text", "text": failed}]}}
+                )
             return reply(200, {"jsonrpc": "2.0", "id": 3, "result": {"content": []}})
         return reply(202)
 
@@ -270,6 +279,15 @@ def test_the_first_drafts_gaps_are_new_failures(monkeypatch: pytest.MonkeyPatch)
     assert rep.unexpected_failed == 2 and rep.exit_code != 0
     errors = [str(r.get("error")) for r in rep.records if r["status"] == "fail"]
     assert errors == ["HTTP 200, expected 401 with the health report", "4 groups with the token, 2 without"]
+
+
+def test_an_in_band_tool_failure_fails_the_oauth_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP 200 without isError is not success: the result says {"success": false}."""
+    rep = run(FakeShop(in_band_failure=True), monkeypatch)
+
+    assert "tools/call over OAuth" in failures(rep)
+    error = next(str(r.get("error")) for r in rep.records if r["label"] == "tools/call over OAuth")
+    assert "Toolsets unavailable" in error
 
 
 def test_an_unregistered_client_skips_after_discovery(monkeypatch: pytest.MonkeyPatch) -> None:

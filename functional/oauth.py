@@ -520,11 +520,12 @@ class OAuthFlow:
             token=access,
             session=session,
         )
-        result = as_object(body.get("result"))
+        # Through read_result: a failure can arrive as HTTP 200 with no isError.
+        outcome = read_result(cast(McpResponse, cast(object, body)))
         self.check(
             "tools/call over OAuth",
-            called.status == 200 and bool(result) and result.get("isError") is not True,
-            f"HTTP {called.status} {called.text[:140]}",
+            called.status == 200 and bool(body.get("result")) and outcome.ok,
+            f"HTTP {called.status} {outcome.failure[:140] or called.text[:140]}",
         )
         if session:
             _ = self.http("DELETE", self.mcp_url, headers={**self.bearer(access), "Mcp-Session-Id": session})
