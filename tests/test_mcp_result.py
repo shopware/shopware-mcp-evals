@@ -261,6 +261,51 @@ def test_a_spec_result_without_data_starts_with_its_summary() -> None:
     assert outcome.summary == "Stored behind a link."
 
 
+def test_spec_data_whose_only_key_is_meta_is_data_not_metadata() -> None:
+    """`{"_meta": …}` as data encodes exactly like the metadata block. With
+    `structuredContent` present, the first block is the data."""
+    data = {"_meta": {"id": "x"}}
+    outcome = read_result(result(text(data), text({"_meta": {"note": "n"}}), structured=data, meta=GENERATED))
+
+    assert outcome.data == data
+    assert outcome.meta == {"note": "n"}
+
+
+def test_a_spec_success_without_data_but_with_metadata_has_no_data_block() -> None:
+    """`{"result": null, "_meta": …}` sends no data block (shopware/shopware@7f64703f325)."""
+    outcome = read_result(
+        result(
+            text({"_meta": {"note": "n"}}),
+            structured={"result": None, "_meta": {"note": "n"}},
+            meta=GENERATED,
+        )
+    )
+
+    assert outcome.data is None
+    assert outcome.meta == {"note": "n"}
+
+
+def test_a_spec_success_without_data_starts_with_its_summary_next_to_structured() -> None:
+    outcome = read_result(result(text("Nothing to show."), structured={"result": None, "_meta": {}}, meta=GENERATED))
+
+    assert outcome.data is None
+    assert outcome.summary == "Nothing to show."
+
+
+def test_spec_data_that_is_itself_a_null_result_is_still_data() -> None:
+    data = {"result": None}
+    outcome = read_result(result(text(data), structured={"result": None, "_meta": {}}, meta=GENERATED))
+
+    assert outcome.data == data
+
+
+def test_a_spec_first_block_that_is_not_json_is_left_to_the_checks() -> None:
+    outcome = read_result(result(text("not json"), structured={"total": 1}, meta=GENERATED))
+
+    assert outcome.data is None
+    assert outcome.summary == "not json"
+
+
 def test_a_spec_failure_reads_code_and_details_from_the_structured_error() -> None:
     outcome = read_result(
         result(

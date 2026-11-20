@@ -782,7 +782,7 @@
       ]
     },
     {
-      "description": "Tools explicitly assigned to the \"entity\" MCP tool group.",
+      "description": "Find, read, count, create, update and delete any shop data, such as products, orders, customers and categories, and look up entity fields. Enable it for most data questions and changes.",
       "name": "entity",
       "title": "Entity tools",
       "tools": [
@@ -795,7 +795,7 @@
       ]
     },
     {
-      "description": "Tools explicitly assigned to the \"media\" MCP tool group.",
+      "description": "Upload images and other files from a URL into the media library, for example a product cover image. Enable it when a task adds or imports a file.",
       "name": "media",
       "title": "Media tools",
       "tools": [
@@ -833,7 +833,7 @@
       ]
     },
     {
-      "description": "Tools explicitly assigned to the \"order\" MCP tool group.",
+      "description": "Change the status of an order, its payment or its delivery, for example cancel, mark as paid, refund or ship. Reading orders is in the entity toolset.",
       "name": "order",
       "title": "Order tools",
       "tools": [
@@ -841,7 +841,7 @@
       ]
     },
     {
-      "description": "Tools explicitly assigned to the \"system-config\" MCP tool group.",
+      "description": "Read and change shop settings in the core.* system configuration, for all sales channels or one. Theme colors, logos and fonts are in the theme toolset.",
       "name": "system-config",
       "title": "System config tools",
       "tools": [
@@ -850,7 +850,7 @@
       ]
     },
     {
-      "description": "Tools explicitly assigned to the \"theme\" MCP tool group.",
+      "description": "Read and change the storefront look of a sales channel: theme colors, logos and fonts.",
       "name": "theme",
       "title": "Theme tools",
       "tools": [
