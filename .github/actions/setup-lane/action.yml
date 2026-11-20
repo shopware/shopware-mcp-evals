@@ -584,12 +584,10 @@ runs:
 
         # The Redis session store, as products/tools/mcp-server/configuration.md
         # in shopware/docs configures it for production: both servers on
-        # `store: cache` over one Redis pool. The active-session registries this
-        # also used to move onto the pool are gone: shopware/shopware#21295
-        # replaced them with list versions in the database. One file rather
-        # than the docs' separate ones: a `services:` block is honoured from any
-        # config file, and it means nothing here has to merge into a
-        # services.yaml it did not write.
+        # `store: cache` over one Redis pool. A `services:` block is honoured
+        # from any config file, so this one file carries all of it. session.ttl
+        # stays below the pool's default_lifetime, or functional.sessions could
+        # not tell which of the two a session key expires with.
         #
         # Not env-scoped, unlike the rate-limit override above, so it applies to
         # whatever env the server runs.
@@ -599,7 +597,7 @@ runs:
           # writing the rest of the list, and the pipeline fails with redis
           # loaded. It did, on the 2026-10-14 nightly.
           php -r 'exit(extension_loaded("redis") ? 0 : 1);' \
-            || { echo "::error::session_store=redis needs the PHP redis extension; this PHP has none"; exit 1; }
+            || { echo "::error::session_store=redis is tested with the PHP redis extension, not Predis; this PHP has none"; exit 1; }
           cat > config/packages/zz-mcp-evals-redis-sessions.yaml <<YAML
         mcp:
             servers:
@@ -607,10 +605,12 @@ runs:
                     session:
                         store: cache
                         cache_pool: mcp.session.cache_psr16
+                        ttl: 1800
                 store_api:
                     session:
                         store: cache
                         cache_pool: mcp.session.cache_psr16
+                        ttl: 1800
 
         framework:
             cache:
