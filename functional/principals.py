@@ -98,6 +98,8 @@ class Principal:
     # For `partial`: exactly the tools the allowlist grants.
     granted: tuple[str, ...] = ()
     bearer: str = ""
+    # The Admin API action that saves this principal's MCP allowlist.
+    allowlist_path: str = ""
 
     def auth_headers(self) -> dict[str, str]:
         if self.bearer:
@@ -217,7 +219,13 @@ def _integration(
     if allowlist is not None:
         api.call("POST", f"/api/_action/integration/{integration_id}/mcp-allowlist", {"allowlist": allowlist})
     return Principal(
-        label, access_key, secret_key, expect, acl=role_id is not None, granted=_granted(allowlist, expect)
+        label,
+        access_key,
+        secret_key,
+        expect,
+        acl=role_id is not None,
+        granted=_granted(allowlist, expect),
+        allowlist_path=f"/api/_action/integration/{integration_id}/mcp-allowlist",
     )
 
 
@@ -279,7 +287,15 @@ def _user(
     )
     if allowlist is not None:
         api.call("POST", f"/api/_action/user/{user_id}/mcp-allowlist", {"allowlist": allowlist})
-    return Principal(label, access_key, secret_key, expect, acl=not admin, granted=_granted(allowlist, expect))
+    return Principal(
+        label,
+        access_key,
+        secret_key,
+        expect,
+        acl=not admin,
+        granted=_granted(allowlist, expect),
+        allowlist_path=f"/api/_action/user/{user_id}/mcp-allowlist",
+    )
 
 
 @contextmanager
