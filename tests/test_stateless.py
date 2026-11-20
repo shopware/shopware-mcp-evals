@@ -6,6 +6,9 @@ lane sent on 2026-10-27 with `shopware.mcp.protocol_era: auto`, trimmed.
 """
 
 import base64
+import socket
+import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import Self, cast, override
 
@@ -310,8 +313,8 @@ class FakeStream:
     def __exit__(self, *_exc: object) -> None:
         return None
 
-    def iter_lines(self, decode_unicode: bool = False) -> Iterator[str]:
-        del decode_unicode
+    def iter_lines(self, chunk_size: int = 512, decode_unicode: bool = False) -> Iterator[str]:
+        del chunk_size, decode_unicode
         yield from self.lines
 
     def json(self) -> object:
@@ -337,6 +340,50 @@ def test_listen_runs_the_change_after_the_ack_and_stops_when_told(monkeypatch: p
 
     assert [f.method for f in frames] == [C.ACKNOWLEDGED, S.LIST_CHANGED]
     assert acked == [True]
+
+
+def test_listen_sees_the_ack_while_an_unchunked_stream_is_still_open() -> None:
+    """A real socket, because the buffering is in requests: the server holds the
+    stream open until the ack is seen, or 5 s, whichever comes first."""
+    acked = threading.Event()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve() -> None:
+        conn = listener.accept()[0]
+        with conn:
+            # The whole request, body included: closing on unread data resets
+            # the connection.
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += conn.recv(65536)
+            head, _, rest = request.partition(b"\r\n\r\n")
+            length = next(
+                int(line.split(b":")[1]) for line in head.split(b"\r\n") if line.lower().startswith(b"content-length:")
+            )
+            while len(rest) < length:
+                rest += conn.recv(65536)
+            head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+            conn.sendall(head + ACK_LINE.encode() + b"\n\n")
+            _ = acked.wait(5)
+        listener.close()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    started = time.monotonic()
+    seen: list[float] = []
+
+    def on_ack() -> None:
+        seen.append(time.monotonic() - started)
+        acked.set()
+
+    endpoint = admin_endpoint(base_url=f"http://127.0.0.1:{listener.getsockname()[1]}")
+    frames = C.mcp_listen(endpoint, {}, on_ack=on_ack, timeout_s=10)
+    server.join(5)
+
+    assert [f.method for f in frames] == ["notifications/subscriptions/acknowledged"]
+    assert seen and seen[0] < 2, f"the ack arrived after {seen} s, with the stream's close"
 
 
 def test_listen_stops_reading_after_its_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
