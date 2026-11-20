@@ -175,6 +175,12 @@ class Reporter:
             f"{c.RED}{self.failed} failed{expected}{c.RESET}, "
             f"{c.YELLOW}{self.skipped} skipped{c.RESET} / {self.total} total"
         )
+        # The annotations only reach GitHub, so a local run says it here too.
+        for label, entry in self.recovered:
+            print(
+                f"{c.YELLOW}Known failure passed: {label}. Was waiting on {entry.issue}: "
+                f"if it is fixed, delete the entry in functional/known_failures.py.{c.RESET}"
+            )
 
     def annotations(self, title: str, *, advisory: bool = False, skips: bool = False) -> list[str]:
         """GitHub workflow commands that say what this run means, not just its exit code.
