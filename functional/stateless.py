@@ -108,7 +108,8 @@ CACHE_SCOPE = "private"
 # Lists and discovery: an allowlist change reaches a client within a minute.
 LIST_TTL_MS = 60_000
 # Reference resources that rarely change, one per TTL core uses.
-REFERENCE_TTL_MS = {"shopware://entities": 3_600_000, "shopware://currencies": 60_000}
+# Entities count as shop configuration since #22033: an app adds them at runtime.
+REFERENCE_TTL_MS = {"shopware://state-machines": 3_600_000, "shopware://entities": 60_000}
 CACHE_HINT_TOOL = "shopware-tool-search"
 CACHE_HINT_ARGS: JsonObject = {"query": "product", "maxResults": 1}
 # A server without the hints sends none on server/discover. Recorded as a skip

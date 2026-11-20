@@ -653,8 +653,8 @@ def test_a_lane_with_cache_hints_passes_each_hint_check(monkeypatch: pytest.Monk
         "stateless: server/discover may be cached for 60 s, privately (admin)",
         "stateless: tools/list may be cached for 60 s, privately (admin)",
         "stateless: a tool result is not cached (admin)",
-        "stateless: shopware://entities may be cached for 60 min, privately (admin)",
-        "stateless: shopware://currencies may be cached for 1 min, privately (admin)",
+        "stateless: shopware://state-machines may be cached for 60 min, privately (admin)",
+        "stateless: shopware://entities may be cached for 1 min, privately (admin)",
         "handshake: resources/read carries no cache hint (admin)",
     } <= passed
 
@@ -682,8 +682,8 @@ def test_a_wrong_ttl_and_a_hinted_handshake_fail(monkeypatch: pytest.MonkeyPatch
     failed = {label for label, status in records(rep) if status == "fail"}
     assert failed == {
         "stateless: tools/list may be cached for 60 s, privately (admin)",
-        "stateless: shopware://entities may be cached for 60 min, privately (admin)",
-        "stateless: shopware://currencies may be cached for 1 min, privately (admin)",
+        "stateless: shopware://state-machines may be cached for 60 min, privately (admin)",
+        "stateless: shopware://entities may be cached for 1 min, privately (admin)",
         "handshake: resources/read carries no cache hint (admin)",
     }
 
