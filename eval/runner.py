@@ -1418,6 +1418,10 @@ def run_discovery_pass(
                 if retry["passed"]:
                     result = retry
             result["attempts"] = attempts
+        except oauth_login.OAuthSignInFailed:
+            # A refresh that broke mid-run is the run's failure, not this
+            # fixture's: it must reach main() and exit CRASH_EXIT.
+            raise
         except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
             result = error_result(fixture, arm, exc)
         result["_line"] = render_line(result)
@@ -1486,6 +1490,8 @@ def triage_arms(
                     endpoint=endpoint,
                     arm=arm,
                 )
+            except oauth_login.OAuthSignInFailed:
+                raise  # the run's failure, as in run_discovery_pass
             except Exception as exc:  # noqa: BLE001 — recorded as a failed fixture
                 result = error_result(fixture, arm, exc)
             result["_line"] = render_line(result)

@@ -374,3 +374,24 @@ def test_keys_stay_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cast(str, args().auth) == "keys"
     report = E.build_report("openai", "m", [], None, True, 6)
     assert report.get("auth") == "keys"
+
+
+REFRESH_REFUSED = L.OAuthSignInFailed("the refresh was refused: HTTP 400")
+LOST = cast(E.Fixture, cast(object, {"id": "lost", "category": "unambiguous", "prompt": "p", "expected_tool": "t"}))
+
+
+def test_a_refresh_failing_mid_run_is_not_a_fixture_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The workers record any other exception as a fixture error, which an
+    error budget can absorb; a broken refresh must reach main() instead."""
+    monkeypatch.setattr(E, "run_fixture_discovery", raiser(REFRESH_REFUSED))
+
+    with pytest.raises(L.OAuthSignInFailed, match="refresh was refused"):
+        _ = E.run_discovery_pass("openai", None, [LOST], "m", None, 6, {"t"}, workers=2)
+
+
+def test_a_refresh_failing_during_triage_is_not_a_fixture_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(E, "run_fixture_discovery", raiser(REFRESH_REFUSED))
+    failed = cast(E.FixtureResult, cast(object, {"id": "lost", "passed": False}))
+
+    with pytest.raises(L.OAuthSignInFailed, match="refresh was refused"):
+        _ = E.triage_arms("openai", None, [failed], [LOST], "m", None, 6)
