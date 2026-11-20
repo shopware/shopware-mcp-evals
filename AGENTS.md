@@ -354,6 +354,7 @@ python -m functional.runner
 python -m functional.runner --skip-media-upload
 python -m functional.runner --skip-dev-tools
 python -m functional.runner --provision-principals  # CREATES integrations, users, a role (deleted after)
+python -m functional.runner --app-fixture  # INSTALLS a throwaway app (removed after); see functional/assets/README.md
 
 # Layer 2 — LLM eval. Discovery mode only: default surface + agentic meta-tool
 # loop. There was a `baseline` mode (full catalogue, single shot); it was removed
@@ -630,6 +631,8 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `pricing.yaml` | $/1M per model. Hand-maintained; `tests/test_cost.py` fails on an unpriced default model |
 | `eval/report.py` | Terminal rendering of a run, kept apart from the scoring it renders |
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
+| `functional/app_capabilities.py` | An app's MCP tool, prompt and resource end to end: installs `functional/assets/McpEvalsFixture`, checks that `tools/call`, `prompts/get` and `resources/read` return the app's own content, and removes the app in a `finally`. Behind `--app-fixture`. The prompt and resource checks need https://github.com/shopware/shopware/pull/22623 |
+| `functional/app_fixture.py` | The fixture app's zip and its server, run in-process on a free port: verifies Shopware's signatures, answers the registration proof, and serves the three capabilities |
 | `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision: since shopware/shopware#21844 a `resource_link` and no `resourceUri` from 2025-06-18, the legacy text before, and `resources/read` answering in the format of the call that stored it. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
 | `eval/oauth_login.py` | Signs a whole eval run in over OAuth (`--auth oauth`): discovery from the 401 challenge, authorization code with PKCE and `resource`, consent posted with the key's principal, a token that refreshes itself under a lock. A shop without discovery or client is `OAuthUnavailable` (a skip), anything else `OAuthSignInFailed` |
 | `functional/oauth.py` | The MCP OAuth flow (shopware/shopware#21862) with no browser: the 401 challenge, both metadata documents, authorization code with PKCE for the public client setup-lane registers (`mcp-evals-probe`), the consent decision posted with the suite's admin token, an audience-bound token that works on `/api/_mcp` and is refused on the rest of the Admin API, refresh, and the refusals. With `--provision-principals` also four users signing in with a password, each token run through the allowlist matrix. `?toolsets=` on the MCP URL has to survive discovery and sign-in, and the redirect URIs a client registers are checked by kind: https and `cursor://` go through, plain http outside loopback only under `APP_ENV=dev`. It also asks the system health check and the Administration snippets, which check a token themselves, to refuse an MCP-bound one, and that a consent which dropped the resource is refused with a hint naming the consent page. A shop without discovery is one skip naming the PR |

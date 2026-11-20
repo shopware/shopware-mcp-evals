@@ -791,6 +791,16 @@ def test_a_resource_is_read_by_uri_on_the_session(monkeypatch: pytest.MonkeyPatc
     assert headers["Mcp-Session-Id"] == "s"
 
 
+def test_a_prompt_is_fetched_by_name_on_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = recording_server(monkeypatch)
+
+    _ = C.mcp_get_prompt("s", "McpEvalsFixture-briefing")
+
+    body, headers = sent[0]
+    assert (body["method"], body["params"]) == ("prompts/get", {"name": "McpEvalsFixture-briefing"})
+    assert headers["Mcp-Session-Id"] == "s"
+
+
 def test_a_refused_request_carries_the_servers_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     """A dropped session and a missing route are both a bare 404 without it."""
     body = {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Session not found or has expired."}}
