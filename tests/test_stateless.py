@@ -458,9 +458,17 @@ ROWS = '[{"id": 1}]'
 class Lane:
     """What the lane answered, keyed by method and tool, as the scenarios see it."""
 
-    def __init__(self, session_id: str | None = None, inline: bool = False, hints: JsonObject | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str | None = None,
+        inline: bool = False,
+        hints: JsonObject | None = None,
+        tool_fails: bool = False,
+    ) -> None:
         self.session_id: str | None = session_id
         self.inline: bool = inline
+        # The cache-hint tool answers HTTP 200 with isError and no JSON-RPC error.
+        self.tool_fails: bool = tool_fails
         self.listened: list[JsonObject] = []
         # What a lane carrying shopware/shopware#22033 hints, per method or resource URI.
         self.hints: dict[str, JsonObject] = {
@@ -476,6 +484,8 @@ class Lane:
         name = (params or {}).get("name")
         if method == "tools/call" and name in S.SESSION_TOOLS:
             return tool_reply(text(HINT), is_error=True, session_id=self.session_id)
+        if method == "tools/call" and self.tool_fails and name == S.CACHE_HINT_TOOL:
+            return tool_reply(text("Search index unavailable"), is_error=True, session_id=self.session_id)
         if method == "tools/call" and self.inline:
             return tool_reply(text(ROWS), session_id=self.session_id)
         if method == "tools/call":
@@ -657,6 +667,17 @@ def test_a_lane_with_cache_hints_passes_each_hint_check(monkeypatch: pytest.Monk
         "stateless: shopware://entities may be cached for 1 min, privately (admin)",
         "handshake: resources/read carries no cache hint (admin)",
     } <= passed
+
+
+def test_a_failed_tool_call_cannot_pass_as_an_uncached_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = stub_lane(monkeypatch, Lane(tool_fails=True), answer())
+    rep = reporter()
+
+    S.verify_stateless_era(rep, ADMIN)
+
+    record = next(r for r in rep.records if r["label"] == "stateless: a tool result is not cached (admin)")
+    assert record["status"] == "fail"
+    assert "Search index unavailable" in str(record.get("error"))
 
 
 def test_a_lane_without_cache_hints_records_the_skip_naming_the_pr(monkeypatch: pytest.MonkeyPatch) -> None:

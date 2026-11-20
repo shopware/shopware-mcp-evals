@@ -309,6 +309,15 @@ def store_listen_problem(frames: list[ListenFrame]) -> str | None:
     return f"expected a {METHOD_NOT_FOUND} refusal, got {str(first)[:200] if frames else 'no answer'}"
 
 
+def tool_hint_problem(reply: StatelessReply) -> str | None:
+    """`hint_problem` for a tool result that must not be cached. The call has to
+    succeed first: a failed tool answers HTTP 200 without a JSON-RPC error, and
+    a failure carrying no hint says nothing about a result."""
+    if not reply.error and not (outcome := read_result(reply.message)).ok:
+        return f"the tool call failed: {outcome.failure[:200]}"
+    return hint_problem(reply, None)
+
+
 def hint_problem(reply: StatelessReply | JsonObject, ttl_ms: int | None) -> str | None:
     """None when an answer carries the cache hint it should.
 
@@ -349,7 +358,7 @@ def verify_cache_hints(rep: Reporter, era: Era, discovered: JsonObject) -> None:
     _report(
         rep,
         f"stateless: a tool result is not cached ({name})",
-        hint_problem(era.call("tools/call", {"name": CACHE_HINT_TOOL, "arguments": CACHE_HINT_ARGS}), None),
+        tool_hint_problem(era.call("tools/call", {"name": CACHE_HINT_TOOL, "arguments": CACHE_HINT_ARGS})),
     )
     if name != "admin":
         return
