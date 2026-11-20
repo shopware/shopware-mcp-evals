@@ -35,7 +35,7 @@ import requests
 
 import lane
 import ucp
-from eval.assertions import is_not_found
+from eval.assertions import classify_error
 from eval.result_schema import JsonObject, McpResponse, Toolset, as_list, as_object
 from functional.checks import (
     CORE_CHECKS,
@@ -150,11 +150,9 @@ def assert_tool(
     see functional/journeys.py, where each step's result is the next step's
     precondition.
 
-    The in-band check is the load-bearing part. This used to pass on "no protocol
-    error and some content", which is blind to the way UCP reports every failure:
-    HTTP 200, no JSON-RPC error, and `{"success": false}` in the body. All 27
-    admin checks were green over a mechanism that could not have seen a single
-    Store failure. `mcp_result` reads every failure the same way for both.
+    The in-band check is the load-bearing part. UCP reports every failure as
+    HTTP 200 without a JSON-RPC error, with `{"success": false}` in the text or
+    with `isError: true`. `mcp_result` reads every failure the same way for both.
 
     `harness_error` maps an error to the reason it is the environment's failure
     (see ToolCheck.harness_errors); such a failure is recorded as a check, not
@@ -167,10 +165,8 @@ def assert_tool(
     outcome = read_result(mcp_call(session, tool, args, endpoint=endpoint))
     text = outcome.text
     # A JSON-RPC error, `isError`, and an in-band `{"success": false}` alike.
-    # `isError` with plain text used to pass here: no JSON-RPC error, no envelope
-    # to find `success: false` in, and some content, so the tool was green.
     failure = outcome.failure
-    if failure and not_found_passes and is_not_found(failure):
+    if failure and not_found_passes and classify_error(outcome)[0] == "not_found":
         rep.tool_pass(tool, label, f"not found, as expected for a phantom id: {failure[:80]}")
     elif failure and harness_error and (why := harness_error(failure)):
         rep.check_fail(label, f"{why}: {failure}")
