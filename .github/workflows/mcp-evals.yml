@@ -9,6 +9,11 @@ on:
   # `labeled` starts a run the moment the label goes on; `synchronize` re-runs it
   # on later pushes for as long as the label stays. Remove the label to stop.
   #
+  # `run-functional` is the same without the LLM: the lanes and the functional
+  # suites run, the Admin and Store evals are skipped. For changes that cannot
+  # move tool selection, such as a protocol fix in core or a functional check
+  # here. `run-evals` wins when both are set.
+  #
   # WHO CAN SPEND MONEY HERE — the label IS the access control, and it is GitHub's,
   # not ours:
   #
@@ -92,6 +97,10 @@ on:
         default: 'false'
       next_major:
         description: 'Also build a lane with the V6_8_0_0 feature flag and run the functional suite on it at the newest protocol revision. Advisory. Plugins that do not boot under the flag are deactivated and named. Nightly does this anyway.'
+        required: false
+        default: 'false'
+      functional_only:
+        description: 'Skip the Admin and Store evals: build the lanes and run only the functional suites, with no LLM credit spent. For changes that cannot move tool selection.'
         required: false
         default: 'false'
 
@@ -217,18 +226,18 @@ jobs:
   # runner second and no secrets.
   fork-notice:
     name: Why this PR cannot run the evals
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && contains(github.event.pull_request.labels.*.name, 'run-evals') }}
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork && (contains(github.event.pull_request.labels.*.name, 'run-evals') || contains(github.event.pull_request.labels.*.name, 'run-functional')) }}
     runs-on: ubuntu-24.04
     steps:
       - run: |
-          echo "::warning::The \`run-evals\` label is set, but this PR comes from a fork and the evals cannot run for it. GitHub does not pass repository secrets to a \`pull_request\` run from a fork, so OPENAI_API_KEY would be empty and the suite would fail after installing Shopware — minutes spent for no measurement.%0ATo evaluate these changes, push the branch to this repository and label that PR, or run the workflow manually from the Actions tab against a branch here."
+          echo "::warning::The \`run-evals\` or \`run-functional\` label is set, but this PR comes from a fork and the evals cannot run for it. GitHub does not pass repository secrets to a \`pull_request\` run from a fork, so OPENAI_API_KEY would be empty and the suite would fail after installing Shopware — minutes spent for no measurement.%0ATo evaluate these changes, push the branch to this repository and label that PR, or run the workflow manually from the Actions tab against a branch here."
 
   static:
     name: Static checks
     # Three conditions, and the fork one is not paranoia: a labelled fork PR gets
     # no secrets, so it can only burn a full Shopware install and then fail on an
     # empty API key. `fork-notice` above explains that in the run itself.
-    if: ${{ github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'run-evals') && !github.event.pull_request.head.repo.fork) }}
+    if: ${{ github.event_name != 'pull_request' || ((contains(github.event.pull_request.labels.*.name, 'run-evals') || contains(github.event.pull_request.labels.*.name, 'run-functional')) && !github.event.pull_request.head.repo.fork) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -424,6 +433,7 @@ jobs:
           # seeded one. Empty if the seeding could not verify its write, and the
           # discovery still runs then.
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         # --provision-principals creates integrations and non-admin users with
         # each allowlist state and checks what they reach. The suite itself runs
         # as an administrator user, which the allowlist does not apply to, so
@@ -694,6 +704,12 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-static
+
       - name: Dump symfony server logs on failure
         if: failure()
         uses: ./.github/actions/dump-logs
@@ -710,10 +726,6 @@ jobs:
   # when the container compiles. No model, no credit, so it gates — including
   # the nightly auto-merge: eval/reconcile.py requires it, so a trunk commit
   # that breaks Redis-backed sessions is not pinned unseen.
-  #
-  # Behind `static`, on the commit static resolved, for the same reason as the
-  # eval jobs: a verdict that decides whether commit A is pinned has to be
-  # measured on A. It runs alongside them, so the wait costs no wall clock.
   # ---------------------------------------------------------------------------
   session-store:
     name: Redis session store
@@ -721,6 +733,8 @@ jobs:
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      MCP_EVALS_REDIS_URL: redis://localhost:6379/5
     services:
       redis:
         image: redis:alpine
@@ -751,7 +765,7 @@ jobs:
           plugins_pat: ${{ secrets.PLUGINS_PAT }}
           github_token: ${{ github.token }}
           session_store: redis
-          redis_url: redis://localhost:6379/5
+          redis_url: ${{ env.MCP_EVALS_REDIS_URL }}
 
       - name: Where the sessions live
         env:
@@ -760,7 +774,8 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
         run: |
-          python -m functional.sessions --redis-url redis://localhost:6379/5 \
+          # Must match the ttl in setup-lane's Redis recipe.
+          python -m functional.sessions --session-ttl 1800 \
             || { echo "::error::MCP sessions are not (only) in Redis — see the step log for which check failed"; exit 1; }
 
       # Everything else still has to hold on the other store: toolset
@@ -774,6 +789,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         run: python -m functional.runner --endpoint admin
 
       - name: Upload results
@@ -787,6 +803,12 @@ jobs:
           path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-session-store
 
       - name: Dump symfony server logs on failure
         if: failure()
@@ -849,6 +871,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         # With the principals, as static: what each allowlist state reaches is
         # read through tools/list, toolsets and calls, all at this revision.
         run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals
@@ -866,6 +889,7 @@ jobs:
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version "${REVISION}"
 
       - name: Upload results
@@ -878,6 +902,12 @@ jobs:
           path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-revisions-${{ matrix.revision }}
 
       - name: Dump symfony server logs on failure
         if: failure()
@@ -944,6 +974,7 @@ jobs:
           SW_SECRET_ACCESS_KEY: ${{ steps.lane.outputs.sw_secret_key }}
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
           INCOMPATIBLE: ${{ steps.lane.outputs.incompatible_plugins }}
         # The plugins setup-lane deactivated are skips naming that, not failures.
         # The principals cover missing_privilege and pointer isolation under
@@ -969,6 +1000,7 @@ jobs:
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
+          MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version 2025-11-25
 
       - name: Upload results
@@ -981,6 +1013,12 @@ jobs:
           path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-next-major
 
       - name: Dump symfony server logs on failure
         if: failure()
@@ -1000,7 +1038,11 @@ jobs:
     # `!= 'skipped'` rather than `== 'success'`: static failing on an admin check
     # is still worth the eval's diagnosis, and the store steps inside it can no
     # longer fail the job at all.
-    if: ${{ !cancelled() && needs.static.result != 'skipped' }}
+    #
+    # Skipped for a functional-only run: the `functional_only` input, or a PR
+    # that static let in through `run-functional` alone. The report already
+    # treats a skipped admin eval as "no eval ran".
+    if: ${{ !cancelled() && needs.static.result != 'skipped' && github.event.inputs.functional_only != 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1334,6 +1376,12 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-admin-eval
+
       - name: Dump symfony server logs on failure
         if: failure()
         uses: ./.github/actions/dump-logs
@@ -1355,7 +1403,8 @@ jobs:
     needs: static
     # store_ready is the preflight's verdict: if one UCP tool cannot run, none of
     # the 45 fixtures measure anything, and the run is pure spend.
-    if: ${{ !cancelled() && needs.static.result != 'skipped' && needs.static.outputs.store_plugin_ok == 'true' && needs.static.outputs.store_ready == 'true' }}
+    # Skipped for a functional-only run, like admin-eval.
+    if: ${{ !cancelled() && needs.static.result != 'skipped' && needs.static.outputs.store_plugin_ok == 'true' && needs.static.outputs.store_ready == 'true' && github.event.inputs.functional_only != 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -1410,11 +1459,6 @@ jobs:
           # --advisory: this step is continue-on-error, so its row must not be
           # read as a gating verdict. Without the suite label it rendered as a
           # third, unexplained openai/gpt-4o result.
-          # Triage matters more here than on admin: every UCP tool is unsafe to
-          # execute (no dryRun, no committed Store snapshot), so this suite is
-          # graded on selection alone and its failures cluster — order-get and
-          # checkout-get trade prompts. The arms are what say whether that is a
-          # description collision or the discovery layer.
           if [ "${TRIAGE}" = "true" ]; then args+=(--triage); fi
 
           # --output is fixed rather than left to the default timestamped name
@@ -1440,6 +1484,12 @@ jobs:
           path: results/
           retention-days: 14
           if-no-files-found: warn
+
+      - name: Keep the lane's logs
+        if: always()
+        uses: ./.github/actions/keep-logs
+        with:
+          name: logs-store-eval
 
       - name: Dump symfony server logs on failure
         if: failure()

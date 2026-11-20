@@ -244,47 +244,35 @@ def test_the_store_regression_this_fixes() -> None:
     assert passed is True and reason is None
 
 
-def test_a_ucp_not_found_is_recognised_by_its_code_not_its_prose() -> None:
-    """The exact message get_order returned on nightly run 35825932203, three
-    times — once per order fixture, every one a correct pick.
+def ucp_error(kind: str, code: str, message: str) -> str:
+    """The body a UCP tool answers a failure with (`UcpMcpToolContext::failure()` in agentic-commerce)."""
+    return payload(success=False, error={"type": kind, "message": message, "code": code, "severity": "recoverable"})
 
-    Every other UCP not-found says "was not found" somewhere in its prose, which
-    is why the prose markers had caught them all. This one is a deliberately
-    non-leaking refusal: it names no absence, only that the order is not
-    available to this request. The UCP code in front of it is the only reliable
-    signal, and the refusal is one the spec requires of a guest.
-    """
-    refusal = (
-        'not_found: Order "019f0a186a007d47bafa9bc8bb53c140" is not available to this request. '
-        "A guest order can only be read back by the checkout session that placed it, "
-        "and a platform credential does not authenticate a buyer."
+
+GUEST_ORDER_REFUSAL = ucp_error(
+    "not_found",
+    "not_found",
+    'Order "019f0a186a007d47bafa9bc8bb53c140" is not available to this request.',
+)
+
+
+@pytest.mark.parametrize("is_error", [False, True], ids=["in-band", "isError"])
+def test_a_ucp_not_found_is_graded_on_its_code_when_its_prose_names_no_absence(is_error: bool) -> None:
+    graded_guest_order_refusal = from_text(GUEST_ORDER_REFUSAL, is_error=is_error)
+
+    assert A.classify_error(graded_guest_order_refusal) == ("not_found", "code")
+    assert A.check("accepted", graded_guest_order_refusal) == (True, None)
+    assert A.check("data", graded_guest_order_refusal) == (False, "not_found")
+
+
+@pytest.mark.parametrize("is_error", [False, True], ids=["in-band", "isError"])
+def test_a_ucp_validation_error_that_mentions_not_found_still_fails(is_error: bool) -> None:
+    validation_error_mentioning_not_found = ucp_error("validation", "invalid_request", "status must not be not_found")
+
+    assert A.check("accepted", from_text(validation_error_mentioning_not_found, is_error=is_error)) == (
+        False,
+        "invalid_arguments",
     )
-
-    assert A.is_not_found(refusal) is True
-    assert check("accepted", None, refusal) == (True, None)
-    assert check("data", None, refusal) == (False, "not_found"), "a refusal is still not data"
-
-
-def test_other_ucp_codes_are_not_mistaken_for_not_found() -> None:
-    """The code marker must not make every UCP error read as a phantom id."""
-    for error in (
-        "invalid_request: line_items is required",
-        "validation: Completed checkout sessions cannot be updated.",
-        "internal: The tool call failed unexpectedly.",
-    ):
-        assert A.is_not_found(error) is False, error
-
-
-def test_the_code_counts_only_in_the_code_position() -> None:
-    """`check()` tests not-found BEFORE validation, so an unanchored match would
-    let a validation error that merely MENTIONS the token pass a malformed call
-    at the accepted tier — and inflate the rate it exists to keep honest."""
-    rejected = "validation: status must not be not_found"
-
-    assert A.is_not_found(rejected) is False
-    assert check("accepted", None, rejected) == (False, "invalid_arguments")
-    # Leading whitespace is still the code position.
-    assert A.is_not_found('  not_found: Cart "x" was not found.') is True
 
 
 def test_an_environment_failure_is_still_neither() -> None:
@@ -324,24 +312,9 @@ def test_an_in_band_not_found_still_satisfies_the_accepted_tier() -> None:
 
 def test_an_is_error_body_is_read_in_band_not_as_raw_json() -> None:
     """Since shopware/shopware#19965 the server flags a `{"success": false}` body
-    with `isError: true`, so mcp_call_error hands the same body over as raw JSON.
-
-    Measured on the Iteration 3 trunk lane: the guest get_order refusal arrived
-    that way, the anchored `not_found:` never saw the code behind the `{`, and
-    all three correct get_order picks graded as tool_error.
-    """
-    body = json.dumps(
-        {
-            "success": False,
-            "error": {
-                "type": "not_found",
-                "message": 'Order "019f0a186a007d47bafa9bc8bb53c140" is not available to this request.',
-            },
-        }
-    )
-
-    assert check("accepted", body, body) == (True, None)
-    assert check("data", body, body) == (False, "not_found")
+    with `isError: true`, so mcp_call_error hands the same body over as raw JSON."""
+    assert check("accepted", GUEST_ORDER_REFUSAL, GUEST_ORDER_REFUSAL) == (True, None)
+    assert check("data", GUEST_ORDER_REFUSAL, GUEST_ORDER_REFUSAL) == (False, "not_found")
     # A transport error with no result text is still graded on its own words.
     assert check("accepted", None, "500 Internal Server Error") == (False, "tool_error")
 
@@ -438,7 +411,7 @@ def coded(message: str, code: str | None) -> ToolOutcome:
         # UCP's name for a schema violation, measured on agentic-commerce 1.4.0.
         ('Validation failed for schema "cart.create.request"', "invalid_request", ("invalid_arguments", "code")),
         # No code, or the server's uninformative default: the prose decides.
-        ('not_found: Order "o1" is not available to this request', "tool_error", ("not_found", "prose")),
+        ('Order "o1" was not found', "tool_error", ("not_found", "prose")),
         ("Validation failed for schema", None, ("invalid_arguments", "prose")),
         ("Cart is empty", None, ("tool_error", "prose")),
     ],

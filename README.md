@@ -556,6 +556,12 @@ credit while most changes here are already covered by `lint.yml`. Adding the lab
 starts a run, and it re-runs on each subsequent push for as long as the label
 stays. An unlabelled PR shows the job as skipped.
 
+The **`run-functional`** label, or the `functional_only` dispatch input, runs the
+same lanes and functional suites but skips the Admin and Store evals, so no LLM
+credit is spent. It fits changes that cannot move tool selection, for example a
+protocol fix in core dispatched with `shopware_ref`. With both labels on a PR,
+`run-evals` wins.
+
 `eval_provider` is a dropdown with one option, `openai`, because that is the only
 provider with a key in this repo. The runner supports `--provider anthropic` and
 the workflow already passes `ANTHROPIC_API_KEY` through, so enabling it is adding
@@ -1032,10 +1038,18 @@ resource metadata, the client signs in with the authorization code grant and
 PKCE, and the token is bound to `/api/_mcp` by its audience. The suite keeps
 using access keys; `functional/oauth.py` walks the OAuth flow on its own, as
 part of the admin suite at the default revision. A shop without discovery is
-one skip naming the PR. With `--provision-principals` it also signs in as two
-throwaway non-admin users, one allowlisted three tools and one without an
-allowlist, and checks that `tools/list` with `?toolsets=all` shows exactly the
-allowlist plus the meta-tools and that a tool outside it is refused.
+one skip naming the PR. With `--provision-principals` it also signs in as four
+throwaway users: no allowlist, two tools, "All capabilities", and an
+administrator with two tools saved. Each token goes through the same allowlist
+checks as an access key, on every surface.
+
+Two more things a client depends on are checked. A URL pinned with `?toolsets=`
+keeps its query through the challenge and the metadata, and a grant for it
+yields a token for the bare endpoint that opens a session on both. An https
+and a `cursor://` redirect URI go through consent. A plain-http one outside
+loopback is refused with `FRAMEWORK__OAUTH_INSECURE_REDIRECT_URI`, except under
+`APP_ENV=dev`. Set `MCP_EVALS_APP_ENV` to the server's environment, or that
+check is a skip.
 
 To run a fixture set on an OAuth token instead of the key, pass `--auth oauth`
 to `eval.runner` (admin endpoint only). It discovers the authorization server
@@ -1058,6 +1072,12 @@ shopware:
                 name: 'mcp-evals probe'
                 redirect_uris:
                     - 'http://127.0.0.1/callback'
+            mcp-evals-redirects:
+                name: 'mcp-evals redirect URIs'
+                redirect_uris:
+                    - 'https://mcp-evals.example/callback'
+                    - 'cursor://mcp-evals/callback'
+                    - 'http://mcp-evals.example/callback'
             claude-code:
                 name: 'Claude Code'
                 redirect_uris:

@@ -87,11 +87,11 @@ class ToolError:
     def describe(self) -> str:
         """One line for a report or a model, in the form graders match on.
 
-        `type` is the classification UCP already made, kept in front so the
-        anchored `not_found:` matcher in eval.assertions still sees it.
-        `violations` is where a UCP schema error's actual answer is: the message
-        says only 'Validation failed for schema "checkout.create.request"',
-        and `["$.line_items is required"]` sits next to it.
+        `type` is the classification UCP already made, kept in front for the
+        reader of the report. `violations` is where a UCP schema error's actual
+        answer is: the message says only 'Validation failed for schema
+        "checkout.create.request"', and `["$.line_items is required"]` sits next
+        to it.
         """
         kind = self.details.get("type")
         text = f"{kind!s}: {self.message}".strip(": ").strip() if kind else self.message
@@ -280,6 +280,28 @@ def _structural(text: str, key: str) -> JsonObject | None:
     return as_object(decoded.get(key)) if len(decoded) == 1 and key in decoded else None
 
 
+def _is_json(text: str) -> bool:
+    try:
+        _ = cast(object, json.loads(text))
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def _without_data_text(first: str, structured: object) -> bool:
+    """Whether a success's texts start after its data, because there is none.
+
+    A result without data but with metadata sends `{"result": null, "_meta": …}`
+    and no data block (shopware/shopware@7f64703f325), so its first text is the
+    summary or the metadata block. Data that is itself `{"result": null}` is
+    sent as JSON, which neither of those is.
+    """
+    wrapper = as_object(structured)
+    if set(wrapper) != {"result", "_meta"} or wrapper["result"] is not None:
+        return False
+    return _structural(first, "_meta") is not None or not _is_json(first)
+
+
 def _spec(
     texts: tuple[str, ...], structured: object, result_meta: JsonObject, is_error: bool
 ) -> tuple[object, ToolError | None, JsonObject, str | None]:
@@ -287,6 +309,20 @@ def _spec(
     meta: JsonObject = {}
     details: JsonObject = {}
     rest: list[str] = []
+    # A success with `structuredContent` has its data as the first block, unless
+    # it has no data. Taken before the structural blocks are sorted out: data
+    # whose only key is `_meta` encodes exactly like the metadata block.
+    data_text: str | None = None
+    # Only when that block is JSON: a reply that breaks the format is reported
+    # by the checks, not raised here.
+    if (
+        not is_error
+        and structured is not None
+        and texts
+        and not _without_data_text(texts[0], structured)
+        and _is_json(texts[0])
+    ):
+        data_text, texts = texts[0], texts[1:]
     for text in texts:
         if (block := _structural(text, "_meta")) is not None:
             meta = block
@@ -306,6 +342,8 @@ def _spec(
         return None, ToolError(message, _str(error.get("code")), as_object(error.get("details")) or details), meta, None
     # The data comes first, as JSON. A result stored behind a link may have none,
     # and then the first block is already the summary — prose, not JSON.
+    if data_text is not None:
+        return cast(object, json.loads(data_text)), None, meta, (rest[0] if rest else None)
     data: object = None
     if rest:
         try:

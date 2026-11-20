@@ -146,6 +146,11 @@ sequenceDiagram
   credit, and most changes here are covered by `lint.yml`. Add the label to start
   a run; it then re-runs on each push while the label stays. Unlabelled PRs show
   the job as skipped rather than not appearing at all.
+- **Functional only, without the LLM.** The **`run-functional`** label on a PR, or
+  the `functional_only` dispatch input, builds the lanes and runs the functional
+  suites but skips the Admin and Store evals. Use it for changes that cannot move
+  tool selection, such as a protocol fix in core tested via `shopware_ref`.
+  `run-evals` wins when a PR carries both labels.
 - **`openai` is the only working provider.** The repo has `OPENAI_API_KEY` and
   `PLUGINS_PAT`, no `ANTHROPIC_API_KEY`, so `eval_provider` is a one-option
   dropdown. The runner itself supports `--provider anthropic` and the workflow
@@ -198,7 +203,9 @@ sequenceDiagram
   naming the PR (`PINNED_REPORTED_DISABLED`) until `shopware.sha` carries the
   fix, then the tolerance goes.
 - **A tool can fail while the transport succeeds.** UCP reports every failure as
-  HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
+  HTTP 200 without a JSON-RPC error. The result carries `{"success": false}` in
+  its text, or `isError: true` with plain text from shopware/shopware#20948 on.
+  Anything
   asserting on a tool call must read it through `mcp_result.read_result` and its
   `failure`, or it is blind to the entire Store failure mode — which is exactly
   what happened to 27 admin checks for months.
@@ -438,7 +445,7 @@ python -m functional.runner --endpoint store --allow-mutations
 >   one reads the checkout and stops, most likely because it offers no
 >   "express" option to pick (unverified; see its `notes`).
 >
-> `first_try_rate` 53% against a 82% pass rate is the ritual's footprint:
+> `first_try_rate` 53% against an 82% pass rate is the ritual's footprint:
 > recovery is doing the work the first call should.
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
@@ -532,11 +539,19 @@ prompts/list, a direct call), and deletes them again:
 | principal | allowlist | must reach |
 |---|---|---|
 | integration, non-admin user | unset | the meta-tools, nothing else; every call refused |
-| integration | "All capabilities" | exactly what the admin user reaches |
-| integration, non-admin user | one tool | that tool; a tool from another toolset is refused |
+| integration, non-admin user | "All capabilities" | exactly what the admin user reaches |
+| integration, non-admin user, integration with a role | two tools from one toolset | exactly those two, not their toolset siblings; a tool from another toolset is refused |
+| administrator user | two tools, or an empty list | everything: an administrator bypasses whatever was saved |
 
-The one-tool user is also held to its ACL role, which grants `currency:read` only. Calling its
-tool on `product` must fail with the `missing_privilege` code.
+Every principal that is not an administrator user or an integration flagged
+admin is also held to its ACL role, which grants `currency:read` only. Calling
+an allowed tool on `product` must fail with the `missing_privilege` code. The
+integration with a role is the one integration that is not flagged admin, so
+it shows ACL applying to an integration at all.
+
+The same matrix runs on OAuth tokens. `functional/oauth.py` signs in as four
+throwaway users (no allowlist, two tools, "All capabilities", and an
+administrator with two tools) and hands each bearer token to the same checks.
 
 **"All capabilities" on an integration does not save `null`.** Since #20600 the
 Administration writes every name `/api/_action/mcp/capabilities` returned when
@@ -549,8 +564,12 @@ before #20600.
 
 Since shopware/shopware#21862 `/api/_mcp` also takes an OAuth access token bound
 to it by audience. The suite authenticates with access keys by default;
-`functional/oauth.py` walks the OAuth flow on its own, with the public client
-setup-lane writes to `config/packages/zzz-mcp-evals-oauth.yaml`.
+`functional/oauth.py` walks the OAuth flow on its own, with the public clients
+setup-lane writes to `config/packages/zzz-mcp-evals-oauth.yaml`: `mcp-evals-probe`
+for the flow, and `mcp-evals-redirects`, which holds one https, one `cursor://`
+and one plain-http redirect URI. Plain http outside loopback is accepted only
+under `APP_ENV=dev`, so setup-lane passes the server's environment as
+`MCP_EVALS_APP_ENV`; without it that one check is a skip.
 
 `eval.runner --auth oauth` (or `EVAL_AUTH=oauth`) runs a whole admin fixture set
 on an OAuth token instead (`eval/oauth_login.py`). Every URL is discovered: the
@@ -599,7 +618,7 @@ the `Mcp-Session-Id` response header scopes toolset enablement.
 | `functional/checks.py` | The per-tool assertion table: payload, label, prerequisites |
 | `functional/large_results.py` | A result above 100 KB (shopware/shopware#20951): stored behind a signed pointer, with the right shape per revision: since shopware/shopware#21844 a `resource_link` and no `resourceUri` from 2025-06-18, the legacy text before, and `resources/read` answering in the format of the call that stored it. Readable by the same principal on a new session, refused for a tampered expiry and for a second integration (`--provision-principals`). A server older than the PR is one skip naming it |
 | `eval/oauth_login.py` | Signs a whole eval run in over OAuth (`--auth oauth`): discovery from the 401 challenge, authorization code with PKCE and `resource`, consent posted with the key's principal, a token that refreshes itself under a lock. A shop without discovery or client is `OAuthUnavailable` (a skip), anything else `OAuthSignInFailed` |
-| `functional/oauth.py` | The MCP OAuth flow (shopware/shopware#21862) with no browser: the 401 challenge, both metadata documents, authorization code with PKCE for the public client setup-lane registers (`mcp-evals-probe`), the consent decision posted with the suite's admin token, an audience-bound token that works on `/api/_mcp` and is refused on the rest of the Admin API, refresh, and the refusals. With `--provision-principals` also two non-admin users signing in with a password: one allowlisted three tools sees exactly them plus the meta-tools and is refused another, one without an allowlist sees the meta-tools only. It also asks the system health check and the Administration snippets, which check a token themselves, to refuse an MCP-bound one, and that a consent which dropped the resource is refused with a hint naming the consent page. A shop without discovery is one skip naming the PR |
+| `functional/oauth.py` | The MCP OAuth flow (shopware/shopware#21862) with no browser: the 401 challenge, both metadata documents, authorization code with PKCE for the public client setup-lane registers (`mcp-evals-probe`), the consent decision posted with the suite's admin token, an audience-bound token that works on `/api/_mcp` and is refused on the rest of the Admin API, refresh, and the refusals. With `--provision-principals` also four users signing in with a password, each token run through the allowlist matrix. `?toolsets=` on the MCP URL has to survive discovery and sign-in, and the redirect URIs a client registers are checked by kind: https and `cursor://` go through, plain http outside loopback only under `APP_ENV=dev`. It also asks the system health check and the Administration snippets, which check a token themselves, to refuse an MCP-bound one, and that a consent which dropped the resource is refused with a hint naming the consent page. A shop without discovery is one skip naming the PR |
 | `functional/result_format.py` | The result format per protocol revision (shopware/shopware#20948): one session each on 2024-11-05, 2025-06-18 and 2025-11-25, the same probes on each. Checks `isError`, the error code, the `generatedAt` stamp, and that `structuredContent` arrives exactly from 2025-06-18 and agrees with the text. Since shopware/shopware#21844: the text format follows the revision, and the model's metadata (`dryRun` of a dry-run upsert, `total`) is in the text's `_meta` on every revision and in `structuredContent._meta` from 2025-06-18. A server older than the renderer is one skip naming the PR, one older than #21844 one more |
 | `functional/stateless.py` | The stateless 2026-07-28 revision: `server/discover` with no session. Today a skip naming `withoutModernEra()` and shopware/shopware#19969, accepted only when the refusal names that revision. An answer fails until the scenarios in the plan exist |
 | `eval/snapshot_tools.py` | Full-catalogue snapshot (default surface + toolsets + tools) |
@@ -629,8 +648,10 @@ only, the UCP tools are deferred behind the `ucp` toolset and
 default surface by claiming core's reserved `discovery` group;
 `functional/runner.py` still accepts that layout by reading which UCP tools sit
 in no toolset, and shopware/shopware#20725 (open) is the core guard against it.
-The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
-provisioned state; tool *selection* for those is covered by the LLM eval.
+After the discovery mechanics, the functional suite runs the UCP buyer journey
+as a guest and as a customer, against the state it provisions (`run_store()` in
+`functional/runner.py`). Tool *selection* for those tools is covered by the
+LLM eval.
 
 Where the tools come from:
 
