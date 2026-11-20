@@ -3,7 +3,7 @@
 Status: in progress since 2026-10-20. Phases 0 to 3 are built and pass on the
 local trunk lane at shopware 7a96f6086ec (2026-10-20). Phase 4 is built and has
 not run in CI yet. Phase 5's probe is built; its scenarios wait on
-shopware/shopware#19969. Phase 6 items 2 and 3 are done; item 1 is open.
+shopware/shopware#19969. Phase 6 items 2 and 3 are done; item 1 is half answered.
 
 ## Why
 
@@ -256,6 +256,12 @@ on #19969.
 1. Find out which revision Claude, ChatGPT and the MCP Inspector negotiate today,
    and **which content they hand the model**: the text block, `structuredContent`,
    or both. This is the open question that decides what the eval should feed.
+   *Half answered 2026-10-22:* Claude Code and the MCP Inspector both negotiate
+   2025-11-25, and Claude Code hands its model `structuredContent`, not the
+   text the eval feeds. Claude Code also probes `server/discover` at 2026-07-28
+   first, so it takes the stateless era as soon as core serves it. The details
+   are in `docs/plans/coverage-matrix.md`. claude.ai, Cursor and ChatGPT are
+   still open.
 2. Run one paired eval: 2024-11-05 against the newest revision, same commit.
    Under the 6.7 format the model-facing text is identical, so pass rates should
    match within noise. If they do, switch the default. If they do not, find out
