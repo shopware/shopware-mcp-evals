@@ -146,6 +146,11 @@ sequenceDiagram
   credit, and most changes here are covered by `lint.yml`. Add the label to start
   a run; it then re-runs on each push while the label stays. Unlabelled PRs show
   the job as skipped rather than not appearing at all.
+- **Functional only, without the LLM.** The **`run-functional`** label on a PR, or
+  the `functional_only` dispatch input, builds the lanes and runs the functional
+  suites but skips the Admin and Store evals. Use it for changes that cannot move
+  tool selection, such as a protocol fix in core tested via `shopware_ref`.
+  `run-evals` wins when a PR carries both labels.
 - **`openai` is the only working provider.** The repo has `OPENAI_API_KEY` and
   `PLUGINS_PAT`, no `ANTHROPIC_API_KEY`, so `eval_provider` is a one-option
   dropdown. The runner itself supports `--provider anthropic` and the workflow
@@ -198,7 +203,9 @@ sequenceDiagram
   naming the PR (`PINNED_REPORTED_DISABLED`) until `shopware.sha` carries the
   fix, then the tolerance goes.
 - **A tool can fail while the transport succeeds.** UCP reports every failure as
-  HTTP 200, no JSON-RPC error, `{"success": false}` in the body. Anything
+  HTTP 200 without a JSON-RPC error. The result carries `{"success": false}` in
+  its text, or `isError: true` with plain text from shopware/shopware#20948 on.
+  Anything
   asserting on a tool call must read it through `mcp_result.read_result` and its
   `failure`, or it is blind to the entire Store failure mode — which is exactly
   what happened to 27 admin checks for months.
@@ -435,7 +442,7 @@ python -m functional.runner --endpoint store --allow-mutations
 >   one reads the checkout and stops, most likely because it offers no
 >   "express" option to pick (unverified; see its `notes`).
 >
-> `first_try_rate` 53% against a 82% pass rate is the ritual's footprint:
+> `first_try_rate` 53% against an 82% pass rate is the ritual's footprint:
 > recovery is doing the work the first call should.
 
 **Gate: the primary must reach 90%, the second validator 85%.** Each gates
@@ -614,8 +621,10 @@ only, the UCP tools are deferred behind the `ucp` toolset and
 default surface by claiming core's reserved `discovery` group;
 `functional/runner.py` still accepts that layout by reading which UCP tools sit
 in no toolset, and shopware/shopware#20725 (open) is the core guard against it.
-The functional suite verifies discovery mechanics only — it does not execute cart/checkout, which needs
-provisioned state; tool *selection* for those is covered by the LLM eval.
+After the discovery mechanics, the functional suite runs the UCP buyer journey
+as a guest and as a customer, against the state it provisions (`run_store()` in
+`functional/runner.py`). Tool *selection* for those tools is covered by the
+LLM eval.
 
 Where the tools come from:
 
