@@ -11,9 +11,10 @@ import json
 
 import pytest
 
+import mcp_result as M
 from eval import assertions as A
 from eval.result_schema import ExpectSpec, JsonObject, McpResponse
-from mcp_result import TOOL_RESULT_URI_PREFIX, ToolError, from_text, read_result
+from mcp_result import TOOL_RESULT_URI_PREFIX, ToolError, ToolOutcome, from_text, read_result
 
 GENERATED: JsonObject = {"shopware/generatedAt": "2026-10-20T10:00:00+00:00"}
 POINTER = f"{TOOL_RESULT_URI_PREFIX}0191.1760958000.abc"
@@ -260,6 +261,51 @@ def test_a_spec_result_without_data_starts_with_its_summary() -> None:
     assert outcome.summary == "Stored behind a link."
 
 
+def test_spec_data_whose_only_key_is_meta_is_data_not_metadata() -> None:
+    """`{"_meta": …}` as data encodes exactly like the metadata block. With
+    `structuredContent` present, the first block is the data."""
+    data = {"_meta": {"id": "x"}}
+    outcome = read_result(result(text(data), text({"_meta": {"note": "n"}}), structured=data, meta=GENERATED))
+
+    assert outcome.data == data
+    assert outcome.meta == {"note": "n"}
+
+
+def test_a_spec_success_without_data_but_with_metadata_has_no_data_block() -> None:
+    """`{"result": null, "_meta": …}` sends no data block (shopware/shopware@7f64703f325)."""
+    outcome = read_result(
+        result(
+            text({"_meta": {"note": "n"}}),
+            structured={"result": None, "_meta": {"note": "n"}},
+            meta=GENERATED,
+        )
+    )
+
+    assert outcome.data is None
+    assert outcome.meta == {"note": "n"}
+
+
+def test_a_spec_success_without_data_starts_with_its_summary_next_to_structured() -> None:
+    outcome = read_result(result(text("Nothing to show."), structured={"result": None, "_meta": {}}, meta=GENERATED))
+
+    assert outcome.data is None
+    assert outcome.summary == "Nothing to show."
+
+
+def test_spec_data_that_is_itself_a_null_result_is_still_data() -> None:
+    data = {"result": None}
+    outcome = read_result(result(text(data), structured={"result": None, "_meta": {}}, meta=GENERATED))
+
+    assert outcome.data == data
+
+
+def test_a_spec_first_block_that_is_not_json_is_left_to_the_checks() -> None:
+    outcome = read_result(result(text("not json"), structured={"total": 1}, meta=GENERATED))
+
+    assert outcome.data is None
+    assert outcome.summary == "not json"
+
+
 def test_a_spec_failure_reads_code_and_details_from_the_structured_error() -> None:
     outcome = read_result(
         result(
@@ -380,3 +426,69 @@ def test_a_not_found_grades_the_same_on_every_shape(shape: str) -> None:
 def test_a_json_rpc_error_without_a_numeric_code_has_none() -> None:
     assert read_result({"error": {"message": "x"}}).error == ToolError("x")
     assert read_result({"error": {"code": True, "message": "x"}}).error == ToolError("x")
+
+
+# --- the format per revision (shopware/shopware#21844) -----------------------------
+
+
+def _text(text: str) -> ToolOutcome:
+    return read_result({"result": {"content": [{"type": "text", "text": text}], "_meta": GENERATED}})
+
+
+LEGACY_REPLY = '{"success": true, "data": []}'
+
+
+def test_the_format_follows_the_revision() -> None:
+    assert [M.format_for(r) for r in ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25", "2026-07-28")] == [
+        "legacy",
+        "legacy",
+        "spec",
+        "spec",
+        "spec",
+    ]
+
+
+def test_the_verdict_tells_the_generations_apart() -> None:
+    legacy, spec = _text(LEGACY_REPLY), _text("[]")
+    refused = read_result({"error": {"code": -32602, "message": "nope"}})
+
+    assert M.format_verdict([("2024-11-05", legacy), ("2025-06-18", spec), ("2025-06-18", refused)]) == "by_revision"
+    assert M.format_verdict([("2024-11-05", legacy), ("2025-06-18", legacy)]) == "one_format"
+    assert M.format_verdict([("2024-11-05", spec), ("2025-06-18", spec)]) == "one_format"
+    assert M.format_verdict([("2024-11-05", spec), ("2025-06-18", legacy)]) == "mixed"
+
+
+def test_the_verdict_names_a_run_without_a_rendered_reply() -> None:
+    refused = read_result({"error": {"code": -32602, "message": "nope"}})
+
+    assert M.format_verdict([]) == "no_format"
+    assert M.format_verdict([("2024-11-05", refused), ("2025-06-18", refused)]) == "no_format"
+
+
+def _structured(data: object, structured: object, meta: dict[str, object], summary: str | None = None) -> ToolOutcome:
+    texts = [json.dumps(data), *([summary] if summary else []), json.dumps({"_meta": meta})]
+    return read_result(
+        {
+            "result": {
+                "content": [{"type": "text", "text": t} for t in texts],
+                "structuredContent": structured,
+                "_meta": {"shopware/generatedAt": "2026-10-22T10:00:00+00:00"},
+            }
+        }
+    )
+
+
+def test_model_meta_drops_the_bookkeeping_and_adds_the_summary() -> None:
+    outcome = _structured([1], {"result": [1]}, {"dryRun": True, "responseSize": 9, "resourceUri": "x"}, "one row")
+
+    assert outcome.model_meta == {"dryRun": True, "summary": "one row"}
+
+
+def test_structured_meta_and_data_split_the_reserved_key() -> None:
+    wrapped = _structured([1], {"result": [1], "_meta": {"dryRun": True}}, {"dryRun": True})
+    plain = _structured({"a": 1}, {"a": 1}, {})
+    own = _structured({"_meta": 1, "rows": []}, {"_meta": 1, "rows": []}, {})
+
+    assert (wrapped.structured_meta, wrapped.structured_data) == ({"dryRun": True}, {"result": [1]})
+    assert (plain.structured_meta, plain.structured_data) == (None, {"a": 1})
+    assert own.data_has_meta_key and (own.structured_meta, own.structured_data) == (None, {"_meta": 1, "rows": []})
