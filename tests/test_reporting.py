@@ -34,12 +34,13 @@ def test_record_shapes_match_bash_schema() -> None:
     rep.check_fail("b", "why")
     rep.tool_pass("shopware-x", "c", "preview text")
     rep.tool_fail("shopware-y", "d", "err")
-    rep.skip("e")  # skips are counted, never recorded
+    rep.skip("e")  # recorded too, as a check with no reason of its own
     assert rep.records == [
-        {"tool": "check", "label": "a", "status": "pass"},
-        {"tool": "check", "label": "b", "status": "fail", "error": "why"},
-        {"tool": "shopware-x", "label": "c", "status": "pass", "preview": "preview text"},
-        {"tool": "shopware-y", "label": "d", "status": "fail", "error": "err"},
+        {"tool": "check", "label": "a", "status": "pass", "principal": "admin"},
+        {"tool": "check", "label": "b", "status": "fail", "error": "why", "principal": "admin"},
+        {"tool": "shopware-x", "label": "c", "status": "pass", "preview": "preview text", "principal": "admin"},
+        {"tool": "shopware-y", "label": "d", "status": "fail", "error": "err", "principal": "admin"},
+        {"tool": "check", "label": "e", "status": "skipped", "principal": "admin"},
     ]
 
 
@@ -54,7 +55,7 @@ def test_write_report_roundtrip(tmp_path: Path) -> None:
     assert set(report) == {"timestamp", "server", "pass", "fail", "skip", "total", "tools", "health"}
     assert (report["pass"], report["fail"], report["skip"], report["total"]) == (1, 1, 1, 3)
     assert report["server"] == "srv"
-    assert len(as_list(report["tools"])) == 2
+    assert len(as_list(report["tools"])) == 3
     # Structural checks describe the server, not a tool, so they contribute no
     # health entries — there are no fixtures to gate on them.
     assert report["health"] == {}
@@ -95,7 +96,9 @@ def test_a_skip_is_recorded_rather_than_only_counted() -> None:
     rep.tool_skip("shopware-x", "label", "because")
 
     assert rep.skipped == 1
-    assert rep.records == [{"tool": "shopware-x", "label": "label", "status": "skipped", "reason": "because"}]
+    assert rep.records == [
+        {"tool": "shopware-x", "label": "label", "status": "skipped", "reason": "because", "principal": "admin"}
+    ]
 
 
 def test_write_health_is_a_standalone_artifact(tmp_path: Path) -> None:
@@ -139,3 +142,46 @@ def test_summary_reports_all_three_counts_and_the_total(capsys: pytest.CaptureFi
 
     assert "1 passed" in out and "1 failed" in out and "1 skipped" in out
     assert "/ 3 total" in out
+
+
+def test_records_carry_the_caller_the_section_runs_as() -> None:
+    rep = Reporter("srv", color=False)
+    rep.check_pass("own key")
+    with rep.as_principal("oauth"):
+        rep.check_pass("token")
+        with rep.as_principal("allowlist"):
+            rep.skip("nested")
+        rep.tool_fail("shopware-x", "after nesting", "boom")
+    rep.check_pass("own key again")
+
+    assert [(r["label"], r.get("principal")) for r in rep.records] == [
+        ("own key", "admin"),
+        ("token", "oauth"),
+        ("nested", "allowlist"),
+        ("after nesting", "oauth"),
+        ("own key again", "admin"),
+    ]
+
+
+def test_the_caller_is_restored_when_a_section_raises() -> None:
+    rep = Reporter("srv", color=False)
+    with pytest.raises(RuntimeError), rep.as_principal("oauth"):
+        raise RuntimeError("aborted")
+
+    assert rep.principal == "admin"
+
+
+def test_an_unknown_caller_is_refused() -> None:
+    with pytest.raises(ValueError, match="unknown principal"), Reporter("srv", color=False).as_principal("root"):
+        pass
+
+
+def test_the_report_names_its_lane_and_endpoint_when_told(tmp_path: Path) -> None:
+    rep = Reporter("srv", color=False, endpoint="store", lane="6.8")
+    rep.write_report(tmp_path / "with.json")
+    Reporter("srv", color=False).write_report(tmp_path / "without.json")
+
+    told = cast(JsonObject, cast(object, json.loads((tmp_path / "with.json").read_text())))
+    untold = cast(JsonObject, cast(object, json.loads((tmp_path / "without.json").read_text())))
+    assert (told["lane"], told["endpoint"]) == ("6.8", "store")
+    assert "lane" not in untold and "endpoint" not in untold

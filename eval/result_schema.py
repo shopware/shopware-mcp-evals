@@ -356,6 +356,9 @@ class FunctionalRecord(TypedDict, total=False):
     # On a failure functional/known_failures.py explains: the issue it waits on.
     # Still status "fail", so a reader that predates the field sees what it saw.
     known_issue: str
+    # Who made the calls: "admin" (the suite's own key), "allowlist" or "oauth"
+    # (functional/reporting.py PRINCIPALS). Absent before callers were told apart.
+    principal: str
 
 
 # `pass`/`fail`/`skip` are the historical bash runner's key names and `pass` is a
@@ -376,6 +379,12 @@ FunctionalReport = TypedDict(
         "protocol_version": NotRequired[str],
         # How many of `fail` are known failures; absent before they were told apart.
         "expected_fail": NotRequired[int],
+        # "admin", "store" or "sessions". Absent before it was recorded; the
+        # filename (`functional-<endpoint>-<ts>.json`) says it for those.
+        "endpoint": NotRequired[str],
+        # The CI lane (functional/reporting.py LANES). Absent on a run that was
+        # not told one, and on reports from before it was recorded.
+        "lane": NotRequired[str],
     },
 )
 

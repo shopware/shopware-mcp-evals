@@ -812,9 +812,13 @@ def verify_oauth_flow(
     """Walk the MCP OAuth flow; a skip naming #21862 on a shop without it.
 
     `provision` adds the other users; `users` replaces how they are made, and
-    `verify` is what each user's token is then held to."""
+    `verify` is what each user's token is then held to.
+
+    Everything it records is the `oauth` caller's, including what `verify`
+    records for the users' tokens."""
     rep.section(f"MCP OAuth ({FIX})")
     client = os.environ.get(CLIENT_ENV, "").strip() or DEFAULT_CLIENT
-    if provision and users is None:
-        users = provisioned_users(endpoint)
-    OAuthFlow(rep, endpoint, client, send, users if provision else None, verify).run()
+    with rep.as_principal("oauth"):
+        if provision and users is None:
+            users = provisioned_users(endpoint)
+        OAuthFlow(rep, endpoint, client, send, users if provision else None, verify).run()

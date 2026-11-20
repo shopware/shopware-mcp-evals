@@ -696,3 +696,25 @@ def test_provisioning_builds_the_users_from_the_suites_credential(monkeypatch: p
     with O.provisioned_users(ADMIN)() as users:
         assert list(users) == [ONE_TOOL, UNSET, ADMIN_ONE]
     assert made == [(BASE, "SWUAadmin", "secret")]
+
+
+def test_everything_the_flow_records_is_the_oauth_callers(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep = run(FakeShop(), monkeypatch, users=three_users)
+
+    assert rep.records
+    assert {r.get("principal") for r in rep.records} == {"oauth"}
+    assert rep.principal == "admin"
+
+
+def test_what_the_users_matrix_records_is_oauth_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    def matrix(principal: Principal) -> None:
+        rep.check_pass(f"{principal.label}: checked")
+
+    rep = Reporter(BASE, color=False)
+    for name in (O.CLIENT_ENV, O.REDIRECT_CLIENT_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(O.APP_ENV_VAR, "prod")
+    O.verify_oauth_flow(rep, ADMIN, send=FakeShop(), provision=True, users=three_users, verify=matrix)
+
+    checked = [r for r in rep.records if str(r["label"]).endswith(": checked")]
+    assert len(checked) == 3 and {r.get("principal") for r in checked} == {"oauth"}

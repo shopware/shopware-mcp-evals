@@ -39,7 +39,7 @@ from typing import Protocol, cast
 
 import requests
 
-from functional.reporting import Reporter
+from functional.reporting import LANES, Reporter
 from functional.resp import Redis, RedisError
 from mcp_client import (
     ADMIN,
@@ -185,6 +185,9 @@ def main() -> int:
         help="The pool the lane's session stores use, e.g. redis://localhost:6379/5. Default: $MCP_EVALS_REDIS_URL.",
     )
     parser.add_argument("--session-ttl", type=int, default=3600, help="The configured session.ttl, in seconds.")
+    parser.add_argument(
+        "--lane", choices=LANES, default=None, help="The CI lane, recorded in the report for the job summary."
+    )
     args = parser.parse_args()
     redis_url = cast(str, args.redis_url)
 
@@ -196,7 +199,7 @@ def main() -> int:
         if not value:
             sys.exit(f"ERROR: {name} is required")
 
-    rep = Reporter(SW_BASE_URL)
+    rep = Reporter(SW_BASE_URL, endpoint="sessions", lane=cast(str | None, args.lane))
     rep.banner("Shopware MCP session store")
     if not redis_url:
         rep.skip("session store checks need --redis-url (or MCP_EVALS_REDIS_URL): nothing to measure on the file store")
