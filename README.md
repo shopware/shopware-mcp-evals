@@ -628,6 +628,34 @@ it (`no_tool_call`, `step_cap`, `wrong_args`); `wrong_tool` is already implied b
 the picks, while a `wrong_args` row picked the expected tool and looks right without it.
 Run `eval/summary.py` locally against a `results/rows/` directory to preview it.
 
+The same page carries the **functional suite, by lane**. Every CI job that runs
+`functional.runner` is a lane — `static` (default, 2025-11-25), the `revisions`
+matrix (2024-11-05, 2025-06-18), `next-major` (6.8, V6_8_0_0) and
+`session-store` (Redis) — and each row is one lane, endpoint and caller: the
+suite's own key, the allowlist principals, or OAuth (the flow and the OAuth
+users' tokens):
+
+```
+| Lane                 | Endpoint | Caller               | Passed | New failures | Expected failures            | Skipped |
+| default · 2025-11-25 | admin    | suite key            | 2      | 0            | 0                            | 1       |
+|                      | admin    | allowlist principals | 1      | 0            | 0                            | 0       |
+|                      | store    | suite key            | 1      | 0            | 1 (shopware/agentic-commerce#163) | 0  |
+| 2024-11-05           | admin    | suite key            | 1      | **1**        | 0                            | 2       |
+| 6.8 (V6_8_0_0)       | not finished |                  |        |              |                              |         |
+
+**Differs by lane:** 1 check(s).
+- admin · `default surface`: pass on default; fail on 2024-11-05
+```
+
+Lane and caller are fields, not guesses: `--lane` puts `lane` on the report, and
+each record carries `principal`. "Differs by lane" compares only checks that ran
+on two lanes or more, so the sections that run once (result format, large
+results, stateless era, OAuth flow) and the Redis lane's missing Store suite do
+not flood it; when every lane agrees it is one line. `report` waits for
+`revisions` but not for `next-major`, whose row reads "not finished" until its
+artifact (`functional-6.8`) exists. A line under the eval table names the
+revision the LLM eval ran at, which is always the default one.
+
 ### Discovery metrics
 
 Per fixture (in the JSON report and the console summary):
@@ -1050,6 +1078,15 @@ and a `cursor://` redirect URI go through consent. A plain-http one outside
 loopback is refused with `FRAMEWORK__OAUTH_INSECURE_REDIRECT_URI`, except under
 `APP_ENV=dev`. Set `MCP_EVALS_APP_ENV` to the server's environment, or that
 check is a skip.
+
+To run a fixture set on an OAuth token instead of the key, pass `--auth oauth`
+to `eval.runner` (admin endpoint only). It discovers the authorization server
+from the 401 challenge, signs in with the authorization code grant, PKCE and the
+`resource` parameter, posts the consent with the key's own principal, and
+refreshes the token as it expires. The nightly runs the admin fixtures this way
+as the advisory `admin · OAuth` arm; dispatch input `oauth_arm`, PR label
+`run-oauth`. A shop without discovery or without the client records a `SKIP`
+row with the reason.
 
 It needs a public OAuth client. setup-lane registers one; on a local lane put
 the same in a gitignored `config/packages/zzz-mcp-evals-oauth.yaml` and clear

@@ -233,6 +233,9 @@ class SummaryRow(TypedDict):
     advisory: bool
     by_tier: dict[str, TierBucket]
     cost: CostBlock
+    # Only on a run that graded nothing because the lane could not do what was
+    # asked (`gate: SKIP`), e.g. `--auth oauth` on a shop from before #21862.
+    skip_reason: NotRequired[str]
 
 
 class SkippedFixture(TypedDict):
@@ -278,6 +281,8 @@ class Report(TypedDict, total=False):
     # The MCP revision every session of the run negotiated. Absent before it was
     # recorded, and those runs all asked for 2024-11-05.
     protocol_version: str
+    # `keys` or `oauth` (--auth). Absent before it was recorded: those runs used keys.
+    auth: str
     discovery_summary: JsonObject
     skipped_fixtures: list[SkippedFixture]
     by_tier: dict[str, TierBucket]
@@ -356,6 +361,9 @@ class FunctionalRecord(TypedDict, total=False):
     # On a failure functional/known_failures.py explains: the issue it waits on.
     # Still status "fail", so a reader that predates the field sees what it saw.
     known_issue: str
+    # Who made the calls: "admin" (the suite's own key), "allowlist" or "oauth"
+    # (functional/reporting.py PRINCIPALS). Absent before callers were told apart.
+    principal: str
 
 
 # `pass`/`fail`/`skip` are the historical bash runner's key names and `pass` is a
@@ -376,6 +384,12 @@ FunctionalReport = TypedDict(
         "protocol_version": NotRequired[str],
         # How many of `fail` are known failures; absent before they were told apart.
         "expected_fail": NotRequired[int],
+        # "admin", "store" or "sessions". Absent before it was recorded; the
+        # filename (`functional-<endpoint>-<ts>.json`) says it for those.
+        "endpoint": NotRequired[str],
+        # The CI lane (functional/reporting.py LANES). Absent on a run that was
+        # not told one, and on reports from before it was recorded.
+        "lane": NotRequired[str],
     },
 )
 

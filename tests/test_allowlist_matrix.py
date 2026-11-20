@@ -389,8 +389,8 @@ def test_a_role_refusal_without_the_code_fails(monkeypatch: pytest.MonkeyPatch, 
     rep = run(fake, monkeypatch, [ONE_TOOL_USER])
 
     assert [f for f in failures(rep) if "missing_privilege" in f] == [
-        f"allowlist: user-one-tool: expected it is refused {PROBE_TOOL} on product with missing_privilege, "
-        + f"but the call answered {answer}"
+        f"user-one-tool: is refused {PROBE_TOOL} on product with missing_privilege: "
+        + f"the call answered {answer}"
         + (": Missing privilege: product:read" if code else ": ")
     ]
 
@@ -423,8 +423,7 @@ def test_a_one_tool_grant_that_leaks_a_tool_of_its_own_toolset_fails(monkeypatch
     fails = failures(run(fake, monkeypatch))
 
     assert fails == [
-        f"allowlist: integration-one-tool: expected it reaches exactly {PROBE_TOOL} with ?toolsets=all, "
-        "but missing -, extra shopware-entity-read"
+        f"integration-one-tool: reaches exactly {PROBE_TOOL} with ?toolsets=all: missing -, extra shopware-entity-read"
     ]
 
 
@@ -529,3 +528,41 @@ def test_principal_check_with_an_unusable_catalogue_verifies_nothing(monkeypatch
     verify(PRINCIPALS[1])
 
     assert rep.failed == 1 and "could not read the reference catalogue" in failures(rep)[0]
+
+
+def test_the_matrix_records_its_checks_as_the_allowlist_caller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The job summary splits the run by caller; a key principal is `allowlist`."""
+    rep = run(FakeServer(), monkeypatch)
+
+    assert rep.records
+    assert {r.get("principal") for r in rep.records} == {"allowlist"}
+    assert rep.principal == "admin"
+
+
+def test_a_skipped_matrix_is_the_allowlist_callers_skip() -> None:
+    rep = Reporter("admin", color=False)
+    R.verify_allowlist_matrix(rep, SUITE, provision=False)
+
+    assert [(r["status"], r.get("principal")) for r in rep.records] == [("skipped", "allowlist")]
+
+
+def test_a_bearer_principal_is_recorded_as_oauth_wherever_it_is_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """verify_principal picks the caller from the credential, so an OAuth token
+    run through the allowlist checks is not filed under the allowlist."""
+    token = Principal("mcp-evals-abc123-oauth-user-one-tool", "", "", "partial", acl=True, bearer="TOKEN")
+    rep = run(FakeServer(), monkeypatch, [token])
+
+    mine = [r for r in rep.records if str(r["label"]).startswith("oauth-user-one-tool: ")]
+    assert mine and {r.get("principal") for r in mine} == {"oauth"}
+
+
+def test_a_failing_check_keeps_its_passing_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One label for both outcomes is what lines a lane's failure up against
+    another lane's pass in the job summary."""
+    fake = FakeServer()
+    fake.grants["ONE"] = {PROBE_TOOL, "shopware-entity-read"}
+    passing = {str(r["label"]) for r in run(FakeServer(), monkeypatch).records}
+
+    failing = [r["label"] for r in run(fake, monkeypatch).records if r["status"] == "fail"]
+
+    assert failing and set(failing) <= passing
