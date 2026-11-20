@@ -298,7 +298,7 @@
   ],
   "toolsets": [
     {
-      "description": "Tools explicitly assigned to the \"store-api\" MCP tool group.",
+      "description": "Read the shopper context of this session: sales channel, language, currency and whether a customer is logged in.",
       "name": "store-api",
       "title": "Store api tools",
       "tools": [
