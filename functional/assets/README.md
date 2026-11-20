@@ -117,8 +117,7 @@ Shopware also refuses to install an app while its `APP_URL` cannot be reached fr
 A lane whose `APP_URL` names a port only the host serves needs a forwarder for the duration of the run.
 Remove the config file and clear the cache again afterwards.
 
-### Before the fix lands
+### On a shop without the fix
 
 On a shop without https://github.com/shopware/shopware/pull/22623, `prompts/get` answers `-32603 Error while handling prompt`, and `resources/read` returns the app's whole JSON answer as the resource text.
-Both are entries in `functional/known_failures.py`: they run, are reported as expected, and do not fail the run.
-Once the pinned Shopware carries the fix, the reporter warns that the entries passed and should be deleted.
+The pinned Shopware carries the fix, so both fail the run as new failures.

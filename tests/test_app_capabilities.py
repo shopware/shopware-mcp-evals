@@ -1,6 +1,6 @@
 """The app capability checks: what they pass, what they report, and that the app goes again.
 
-The MCP replies are the ones a trunk lane and a lane with shopware/shopware#22623
+The MCP replies are the ones a lane with and a lane without shopware/shopware#22623
 actually sent (see the README). The fixture's real server runs on loopback, and
 the fake Admin API registers against it the way Shopware does, so the
 registration check sees a real signed request.
@@ -30,12 +30,14 @@ TOOL_OK = {"result": {"content": [{"type": "text", "text": ""}], "isError": Fals
 PROMPT_OK = {
     "result": {"messages": [{"role": "user", "content": {"type": "text", "text": F.PROMPT_TEXT}}]},
 }
-PROMPT_TRUNK = {"error": {"code": -32603, "message": "Error while handling prompt"}}
+PROMPT_UNFIXED = {"error": {"code": -32603, "message": "Error while handling prompt"}}
 RESOURCE_OK = {
     "result": {"contents": [{"uri": F.RESOURCE_URI, "mimeType": F.RESOURCE_MIME_TYPE, "text": F.RESOURCE_TEXT}]}
 }
 ENVELOPE = json.dumps({"uri": F.RESOURCE_URI, "mimeType": F.RESOURCE_MIME_TYPE, "text": F.RESOURCE_TEXT})
-RESOURCE_TRUNK = {"result": {"contents": [{"uri": F.RESOURCE_URI, "mimeType": F.RESOURCE_MIME_TYPE, "text": ENVELOPE}]}}
+RESOURCE_UNFIXED = {
+    "result": {"contents": [{"uri": F.RESOURCE_URI, "mimeType": F.RESOURCE_MIME_TYPE, "text": ENVELOPE}]}
+}
 
 
 def reply(body: object) -> McpResponse:
@@ -208,32 +210,33 @@ def test_the_app_points_at_the_public_host(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 # ---------------------------------------------------------------------------
-# A trunk shop: the two failures the registry expects
+# A shop without shopware/shopware#22623: both bugs are regressions now
 # ---------------------------------------------------------------------------
-def test_trunks_prompt_error_is_the_known_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    rep, _ = run(monkeypatch, Shop(prompt=PROMPT_TRUNK))
+def test_the_unfixed_prompt_error_is_named_and_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep, _ = run(monkeypatch, Shop(prompt=PROMPT_UNFIXED))
 
     error = error_of(rep, A.PROMPT_CHECK)
     assert error.startswith(f"prompts/get {F.PROMPT_NAME} answered JSON-RPC -32603: Error while handling prompt")
-    assert match(A.PROMPT_CHECK, error) is not None
+    assert match(A.PROMPT_CHECK, error) is None
 
 
-def test_trunks_resource_envelope_is_the_known_one(monkeypatch: pytest.MonkeyPatch) -> None:
-    rep, _ = run(monkeypatch, Shop(resource=RESOURCE_TRUNK))
+def test_the_unfixed_resource_envelope_is_named_and_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    rep, _ = run(monkeypatch, Shop(resource=RESOURCE_UNFIXED))
 
     error = error_of(rep, A.RESOURCE_CHECK)
     assert error.startswith(A.WHOLE_ENVELOPE) and ENVELOPE in error
-    assert match(A.RESOURCE_CHECK, error) is not None
+    assert match(A.RESOURCE_CHECK, error) is None
 
 
-def test_on_trunk_the_suite_still_exits_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    Shop(prompt=PROMPT_TRUNK, resource=RESOURCE_TRUNK).install(monkeypatch)
+def test_without_the_fix_the_suite_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pinned Shopware carries the fix, so its absence is not known."""
+    Shop(prompt=PROMPT_UNFIXED, resource=RESOURCE_UNFIXED).install(monkeypatch)
     rep = Reporter("srv", color=False)
     fake = FakeApi()
 
     A.verify_app_capabilities(rep, ADMIN, enabled=True, connect=lambda: fake)
 
-    assert (rep.expected_failed, rep.unexpected_failed, rep.exit_code) == (2, 0, 0)
+    assert (rep.expected_failed, rep.unexpected_failed, rep.exit_code) == (0, 2, 1)
 
 
 # ---------------------------------------------------------------------------

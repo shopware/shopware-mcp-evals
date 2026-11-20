@@ -20,9 +20,8 @@ address. setup-lane writes the narrow config for that
 `allowed_private_ip_addresses`), and the README says how to do the same on a
 local lane.
 
-The prompt and resource checks fail on a shop without shopware/shopware#22623.
-They are registered in `functional/known_failures.py`, so they run and are
-reported as known until the pinned Shopware carries the fix.
+The prompt and resource checks need shopware/shopware#22623, which the pinned
+Shopware carries. A shop without it fails both.
 """
 
 from __future__ import annotations
@@ -72,8 +71,8 @@ NEEDS_FLAG = (
     "needs --app-fixture: it installs a throwaway app and serves it from this process, "
     "and the shop must be allowed to call that server over plain HTTP"
 )
-# The fragment known_failures.py matches. A server without the fix forwards the
-# app's whole JSON answer as the resource text.
+# A server without shopware/shopware#22623 forwards the app's whole JSON answer
+# as the resource text. Named, so that regression reads as itself.
 WHOLE_ENVELOPE = "the resource text is the app's whole response envelope"
 
 EXTENSION = "/api/_action/extension"
