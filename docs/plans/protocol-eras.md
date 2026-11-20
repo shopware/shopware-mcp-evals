@@ -32,7 +32,7 @@ most of what core shipped in October:
 |---|---|---|---|
 | **Protocol revision** (handshake era) | 2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25 | Below 2025-06-18: text only, pointer as `_meta.resourceUri` in the text. From 2025-06-18: `structuredContent` (wrapped as `{"result": …}` when not an object), `resource_link` block | `protocolVersion` in `initialize` |
 | **Era** | handshake, stateless (2026-07-28) | No `initialize`, no `Mcp-Session-Id`, `server/discover`, per-request `_meta`, `DELETE` → 405, `toolset-enable` errors and points to `?toolsets=`, notifications via `subscriptions/listen` | Client transport; server must stop calling `withoutModernEra()` (shopware/shopware#19969) |
-| **Result format** | legacy envelope (6.7), spec-only (`v6.8.0.0`) | First text block holds plain data or the error message; summary, details and `_meta` become separate blocks and move into result `_meta` with a `shopware/` prefix | Feature flag on the lane (`V6_8_0_0=1`) |
+| **Result format** | legacy envelope, MCP format | First text block holds plain data or the error message; summary, details and `_meta` become separate blocks and move into result `_meta` with a `shopware/` prefix; `structuredContent._meta` carries the model's metadata (`dryRun`, `total`, the summary) | Since shopware/shopware#21844 the protocol revision (legacy before 2025-06-18, MCP format from it on). Before it the `V6_8_0_0` flag, for every revision |
 
 The revisions only differ at one boundary today (2025-06-18). Testing every
 revision on every run buys nothing, so the matrix is **oldest + boundary +
@@ -134,6 +134,13 @@ As built, in `functional/large_results.py`:
   the end of the run. The `accepted` tier still passes, because the call ran.
 - Passes live on the local trunk lane. On 2025-06-18 the reply carries a
   `resource_link` block with a signed URI, and on 2024-11-05 it does not.
+- Since shopware/shopware#21844 the rules depend on the revision: on 2025-06-18
+  the reply is the MCP format with the `resource_link` as the only pointer (no
+  `_meta.resourceUri`), and `resources/read` returns the plain data; before it
+  the legacy text and the envelope, unchanged. What `resources/read` returns
+  follows the call that stored the result, not the reader's revision. A server
+  sending one format on every revision predates the PR and keeps the older
+  rules, so the pinned `shopware.sha` stays green.
 
 
 1. **Trigger an offload.** The PR's own reproducer

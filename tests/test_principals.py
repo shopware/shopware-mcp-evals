@@ -224,3 +224,35 @@ def test_another_principal_is_deleted_when_the_check_raises(admin: FakeAdmin) ->
         raise RuntimeError("check blew up")
 
     assert len(admin.paths("DELETE")) == 1
+
+
+# --- the OAuth sign-in users --------------------------------------------------------
+
+
+def test_the_sign_in_users_get_a_password_a_role_and_one_allowlist(admin: FakeAdmin) -> None:
+    api = P.AdminApi(BASE, "SWUAKEY", "secret")
+
+    with P.sign_in_users(api) as (allowlisted, unset):
+        users = [b for m, p, b in admin.calls if (m, p) == ("POST", "/api/user")]
+        assert [u["username"] for u in users] == [allowlisted.username, unset.username]
+        assert [u["password"] for u in users] == [allowlisted.password, unset.password]
+        assert all(u["admin"] is False for u in users)
+        assert admin.body("/api/acl-role")["privileges"] == P.OAUTH_PRIVILEGES
+        allowlists = [b for m, p, b in admin.calls if m == "POST" and p.endswith("/mcp-allowlist")]
+        assert allowlists == [{"allowlist": {"tools": list(P.OAUTH_TOOLS), "resources": [], "prompts": []}}]
+        assert (allowlisted.tools, unset.tools) == (P.OAUTH_TOOLS, None)
+        assert "/api/user-access-key" not in admin.paths("POST")
+
+    deleted = admin.paths("DELETE")
+    assert len(deleted) == 3 and deleted[-1].startswith("/api/acl-role/")
+
+
+def test_the_sign_in_users_are_deleted_when_creation_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeAdmin(fail="POST /api/_action/user/")
+    monkeypatch.setattr(P.requests, "request", fake.request)
+    api = P.AdminApi(BASE, "SWUAKEY", "secret")
+
+    with pytest.raises(P.ProvisioningFailed), P.sign_in_users(api):
+        pass
+
+    assert [p.split("/")[2] for p in fake.paths("DELETE")] == ["user", "acl-role"]

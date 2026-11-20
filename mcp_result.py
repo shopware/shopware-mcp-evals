@@ -2,23 +2,25 @@
 """What a tools/call reply says, whichever protocol revision and format it came in.
 
 A Shopware tool result has three shapes today, and which one arrives depends on
-the server's feature flags and the revision the client negotiated, not on the
-tool:
+the server and the revision the client negotiated, not on the tool:
 
-  legacy   one text block holding `{"success": …, "data": …, "_meta": …}`. What
-           every revision gets until 6.8. Since shopware/shopware#20948 a failure
-           also carries a stable `code` next to `error`.
-  spec     the `v6.8.0.0` format: the first text block is the plain data as JSON
-           (or the error message), followed by the summary, `{"details": …}` and
+  legacy   one text block holding `{"success": …, "data": …, "_meta": …}`. Since
+           shopware/shopware#20948 a failure also carries a stable `code` next to
+           `error`.
+  spec     the MCP format: the first text block is the plain data as JSON (or
+           the error message), followed by the summary, `{"details": …}` and
            `{"_meta": …}` as blocks of their own; the metadata also arrives in the
            result `_meta` under a `shopware/` prefix.
   plain    a string that is no envelope at all, which the server passes through
            untouched (a tool returning its own `CallToolResult`).
 
-On top of any of them, a client on 2025-06-18 or later receives
-`structuredContent` and, for an offloaded result, a `resource_link` block
-(`McpToolResultRenderer`). Older revisions get the pointer as `_meta.resourceUri`
-inside the legacy text.
+Since shopware/shopware#21844 the revision picks between the first two
+(`format_for`): legacy before 2025-06-18, spec from it on, with
+`structuredContent` (carrying the model's metadata under `_meta`) and, for an
+offloaded result, a `resource_link` block instead of `_meta.resourceUri`.
+Before #21844 every revision got legacy, or spec under the `v6.8.0.0` flag, and
+2025-06-18 added `structuredContent` and the block on top of either.
+`format_verdict` tells the two generations apart.
 
 Every reader in this repo used to `json.loads` the first text block and ask it
 for `success`, `data` and `_meta` — exactly the keys 6.8 removes. `read_result()` is the
@@ -29,6 +31,7 @@ actually arrived.
 """
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Literal, cast
 
@@ -47,6 +50,24 @@ META_PREFIX = "shopware/"
 _ENVELOPE_KEYS = frozenset({"success", "data", "_meta", "error", "code"})
 
 type Shape = Literal["protocol_error", "legacy", "spec", "plain"]
+
+# shopware/shopware#21844: the negotiated revision picks the format, not a
+# feature flag. `McpToolResultCapabilities::forRevision()`.
+SPEC_FORMAT_SINCE = "2025-06-18"
+
+type ResultFormat = Literal["legacy", "spec"]
+
+# `McpToolResultRenderer::STRUCTURED_META_KEY` and `INTERNAL_META_KEYS`: since
+# shopware/shopware#21844 (a5c30a4) `structuredContent` carries the metadata the
+# model needs under `_meta`, without the client's bookkeeping.
+STRUCTURED_META_KEY = "_meta"
+_INTERNAL_META_KEYS = frozenset({"responseSize", "resourceUri"})
+
+
+def format_for(revision: str) -> ResultFormat:
+    """The format a server since shopware/shopware#21844 sends on `revision`:
+    the MCP format from 2025-06-18 on, the deprecated legacy envelope before."""
+    return "spec" if revision >= SPEC_FORMAT_SINCE else "legacy"
 
 
 @dataclass(frozen=True)
@@ -147,6 +168,40 @@ class ToolOutcome:
         value = self.result_meta.get(META_PREFIX + "generatedAt")
         return value if isinstance(value, str) else None
 
+    @property
+    def model_meta(self) -> JsonObject:
+        """The metadata a model has to see: the result's metadata without the
+        client's bookkeeping, plus the summary. What `structuredContent._meta`
+        must hold since shopware/shopware#21844 (`McpToolResultRenderer::modelMeta()`)."""
+        meta = {key: value for key, value in self.meta.items() if key not in _INTERNAL_META_KEYS}
+        if self.summary and "summary" not in meta:
+            meta["summary"] = self.summary
+        return meta
+
+    @property
+    def data_has_meta_key(self) -> bool:
+        """The data is an object with a `_meta` key of its own, which the server
+        then leaves alone rather than overwriting it with the metadata."""
+        return STRUCTURED_META_KEY in as_object(self.data)
+
+    @property
+    def structured_meta(self) -> JsonObject | None:
+        """`structuredContent._meta`, or None when it carries no such key or it
+        is the data's own."""
+        structured = self.structured
+        if not isinstance(structured, dict) or STRUCTURED_META_KEY not in structured or self.data_has_meta_key:
+            return None
+        return as_object(cast(object, structured[STRUCTURED_META_KEY]))
+
+    @property
+    def structured_data(self) -> object:
+        """`structuredContent` without the reserved `_meta` key: the data, or
+        `{"result": …}` for data that is no object."""
+        structured = self.structured
+        if self.structured_meta is None or not isinstance(structured, dict):
+            return structured
+        return {key: value for key, value in cast(JsonObject, structured).items() if key != STRUCTURED_META_KEY}
+
 
 def _decode(text: str | None) -> object:
     if not text:
@@ -225,6 +280,28 @@ def _structural(text: str, key: str) -> JsonObject | None:
     return as_object(decoded.get(key)) if len(decoded) == 1 and key in decoded else None
 
 
+def _is_json(text: str) -> bool:
+    try:
+        _ = cast(object, json.loads(text))
+    except json.JSONDecodeError:
+        return False
+    return True
+
+
+def _without_data_text(first: str, structured: object) -> bool:
+    """Whether a success's texts start after its data, because there is none.
+
+    A result without data but with metadata sends `{"result": null, "_meta": …}`
+    and no data block (shopware/shopware@7f64703f325), so its first text is the
+    summary or the metadata block. Data that is itself `{"result": null}` is
+    sent as JSON, which neither of those is.
+    """
+    wrapper = as_object(structured)
+    if set(wrapper) != {"result", "_meta"} or wrapper["result"] is not None:
+        return False
+    return _structural(first, "_meta") is not None or not _is_json(first)
+
+
 def _spec(
     texts: tuple[str, ...], structured: object, result_meta: JsonObject, is_error: bool
 ) -> tuple[object, ToolError | None, JsonObject, str | None]:
@@ -232,6 +309,20 @@ def _spec(
     meta: JsonObject = {}
     details: JsonObject = {}
     rest: list[str] = []
+    # A success with `structuredContent` has its data as the first block, unless
+    # it has no data. Taken before the structural blocks are sorted out: data
+    # whose only key is `_meta` encodes exactly like the metadata block.
+    data_text: str | None = None
+    # Only when that block is JSON: a reply that breaks the format is reported
+    # by the checks, not raised here.
+    if (
+        not is_error
+        and structured is not None
+        and texts
+        and not _without_data_text(texts[0], structured)
+        and _is_json(texts[0])
+    ):
+        data_text, texts = texts[0], texts[1:]
     for text in texts:
         if (block := _structural(text, "_meta")) is not None:
             meta = block
@@ -251,6 +342,8 @@ def _spec(
         return None, ToolError(message, _str(error.get("code")), as_object(error.get("details")) or details), meta, None
     # The data comes first, as JSON. A result stored behind a link may have none,
     # and then the first block is already the summary — prose, not JSON.
+    if data_text is not None:
+        return cast(object, json.loads(data_text)), None, meta, (rest[0] if rest else None)
     data: object = None
     if rest:
         try:
@@ -344,3 +437,28 @@ def from_text(text: str, is_error: bool = False) -> ToolOutcome:
     """The outcome of a reply carrying one text block and nothing else: what every
     server answered before shopware/shopware#20948, and what a test usually means."""
     return read_result({"result": {"content": [{"type": "text", "text": text}], "isError": is_error}})
+
+
+type FormatVerdict = Literal["by_revision", "one_format", "mixed", "no_format"]
+
+
+def format_verdict(replies: Iterable[tuple[str, ToolOutcome]]) -> FormatVerdict:
+    """Whether a server picks the result format by revision, from replies on several.
+
+    `by_revision`: every reply is in the format `format_for` names, which is
+    shopware/shopware#21844. `one_format`: one format on every revision, which
+    is a server from before it (the legacy envelope everywhere, or the
+    `v6.8.0.0` flag's spec format everywhere). `mixed`: neither, which no
+    server is meant to send. Protocol errors and plain text say nothing about
+    the format and are left out. `no_format`: nothing was left, so nothing
+    shows which generation the server is. Counting that as `by_revision` would
+    pass a check on a server that answered every probe with an error.
+    """
+    rendered = [(revision, outcome.shape) for revision, outcome in replies if outcome.shape in ("legacy", "spec")]
+    if not rendered:
+        return "no_format"
+    if all(shape == format_for(revision) for revision, shape in rendered):
+        return "by_revision"
+    if len({shape for _, shape in rendered}) == 1:
+        return "one_format"
+    return "mixed"
