@@ -12,6 +12,14 @@ Record shapes match the historical bash runner's output exactly:
 A failure functional/known_failures.py explains also carries `known_issue`. It is
 shown like any other failure but does not count towards the exit code, and in CI
 `annotations()` reports it as expected, naming the issue it is waiting for.
+
+Every record also carries `principal`: who made the calls it describes, one of
+PRINCIPALS. It is the reporter's state rather than a parameter of every check:
+a section that runs as another caller wraps itself in `as_principal()`, and what
+it records inside is attributed to that caller. The report itself carries the
+`lane` it ran on (LANES) and its `endpoint`, so the job summary can split a run
+by lane and by caller without guessing from labels. All three are added fields:
+a reader of an older report gets none of them and has to cope.
 """
 
 from __future__ import annotations
@@ -19,6 +27,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -29,6 +39,19 @@ from functional.known_failures import KNOWN_FAILURES, KnownFailure
 # readable. The report JSON has every one.
 _ANNOTATION_LINES = 8
 _ANNOTATION_ERROR_CHARS = 300
+
+# Who a check calls as. `admin` is the suite's own key, whichever endpoint it
+# is for; `allowlist` the integrations and users the allowlist matrix
+# provisions; `oauth` everything in functional/oauth.py, including the OAuth
+# users' tokens put through the allowlist matrix's checks.
+PRINCIPALS = ("admin", "allowlist", "oauth")
+
+# The lanes CI runs the functional suite on, in the order the job summary lists
+# them: `default` is static's (2025-11-25), the two revisions are the
+# `revisions` matrix, `6.8` is next-major (V6_8_0_0), `redis` is session-store.
+# A local run passes none, and its report then names no lane rather than
+# claiming one it may not be.
+LANES = ("default", "2024-11-05", "2025-06-18", "6.8", "redis")
 
 
 class _Palette:
@@ -52,9 +75,15 @@ class Reporter:
         color: bool | None = None,
         protocol_version: str | None = None,
         known: tuple[KnownFailure, ...] = KNOWN_FAILURES,
+        endpoint: str | None = None,
+        lane: str | None = None,
     ):
         self.server: str = server
         self.protocol_version: str | None = protocol_version
+        self.endpoint: str | None = endpoint
+        self.lane: str | None = lane
+        # Stamped on every record; see as_principal().
+        self.principal: str = "admin"
         self.known: tuple[KnownFailure, ...] = known
         self.passed: int = 0
         self.failed: int = 0
@@ -78,6 +107,27 @@ class Reporter:
     def info(self, msg: str) -> None:
         print(msg)
 
+    @contextmanager
+    def as_principal(self, principal: str) -> Generator[None]:
+        """Attribute everything recorded inside to `principal`, then restore.
+
+        Nests: the OAuth section runs as `oauth`, and the allowlist checks it
+        runs on an OAuth user's token stay `oauth` because verify_principal
+        picks the caller from the credential, not from where it is called.
+        """
+        if principal not in PRINCIPALS:
+            raise ValueError(f"unknown principal {principal!r}, expected one of {PRINCIPALS}")
+        outer = self.principal
+        self.principal = principal
+        try:
+            yield
+        finally:
+            self.principal = outer
+
+    def _record(self, record: FunctionalRecord) -> None:
+        record["principal"] = self.principal
+        self.records.append(record)
+
     # -- structural checks (tool == "check") --------------------------------
     def check_pass(self, label: str) -> None:
         self._pass(label, FunctionalRecord(tool="check", label=label, status="pass"))
@@ -94,10 +144,17 @@ class Reporter:
 
     # -- skips --------------------------------------------------------------
     def skip(self, label: str) -> None:
-        """A structural check that did not run. Counted, not attributed."""
+        """A structural check that did not run, with the reason in its label.
+
+        Recorded like any other skip, with no `reason` of its own and as
+        `check`, so it adds nothing to the tool health map. It used to be only
+        counted, which left the job summary unable to say whose skip it was or
+        whether another lane ran the check.
+        """
         print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}")
         self.skipped += 1
         self.skip_lines.append(label)
+        self._record(FunctionalRecord(tool="check", label=label, status="skipped"))
 
     def check_skip(self, label: str, reason: str) -> None:
         """A structural check that did not run, recorded with why.
@@ -109,7 +166,7 @@ class Reporter:
         print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}: {reason}")
         self.skipped += 1
         self.skip_lines.append(f"{label}: {reason}")
-        self.records.append(FunctionalRecord(tool="check", label=label, status="skipped", reason=reason))
+        self._record(FunctionalRecord(tool="check", label=label, status="skipped", reason=reason))
 
     def tool_skip(self, tool: str, label: str, reason: str) -> None:
         """A tool that did not run, and why.
@@ -122,13 +179,13 @@ class Reporter:
         print(f"  {self.c.YELLOW}SKIP{self.c.RESET} {label}: {reason}")
         self.skipped += 1
         self.skip_lines.append(f"{label}: {reason}")
-        self.records.append(FunctionalRecord(tool=tool, label=label, status="skipped", reason=reason))
+        self._record(FunctionalRecord(tool=tool, label=label, status="skipped", reason=reason))
 
     # -- internals ----------------------------------------------------------
     def _pass(self, label: str, record: FunctionalRecord) -> None:
         print(f"  {self.c.GREEN}PASS{self.c.RESET} {label}")
         self.passed += 1
-        self.records.append(record)
+        self._record(record)
         if entry := next((k for k in self.known if k.matches_label(label)), None):
             self.recovered.append((label, entry))
 
@@ -140,7 +197,7 @@ class Reporter:
             record["known_issue"] = entry.issue
         else:
             print(f"  {self.c.RED}FAIL{self.c.RESET} {label}: {error}")
-        self.records.append(record)
+        self._record(record)
 
     # -- finalization -------------------------------------------------------
     @property
@@ -295,6 +352,10 @@ class Reporter:
             report["expected_fail"] = self.expected_failed
         if self.protocol_version:
             report["protocol_version"] = self.protocol_version
+        if self.endpoint:
+            report["endpoint"] = self.endpoint
+        if self.lane:
+            report["lane"] = self.lane
         path.write_text(json.dumps(report, indent=2))
         print(f"Report: {path}")
 

@@ -91,6 +91,10 @@ on:
         description: 'Also run the admin fixtures with the whole catalogue pinned at connect time (?toolsets=all, shopware/shopware#20509) instead of discovered. Advisory. Compares accuracy and cost of a preloaded connector against discovery. Adds one primary-model pass.'
         required: false
         default: 'false'
+      oauth_arm:
+        description: 'Also run the admin fixtures signed in over OAuth (authorization code with PKCE, discovered from the 401 challenge, shopware/shopware#21862) instead of with the access key. Advisory. Nightly does this anyway. A Shopware without OAuth discovery records a skip with its reason.'
+        required: false
+        default: 'false'
       next_major:
         description: 'Also build a lane with the V6_8_0_0 feature flag and run the functional suite on it at the newest protocol revision. Advisory. Plugins that do not boot under the flag are deactivated and named. Nightly does this anyway.'
         required: false
@@ -195,6 +199,13 @@ env:
   PRELOADED: >-
     ${{ github.event.inputs.preloaded_arm == 'true'
         || contains(github.event.pull_request.labels.*.name, 'run-preloaded') }}
+  # Nightly, unlike PRELOADED: it is the only run that signs in the way an MCP
+  # client does, so a regression in the OAuth path has to show up the next
+  # morning. Otherwise the dispatch input or the `run-oauth` label.
+  OAUTH: >-
+    ${{ github.event_name == 'schedule'
+        || github.event.inputs.oauth_arm == 'true'
+        || contains(github.event.pull_request.labels.*.name, 'run-oauth') }}
 
 
 # ubuntu-24.04, not ubuntu-latest, in every job. GitHub moves ubuntu-latest to
@@ -428,7 +439,7 @@ jobs:
         # as an administrator user, which the allowlist does not apply to, so
         # this is the only coverage the allowlist has. Safe here: the lane dies
         # with the job, and the principals are deleted afterwards anyway.
-        run: python -m functional.runner --endpoint admin --provision-principals
+        run: python -m functional.runner --endpoint admin --provision-principals --lane default
 
       # The Store catalogue has never been snapshotted, so everything that
       # derives from one had to be guessed for it: toolclass could not read
@@ -666,7 +677,7 @@ jobs:
         # --annotate-skips the tally and every skip, so a skipped check cannot
         # pass for coverage. That replaced ~60 lines of shell that grepped the
         # log for FAIL and SKIP lines.
-        run: python -m functional.runner --endpoint store --allow-mutations --advisory --annotate-skips
+        run: python -m functional.runner --endpoint store --allow-mutations --advisory --annotate-skips --lane default
 
       - name: Detect snapshot changes worth committing
         id: snapshot
@@ -690,6 +701,20 @@ jobs:
           path: |
             results/
             tool-history/
+          retention-days: 14
+          if-no-files-found: warn
+
+      # The functional reports again, on their own, named after the lane like
+      # every other lane's. `report` reads the functional-* artifacts and nothing
+      # else for the lane table: static-results is re-uploaded inside the eval
+      # jobs' artifacts, so reading the merged results/ would count this lane
+      # three times.
+      - name: Upload functional reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: functional-default
+          path: results/functional-*.json
           retention-days: 14
           if-no-files-found: warn
 
@@ -764,7 +789,7 @@ jobs:
           SW_SC_ACCESS_KEY: ${{ steps.lane.outputs.sc_access_key }}
         run: |
           # Must match the ttl in setup-lane's Redis recipe.
-          python -m functional.sessions --session-ttl 1800 \
+          python -m functional.sessions --session-ttl 1800 --lane redis \
             || { echo "::error::MCP sessions are not (only) in Redis — see the step log for which check failed"; exit 1; }
 
       # Everything else still has to hold on the other store: toolset
@@ -779,13 +804,14 @@ jobs:
           MCP_MEDIA_UPLOAD_URL: ${{ env.APP_URL }}/mcp-evals-probe.png
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
-        run: python -m functional.runner --endpoint admin
+        run: python -m functional.runner --endpoint admin --lane redis
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: session-store-results
+          # functional-<lane>: the name `report` downloads the lane table from.
+          name: functional-redis
           # The reports only. `report` merges every artifact into one results/,
           # and this lane's tool-health-admin.json would overwrite static's —
           # the one the eval gate is meant to read.
@@ -863,7 +889,9 @@ jobs:
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
         # With the principals, as static: what each allowlist state reaches is
         # read through tools/list, toolsets and calls, all at this revision.
-        run: python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals
+        run: |
+          python -m functional.runner --endpoint admin --protocol-version "${REVISION}" --provision-principals \
+            --lane "${REVISION}"
 
       # Commits like static's store step, and is advisory like it. --advisory
       # rather than continue-on-error: an allowed-to-fail step still posts
@@ -879,13 +907,16 @@ jobs:
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
-        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version "${REVISION}"
+        run: |
+          python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version "${REVISION}" \
+            --lane "${REVISION}"
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: revision-${{ matrix.revision }}-results
+          # One per matrix entry, or the second upload would collide with the first.
+          name: functional-${{ matrix.revision }}
           # The reports only, for the same reason as session-store: this lane's
           # tool-health files would overwrite the ones the eval gate reads.
           path: results/functional-*.json
@@ -915,6 +946,8 @@ jobs:
   #
   # Nightly, the `next_major` dispatch input, or the `run-next-major` PR label.
   # Not a dependency of `report`: an advisory lane must not hold the summary.
+  # Its row in the lane table reads "not finished" when its report is not
+  # uploaded yet, rather than the lane disappearing.
   next-major:
     name: Next major (V6_8_0_0, advisory)
     needs: static
@@ -975,7 +1008,7 @@ jobs:
         # names the check instead.
         run: |
           python -m functional.runner --endpoint admin --protocol-version 2025-11-25 \
-            --deactivated-plugins "${INCOMPATIBLE}" --provision-principals --advisory
+            --deactivated-plugins "${INCOMPATIBLE}" --provision-principals --advisory --lane 6.8
 
       # The UCP journey commits, as in static: a rolled-back cart cannot be the
       # next step's precondition, and this instance dies with the job. Advisory
@@ -990,13 +1023,13 @@ jobs:
           UCP_JOURNEY_PROMO_CODE: ${{ steps.lane.outputs.promo_code }}
           MCP_EVALS_LOG_FILE: ${{ steps.lane.outputs.log_file }}
           MCP_EVALS_APP_ENV: ${{ steps.lane.outputs.app_env }}
-        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version 2025-11-25
+        run: python -m functional.runner --endpoint store --allow-mutations --advisory --protocol-version 2025-11-25 --lane 6.8
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: next-major-results
+          name: functional-6.8
           # The reports only, for the same reason as session-store: this lane's
           # tool-health files would overwrite the ones the eval gate reads.
           path: results/functional-*.json
@@ -1207,6 +1240,25 @@ jobs:
             pid_preloaded=$!
           fi
 
+          # Sixth arm, nightly: the same primary model on the same fixtures,
+          # signed in over OAuth instead of with the access key. The runner
+          # discovers the authorization server from the 401 challenge, posts
+          # the consent with the key's own principal (setup-lane registers the
+          # public client mcp-evals-probe), and sends the bearer token on every
+          # request, refreshing it as it expires. Same user as the key arm, so
+          # a difference between the two is the auth path, not the model.
+          # Exit 4: the lane has no OAuth discovery or no client, nothing ran;
+          # the runner says why in a warning and a SKIP row.
+          pid_oauth=""
+          if [ "${OAUTH}" = "true" ]; then
+            python -m eval.runner --auth oauth "${args[@]}" \
+              --output "results/eval-oauth.json" \
+              --summary-row "results/rows/7-admin-oauth.json" \
+              --suite-label "admin · OAuth" \
+              --advisory > oauth.log 2>&1 &
+            pid_oauth=$!
+          fi
+
           # `|| rc=$?`, not `wait; rc=$?`. GitHub runs this with `bash -e`, which
           # the script's own `set -uo pipefail` does not undo, and a failing
           # `wait` is a simple command — so the shell exited *at the wait* the
@@ -1223,6 +1275,8 @@ jobs:
           rc_coreprompt=0; wait "${pid_coreprompt}" || rc_coreprompt=$?
           rc_preloaded=0
           if [ -n "${pid_preloaded}" ]; then wait "${pid_preloaded}" || rc_preloaded=$?; fi
+          rc_oauth=0
+          if [ -n "${pid_oauth}" ]; then wait "${pid_oauth}" || rc_oauth=$?; fi
 
           echo "::group::admin · primary (exit ${rc_primary})"
           cat primary.log
@@ -1239,6 +1293,11 @@ jobs:
           if [ -n "${pid_preloaded}" ]; then
             echo "::group::admin · preloaded ?toolsets=all (advisory, exit ${rc_preloaded})"
             cat preloaded.log
+            echo "::endgroup::"
+          fi
+          if [ -n "${pid_oauth}" ]; then
+            echo "::group::admin · OAuth (advisory, exit ${rc_oauth})"
+            cat oauth.log
             echo "::endgroup::"
           fi
 
@@ -1264,6 +1323,14 @@ jobs:
           if [ "${rc_noprompt}" -eq 3 ]; then crashed+=("admin · no context prompt"); fi
           if [ "${rc_coreprompt}" -eq 3 ]; then crashed+=("admin · core prompt only"); fi
           if [ "${rc_preloaded}" -eq 3 ]; then crashed+=("admin · preloaded"); fi
+          # A failed OAuth sign-in on a lane that advertises OAuth is exit 3 too.
+          if [ "${rc_oauth}" -eq 3 ]; then crashed+=("admin · OAuth"); fi
+          # Exit 4 is a skip, and it must be visible: the runner's warning naming
+          # the cause plus a SKIP row, never an arm that silently graded nothing.
+          # A skip that left no row is treated as the crash it is.
+          if [ "${rc_oauth}" -eq 4 ] && [ ! -s results/rows/7-admin-oauth.json ]; then
+            crashed+=("admin · OAuth (skipped without a summary row)")
+          fi
           if [ "${#crashed[@]}" -gt 0 ]; then
             listed=$(printf '%s; ' "${crashed[@]}")
             echo "::error::eval run(s) crashed before producing a verdict: ${listed%; } (see the logs above)."
@@ -1458,11 +1525,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 3. One render, after everything. `!cancelled()` rather than `success()`: a
-  # failed eval is exactly when the summary is worth reading.
+  # failed eval is exactly when the summary is worth reading. `revisions` is
+  # waited for so its lanes are in the functional table; `next-major` is not.
   # ---------------------------------------------------------------------------
   report:
     name: Report
-    needs: [static, session-store, admin-eval, store-eval]
+    needs: [static, session-store, revisions, admin-eval, store-eval]
     if: ${{ !cancelled() && needs.static.result != 'skipped' }}
     runs-on: ubuntu-24.04
     # 25, not 15: the reconciliation waits up to 10 minutes for the PR's lint.
@@ -1490,6 +1558,18 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+        continue-on-error: true
+
+      # The lane table's input, kept apart from the merged results/: there two
+      # lanes finishing in the same second overwrite each other's timestamped
+      # report, and static's reports arrive twice more inside the eval jobs'
+      # artifacts. One directory per lane, functional-<lane>. next-major's is
+      # here only if that job uploaded it before this step ran.
+      - name: Download functional reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: functional-*
+          path: functional-reports
         continue-on-error: true
 
       - name: Collect results
@@ -1550,6 +1630,12 @@ jobs:
       # visible; the read paths inside summary.py are the defensive part.
       - name: Write job summary
         if: ${{ !cancelled() && needs.admin-eval.result != 'skipped' }}
+        env:
+          # Whether next-major was started: the same condition as its own `if`.
+          NEXT_MAJOR: >-
+            ${{ github.event_name == 'schedule'
+                || github.event.inputs.next_major == 'true'
+                || contains(github.event.pull_request.labels.*.name, 'run-next-major') }}
         run: |
           # --reports names this job's three reports explicitly. It must not
           # become a glob over results/: that directory is committed and holds
@@ -1566,7 +1652,17 @@ jobs:
           # comment step the same document without rendering it twice. A redirect
           # also keeps python's own exit status, which `| tee` would replace with
           # tee's.
+          #
+          # --functional-lanes are the lanes this run started, so one that wrote
+          # no report keeps its row. The two revisions are the `revisions`
+          # matrix. next-major is not waited for, so --functional-unawaited
+          # makes its missing report read "not finished" rather than "no report".
+          lanes=(default 2024-11-05 2025-06-18 redis)
+          if [ "${NEXT_MAJOR}" = "true" ]; then lanes+=(6.8); fi
           python -m eval.summary \
+            --functional "functional-reports" \
+            --functional-lanes "${lanes[@]}" \
+            --functional-unawaited 6.8 \
             --rows "results/rows" \
             --comparison "results/eval-comparison.json" \
             --tools "tool-history/latest.json" \

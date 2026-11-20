@@ -264,7 +264,7 @@ def verify_delete(rep: Reporter, endpoint: Endpoint) -> None:
     """A stateless client never sends DELETE. A server that serves both eras
     reads one without a session id as a handshake request, which those
     revisions answer with 400 (the ADR, as amended for dual-era serving)."""
-    status = requests.delete(endpoint.url, headers=endpoint.auth_headers, timeout=30).status_code
+    status = requests.delete(endpoint.url, headers=endpoint.request_headers(), timeout=30).status_code
     _report(
         rep,
         f"stateless: DELETE without a session answers 400 ({endpoint.name})",

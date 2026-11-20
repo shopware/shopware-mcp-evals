@@ -106,6 +106,16 @@ SW_SECRET_ACCESS_KEY = os.environ.get("SW_SECRET_ACCESS_KEY", "")
 SW_SC_ACCESS_KEY = os.environ.get("SW_SC_ACCESS_KEY", "")
 
 
+class BearerSource(Protocol):
+    """Where an endpoint authenticated over OAuth gets its Authorization header.
+
+    Asked on every request rather than once, because an access token expires
+    during a run and the source refreshes it (`eval/oauth_login.BearerToken`).
+    """
+
+    def headers(self) -> dict[str, str]: ...
+
+
 class Endpoint:
     """An MCP HTTP endpoint: its URL plus the base auth headers to send.
 
@@ -129,6 +139,10 @@ class Endpoint:
     than on the call for the same reason as `toolsets`: it is fixed for the
     lifetime of a connection, and a clone with another one must keep the
     credentials (see `with_toolsets`).
+
+    `bearer` replaces the access key with an OAuth token (`with_bearer`). The
+    clones keep it, so every session of a run uses the same token and refreshes
+    it in one place.
     """
 
     def __init__(
@@ -162,6 +176,7 @@ class Endpoint:
         )
         self.url: str = f"{self.base_url}{path}{query}"
         self.auth_headers: dict[str, str] = {"Content-Type": "application/json", **auth_headers}
+        self.bearer: BearerSource | None = None
 
     def with_toolsets(self, *names: str) -> "Endpoint":
         """The same endpoint and credentials, with these toolsets pinned on the URL.
@@ -173,13 +188,34 @@ class Endpoint:
         """
         clone = Endpoint(self.name, self.path, {}, self.base_url, names, self.protocol_version)
         clone.auth_headers = dict(self.auth_headers)
+        clone.bearer = self.bearer
         return clone
 
     def with_protocol(self, version: str) -> "Endpoint":
         """The same endpoint, credentials and pinned toolsets, negotiating `version`."""
         clone = Endpoint(self.name, self.path, {}, self.base_url, self.toolsets, version)
         clone.auth_headers = dict(self.auth_headers)
+        clone.bearer = self.bearer
         return clone
+
+    def with_bearer(self, bearer: BearerSource) -> "Endpoint":
+        """The same endpoint, authenticated with an OAuth token instead of an access key.
+
+        The key headers are dropped rather than sent alongside: a request that
+        carries both would leave open which of the two the server accepted.
+        """
+        clone = self.with_protocol(self.protocol_version)
+        clone.auth_headers = {
+            k: v for k, v in self.auth_headers.items() if k not in ("sw-access-key", "sw-secret-access-key")
+        }
+        clone.bearer = bearer
+        return clone
+
+    def request_headers(self) -> dict[str, str]:
+        """The auth headers for one request, with a current token when there is one."""
+        if self.bearer is None:
+            return dict(self.auth_headers)
+        return {**self.auth_headers, **self.bearer.headers()}
 
     def session_headers(self, session_id: str) -> dict[str, str]:
         """What every request after initialize carries besides the auth headers."""
@@ -319,7 +355,7 @@ def _rpc(
     endpoint: Endpoint = ADMIN,
     extra_headers: dict[str, str] | None = None,
 ) -> requests.Response:
-    headers = {**endpoint.auth_headers, **(extra_headers or {})}
+    headers = {**endpoint.request_headers(), **(extra_headers or {})}
     # Streamable HTTP requires the client to accept both reply shapes; the server
     # answers application/json for a lone response and text/event-stream when it
     # also has to push a notification (e.g. tools/list_changed after an enable).
@@ -474,7 +510,7 @@ def mcp_close(session_id: str, endpoint: Endpoint = ADMIN) -> int:
     """End a session with `DELETE`, as the Streamable HTTP transport defines it.
     Returns the HTTP status rather than raising: what a refused close looks like
     is the caller's question, not a transport failure."""
-    headers = {**endpoint.auth_headers, **endpoint.session_headers(session_id)}
+    headers = {**endpoint.request_headers(), **endpoint.session_headers(session_id)}
     return requests.delete(endpoint.url, headers=headers, timeout=30).status_code
 
 
@@ -549,7 +585,7 @@ def mcp_stateless(method: str, params: JsonObject | None = None, endpoint: Endpo
     """One request on the stateless revision. Never raises on an HTTP error:
     refusals are what several checks read, so the status is part of the reply."""
     headers, body = stateless_request(method, params or {})
-    headers = {**endpoint.auth_headers, **ucp.call_headers(str((params or {}).get("name", ""))), **headers}
+    headers = {**endpoint.request_headers(), **ucp.call_headers(str((params or {}).get("name", ""))), **headers}
     resp: requests.Response | None = None
     for attempt in range(THROTTLE_MAX_RETRIES + 1):
         resp = requests.post(endpoint.url, headers=headers, json=body, timeout=60)  # pyright: ignore[reportArgumentType]
@@ -621,7 +657,7 @@ def mcp_listen(
     after `timeout_s`.
     """
     headers, body = stateless_request("subscriptions/listen", {"notifications": notifications}, rpc_id=1)
-    headers = {**endpoint.auth_headers, **headers}
+    headers = {**endpoint.request_headers(), **headers}
     frames: list[ListenFrame] = []
     started = time.monotonic()
     with requests.post(

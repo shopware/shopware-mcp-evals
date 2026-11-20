@@ -207,6 +207,29 @@ def test_the_report_filename_names_the_endpoint(monkeypatch: pytest.MonkeyPatch,
     assert list((tmp_path / "results").glob("functional-store-*.json"))
 
 
+def test_the_report_records_the_lane_it_was_told_and_its_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The job summary groups by these, so they are fields, not a filename to parse."""
+    run(monkeypatch, "--endpoint", "store", "--lane", "2025-06-18", "--protocol-version", "2025-06-18")
+
+    report = report_of(tmp_path)
+    assert (report["lane"], report["endpoint"], report["protocol_version"]) == ("2025-06-18", "store", "2025-06-18")
+
+
+def test_without_a_lane_the_report_claims_none(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Not derived from the revision: 6.8 and Redis run at the default revision too."""
+    run(monkeypatch, "--protocol-version", "2024-11-05")
+
+    report = report_of(tmp_path)
+    assert "lane" not in report and report["endpoint"] == "admin"
+
+
+def test_an_unknown_lane_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(SystemExit):
+        run(monkeypatch, "--lane", "staging")
+
+
 # ---------------------------------------------------------------------------
 # Annotations and --advisory
 # ---------------------------------------------------------------------------
